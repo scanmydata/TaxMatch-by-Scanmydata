@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Νέος πελάτης — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Νέος πελάτης</h1>
+  <div class="sub">Πληκτρολογήστε τον ΑΦΜ — η επωνυμία, τα ΚΑΔ, η νομική μορφή και το καθεστώς ΦΠΑ ανακτώνται αυτόματα.</div></div></div>
+<div class="card" style="max-width:640px">
+  <form method="post">
+    <div class="form-grid">
+      <div><label for="afm">ΑΦΜ *</label><input id="afm" name="afm" type="text" inputmode="numeric" maxlength="14" required autofocus value="{{ form.get('afm', '') }}" placeholder="9 ψηφία"></div>
+      <div><label for="name">Επωνυμία (προαιρετικά)</label><input id="name" name="name" type="text" value="{{ form.get('name', '') }}"></div>
+    </div>
+    <div style="margin-top:16px; display:flex; gap:8px">
+      <button class="btn primary">Προσθήκη &amp; ανάκτηση στοιχείων</button>
+      <a class="btn" href="{{ url_for('main.clients_list') }}">Άκυρο</a>
+    </div>
+    <p class="muted small" style="margin-bottom:0">Η ανάκτηση απαιτεί API key Business Portal (ΓΕΜΗ) και/ή credentials TAXISnet στις <a href="{{ url_for('main.settings') }}">Ρυθμίσεις</a>. Χωρίς αυτά ο πελάτης προστίθεται και τα στοιχεία συμπληρώνονται χειροκίνητα.</p>
+  </form>
+</div>
+{% endblock %}

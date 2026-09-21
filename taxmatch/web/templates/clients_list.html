@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_macros.html" import empty %}
+{% block title %}Πελάτες — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div><h1>Πελάτες</h1><div class="sub">{{ total }} συνολικά{% if rows|length != total %} · εμφανίζονται {{ rows|length }}{% endif %}</div></div>
+  <span class="right" style="display:flex; gap:8px">
+    <form method="post" action="{{ url_for('main.clients_enrich') }}" class="inline-form"><button class="btn" title="Ανάκτηση στοιχείων από ΓΕΜΗ/ΑΑΔΕ για όσους περιμένουν">⟳ Εμπλουτισμός στοιχείων</button></form>
+    <a class="btn" href="{{ url_for('main.clients_import') }}">⬆ Εισαγωγή από Excel</a>
+    <a class="btn primary" href="{{ url_for('main.clients_new') }}">＋ Νέος πελάτης</a>
+  </span>
+</div>
+
+<form class="filters" method="get">
+  <input type="search" name="q" value="{{ q }}" placeholder="Αναζήτηση ΑΦΜ ή επωνυμίας…" style="width:260px">
+  <input type="text" name="kad" value="{{ kad }}" placeholder="ΚΑΔ (π.χ. 47.11)" style="width:150px">
+  <select name="books">
+    <option value="">Κατηγορία βιβλίων: όλες</option>
+    <option value="Β" {{ 'selected' if books == 'Β' }}>Β</option><option value="Γ" {{ 'selected' if books == 'Γ' }}>Γ</option>
+  </select>
+  <select name="status">
+    <option value="">Κατάσταση στοιχείων: όλες</option>
+    {% for v, l in [('ok','Πλήρη'),('partial','Μερικά'),('pending','Σε αναμονή'),('failed','Αποτυχία')] %}
+    <option value="{{ v }}" {{ 'selected' if status == v }}>{{ l }}</option>{% endfor %}
+  </select>
+  <button class="btn">Φίλτρο</button>
+  {% if q or kad or books or status %}<a href="{{ url_for('main.clients_list') }}" class="btn">Καθαρισμός</a>{% endif %}
+</form>
+
+<div class="card" style="padding:0">
+{% if rows %}
+<table class="grid">
+  <thead><tr><th>ΑΦΜ</th><th>Επωνυμία</th><th>Νομική μορφή</th><th>Κύριος ΚΑΔ</th><th>Βιβλία</th><th>ΦΠΑ</th><th>Στοιχεία</th><th class="num">Matches</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td class="nowrap"><a href="{{ url_for('main.client_detail', afm=r.afm) }}">{{ r.afm }}</a></td>
+      <td>{{ r.name or '—' }}</td>
+      <td>{{ r.legal_form or '—' }}</td>
+      <td>{% if r.kad_main_code %}<span class="nowrap">{{ r.kad_main_code }}</span> <span class="muted small">{{ r.kad_main_desc[:38] }}</span>{% else %}<span class="muted">—</span>{% endif %}
+        {% if r.kad_count > 1 %}<span class="chip">+{{ r.kad_count - 1 }}</span>{% endif %}</td>
+      <td>{{ r.books_category or '—' }}</td>
+      <td>{% if r.vat_subject == 1 %}Υπόχρεος{% elif r.vat_subject == 0 %}Όχι{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% set st = r.lookup_status %}
+        <span class="chip {{ {'ok':'ok','partial':'warn','failed':'danger','pending':'info'}.get(st, '') }}" {% if r.lookup_error %}title="{{ r.lookup_error }}"{% endif %}>
+          {{ {'ok':'πλήρη','partial':'μερικά','failed':'αποτυχία','pending':'αναμονή','manual':'χειροκίνητα'}.get(st, st) }}</span></td>
+      <td class="num">{{ match_counts.get(r.afm, 0) or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  {{ empty('Δεν βρέθηκαν πελάτες.', 'Εισάγετε πελάτες από Excel ή προσθέστε έναν με τον ΑΦΜ του.') }}
+{% endif %}
+</div>
+{% endblock %}

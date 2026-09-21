@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% from "_macros.html" import article_card, match_row, due_badge, empty, run_button, feedback %}
+{% block title %}Αρχική — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div><h1>Σημερινό ενημερωτικό</h1>
+    <div class="sub">
+      {% if run %}Τελευταίος έλεγχος: {{ run.finished_at|datetime_el if run.finished_at else 'σε εξέλιξη' }}
+        {% if run.trigger == 'scheduled' %}(προγραμματισμένος){% endif %}
+      {% else %}Δεν έχει γίνει έλεγχος ακόμη.{% endif %}
+    </div>
+  </div>
+  <span class="right">{{ run_button() }}</span>
+</div>
+
+{% for level, msg, href, label in alerts %}
+  <div class="alert {{ level }}"><span>{{ msg }}</span>{% if href %}<a href="{{ href }}">{{ label }} →</a>{% endif %}</div>
+{% endfor %}
+
+<div class="kpis">
+  <div class="kpi"><b>{{ kpi.clients }}</b><span>πελάτες</span></div>
+  <div class="kpi"><b>{{ kpi.articles }}</b><span>άρθρα (τελευταίες {{ days }} ημ.)</span></div>
+  <div class="kpi"><b>{{ kpi.matched_articles }}</b><span>άρθρα που αφορούν πελάτες</span></div>
+  <div class="kpi {{ 'hot' if kpi.urgent }}"><b>{{ kpi.urgent }}</b><span>προθεσμίες ≤ 7 ημερών</span></div>
+</div>
+
+<div class="grid-2">
+  <section>
+    <div class="tabs-row">
+      <div class="seg">
+        <a href="?days={{ days }}&view=articles" class="{{ 'on' if view == 'articles' }}">Ανά άρθρο</a>
+        <a href="?days={{ days }}&view=clients" class="{{ 'on' if view == 'clients' }}">Ανά πελάτη</a>
+      </div>
+      <div class="seg right">
+        {% for d in day_choices %}<a href="?days={{ d }}&view={{ view }}" class="{{ 'on' if d == days }}">{{ d }}ημ.</a>{% endfor %}
+      </div>
+    </div>
+
+    {% if view == 'articles' %}
+      {% for g in groups %}{{ article_card(g, kpi.clients) }}
+      {% else %}
+        <div class="card">{{ empty('Κανένα άρθρο δεν αφορά τους πελάτες σας για αυτό το διάστημα.',
+             'Πατήστε «Έλεγξε τώρα» ή διευρύνετε το διάστημα.' if kpi.clients else 'Ξεκινήστε προσθέτοντας πελάτες.') }}</div>
+      {% endfor %}
+    {% else %}
+      {% for c in by_client %}
+        <div class="card">
+          <div class="tabs-row" style="margin:0 0 6px"><h3><a href="{{ url_for('main.client_detail', afm=c.afm) }}">{{ c.name or c.afm }}</a></h3>
+            <span class="chip">{{ c['items']|length }} θέματα</span><span class="muted small">ΑΦΜ {{ c.afm }}</span></div>
+          {% for m in c['items'] %}
+            <div class="match-row">
+              <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener">{{ m.title }}</a>
+                <div class="muted small">{{ m.matched_reason }}</div></span>
+              {{ due_badge(m.deadline) }}
+              {% if m.confidence < 1 %}<span class="chip warn">να επιβεβαιωθεί</span>{% endif %}
+              {{ feedback(m) }}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="card">{{ empty('Δεν υπάρχουν matches για αυτό το διάστημα.') }}</div>
+      {% endfor %}
+    {% endif %}
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>Προσεχείς προθεσμίες</h2>
+      {% if upcoming %}
+      <ul class="upcoming">
+        {% for ev in upcoming %}
+        <li>
+          <div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a></div>
+          <div>{{ due_badge(ev.date) }}
+            {% if ev.kind == 'news' %}<span class="chip info">{{ ev.n_clients }} πελάτες</span>{% else %}<span class="chip">γενικό</span>{% endif %}</div>
+        </li>
+        {% endfor %}
+      </ul>
+      <div style="margin-top:8px"><a href="{{ url_for('main.calendar_view') }}">Πλήρες ημερολόγιο →</a></div>
+      {% else %}<div class="muted">Δεν υπάρχουν καταχωρημένες προθεσμίες. Πατήστε «Έλεγξε τώρα».</div>{% endif %}
+    </div>
+    {% if pending %}
+    <div class="card"><b>{{ pending }}</b> άρθρα περιμένουν ανάλυση LLM.
+      <div class="muted small">Θα αναλυθούν στον επόμενο έλεγχο.</div></div>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}

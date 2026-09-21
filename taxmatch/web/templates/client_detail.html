@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% from "_macros.html" import due_badge, feedback, empty %}
+{% block title %}{{ b.name or b.afm }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div><h1>{{ b.name or 'Χωρίς επωνυμία' }}</h1>
+    <div class="sub">ΑΦΜ {{ b.afm }}{% if b.doy %} · ΔΟΥ {{ b.doy }}{% endif %}{% if b.ar_gemi %} · ΓΕΜΗ {{ b.ar_gemi }}{% endif %}</div></div>
+  <span class="right" style="display:flex; gap:8px">
+    <form method="post" action="{{ url_for('main.client_lookup', afm=b.afm) }}" class="inline-form"><button class="btn">⟳ Ανανέωση από ΓΕΜΗ/ΑΑΔΕ</button></form>
+    <form method="post" action="{{ url_for('main.client_delete', afm=b.afm) }}" class="inline-form" data-confirm="Διαγραφή του πελάτη και των matches του;"><button class="btn danger">Διαγραφή</button></form>
+  </span>
+</div>
+
+{% if b.lookup_status in ('failed', 'partial', 'pending') and b.lookup_error %}
+<div class="alert {{ 'danger' if b.lookup_status == 'failed' else 'warn' }}">Ανάκτηση στοιχείων: {{ b.lookup_error }}</div>
+{% elif b.lookup_status == 'pending' %}
+<div class="alert info">Τα στοιχεία περιμένουν ανάκτηση. Συμπληρώστε τα χειροκίνητα ή ρυθμίστε ΓΕΜΗ/ΑΑΔΕ στις Ρυθμίσεις.</div>
+{% endif %}
+
+<div class="grid-2">
+  <section>
+    <form method="post" action="{{ url_for('main.client_edit', afm=b.afm) }}" class="card">
+      <h2>Προφίλ</h2>
+      <div class="form-grid">
+        <div class="full"><label>Επωνυμία</label><input type="text" name="name" value="{{ b.name }}"></div>
+        <div><label>Νομική μορφή</label><input type="text" name="legal_form" value="{{ b.legal_form }}"></div>
+        <div><label>ΔΟΥ</label><input type="text" name="doy" value="{{ b.doy }}"></div>
+        <div class="full"><label>Διεύθυνση έδρας</label><input type="text" name="address" value="{{ b.address }}"></div>
+        <div><label>Κατηγορία βιβλίων</label>
+          <select name="books_category"><option value="">— άγνωστη —</option>
+            <option value="Β" {{ 'selected' if b.books_category == 'Β' }}>Β (απλογραφικά)</option>
+            <option value="Γ" {{ 'selected' if b.books_category == 'Γ' }}>Γ (διπλογραφικά)</option></select></div>
+        <div><label>Καθεστώς ΦΠΑ</label>
+          <select name="vat_subject"><option value="">— άγνωστο —</option>
+            <option value="1" {{ 'selected' if b.vat_subject == 1 }}>Υπόχρεος ΦΠΑ</option>
+            <option value="0" {{ 'selected' if b.vat_subject == 0 }}>Μη υπόχρεος / απαλλασσόμενος</option></select></div>
+        <div><label>Περίοδος ΦΠΑ</label>
+          <select name="vat_period_type"><option value="">—</option>
+            <option value="monthly" {{ 'selected' if b.vat_period_type == 'monthly' }}>Μηνιαία</option>
+            <option value="quarterly" {{ 'selected' if b.vat_period_type == 'quarterly' }}>Τριμηνιαία</option></select></div>
+        <div><label>Κατάσταση</label><input type="text" name="status" value="{{ b.status }}"></div>
+        <div class="full">
+          <label>ΚΑΔ (ένας ανά γραμμή: «κωδικός περιγραφή» — ο πρώτος είναι ο κύριος)</label>
+          <textarea name="kads" rows="5" placeholder="47.11.10.01 Λιανικό εμπόριο…">{% for k in b.kads %}{{ k.code }}{{ ' ' ~ k.descr if k.descr }}
+{% endfor %}</textarea>
+        </div>
+        <div class="full"><label>Σημειώσεις</label><textarea name="notes" rows="3" style="font-family:inherit">{{ b.notes }}</textarea></div>
+      </div>
+      <div style="margin-top:14px"><button class="btn primary">Αποθήκευση</button>
+        <span class="muted small" style="margin-left:8px">Τα matches ξαναϋπολογίζονται μετά την αποθήκευση.</span></div>
+    </form>
+
+    {% if has_raw %}
+    <details class="card"><summary style="cursor:pointer; font-weight:600">Ωμά δεδομένα ανάκτησης (για διάγνωση)</summary>
+      <p class="muted small">Ό,τι επέστρεψαν το ΓΕΜΗ/η ΑΑΔΕ· χρήσιμο αν κάποιο πεδίο δεν αναγνωρίστηκε σωστά.</p>
+      <pre class="raw">{{ b.lookup_raw }}</pre></details>
+    {% endif %}
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>Στοιχεία</h2>
+      <dl class="kv">
+        <dt>Κύριος ΚΑΔ</dt><dd>{% if b.kad_main_code %}{{ b.kad_main_code }}<div class="muted small">{{ b.kad_main_desc }}</div>{% else %}—{% endif %}</dd>
+        <dt>Ενεργοί ΚΑΔ</dt><dd>{{ b.kads|length }}</dd>
+        <dt>Πηγή</dt><dd>{{ {'manual':'χειροκίνητα','excel':'Excel','lookup':'ανάκτηση'}.get(b.source, b.source) }}</dd>
+        <dt>Τελευταία ανάκτηση</dt><dd>{{ b.lookup_at|datetime_el }}</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <h2>Προσεχείς προθεσμίες</h2>
+      {% if events %}<ul class="upcoming">{% for ev in events[:10] %}
+        <li><div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a></div><div>{{ due_badge(ev.date) }}</div></li>
+      {% endfor %}</ul>
+      <a href="{{ url_for('main.calendar_view', afm=b.afm) }}">Ημερολόγιο πελάτη →</a>
+      {% else %}<div class="muted">Καμία προσεχής προθεσμία.</div>{% endif %}
+    </div>
+  </aside>
+</div>
+
+<div class="card" style="margin-top:18px">
+  <h2>Νέα που αφορούν τον πελάτη (90 ημέρες)</h2>
+  {% for m in matches %}
+    <div class="match-row">
+      <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener">{{ m.title }}</a>
+        <div class="muted small">{{ m.published_at|date_el }} · {{ m.matched_reason }}</div>
+        {% if m.action_required %}<div class="small" style="color:var(--accent); font-weight:600">➜ {{ m.action_required }}</div>{% endif %}</span>
+      {{ due_badge(m.deadline) }}
+      {% if m.confidence < 1 %}<span class="chip warn">να επιβεβαιωθεί</span>{% endif %}
+      {{ feedback(m) }}
+    </div>
+  {% else %}{{ empty('Κανένα άρθρο δεν έχει ταιριάξει ακόμη.') }}{% endfor %}
+</div>
+{% endblock %}

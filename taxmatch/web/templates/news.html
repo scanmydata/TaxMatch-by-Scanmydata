@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "_macros.html" import due_badge, match_row, empty, run_button %}
+{% block title %}Νέα &amp; Matches — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div><h1>Νέα &amp; Matches</h1><div class="sub">Όλα τα εισερχόμενα άρθρα και ποιους πελάτες αφορούν — και γιατί.</div></div>
+  <span class="right">{{ run_button() }}</span>
+</div>
+
+<form class="filters" method="get">
+  <div class="seg">
+    {% for v, l in [('matched','Που αφορούν πελάτες'),('all','Όλα'),('irrelevant','Άσχετα'),('pending','Σε αναμονή ανάλυσης')] %}
+    <a href="?only={{ v }}&days={{ days }}&source={{ src }}&q={{ q }}" class="{{ 'on' if only == v }}">{{ l }}</a>{% endfor %}
+  </div>
+  <select name="source" onchange="this.form.submit()">
+    <option value="">Όλες οι πηγές</option>
+    {% for s in sources if s.kind == 'news' %}<option value="{{ s.id }}" {{ 'selected' if src == s.id }}>{{ s.name }}</option>{% endfor %}
+  </select>
+  <select name="days" onchange="this.form.submit()">{% for d in day_choices %}<option value="{{ d }}" {{ 'selected' if d == days }}>{{ d }} ημέρες</option>{% endfor %}</select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Αναζήτηση στον τίτλο…" style="width:220px">
+  <input type="hidden" name="only" value="{{ only }}">
+  <button class="btn">Αναζήτηση</button>
+</form>
+
+{% for a in arts %}
+<article class="article">
+  <div class="meta">
+    {% if a.topic and a.topic != 'ΑΛΛΟ' %}<span class="chip info">{{ a.topic }}</span>{% endif %}
+    <span>{{ a.source|source_name }}</span><span>·</span><span>{{ a.published_at|date_el }}</span>
+    {% set st = a.extraction_status %}
+    {% if st == 'pending' %}<span class="chip">σε αναμονή ανάλυσης</span>
+    {% elif st == 'failed' %}<span class="chip danger" title="{{ a.extraction_error }}">αποτυχία ανάλυσης</span>
+    {% elif st == 'irrelevant' %}<span class="chip">άσχετο</span>{% endif %}
+    {% if a.scope and a.scope.type == 'targeted' %}<span class="chip warn" title="Στοχευμένο scope">
+      {% if a.scope.kad_prefixes %}ΚΑΔ {{ a.scope.kad_prefixes|join(', ') }} {% endif %}{% if a.scope.books_categories %}Βιβλία {{ a.scope.books_categories|join('/') }} {% endif %}{% if a.scope.legal_forms %}{{ a.scope.legal_forms|join('/') }}{% endif %}</span>
+    {% elif a.scope and a.scope.type == 'all' and st == 'done' %}<span class="chip ok">για όλους</span>{% endif %}
+    <span class="right">{{ due_badge(a.deadline) }}</span>
+  </div>
+  <h3><a class="ext" href="{{ a.url }}" target="_blank" rel="noopener">{{ a.title }}</a></h3>
+  {% if a.summary %}<div class="summary">{{ a.summary }}</div>{% endif %}
+  {% if a.action_required %}<div class="action">➜ {{ a.action_required }}</div>{% endif %}
+  {% if a.matches %}
+  <details class="matches"><summary>Αφορά {{ a.matches|length }} {{ 'πελάτη' if a.matches|length == 1 else 'πελάτες' }}</summary>
+    <div class="match-list">{% for m in a.matches %}{{ match_row(m) }}{% endfor %}</div></details>
+  {% endif %}
+</article>
+{% else %}
+<div class="card">{{ empty('Δεν βρέθηκαν άρθρα.', 'Δοκιμάστε «Όλα» ή διευρύνετε το διάστημα.') }}</div>
+{% endfor %}
+{% endblock %}

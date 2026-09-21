@@ -1,0 +1,46 @@
+{% macro due_badge(iso) -%}
+  {%- if iso %}{% set d = iso|due %}<span class="due {{ d.cls }}" title="Προθεσμία">⏰ {{ iso|date_el }} · {{ d.label }}</span>{% endif -%}
+{%- endmacro %}
+
+{% macro feedback(m) -%}
+  <span class="fb" data-match="{{ m.match_id }}" data-value="{{ m.user_feedback or 0 }}">
+    <button type="button" class="fb-btn up {{ 'on' if m.user_feedback == 1 }}" data-v="1" title="Σωστό match">👍</button>
+    <button type="button" class="fb-btn down {{ 'on' if m.user_feedback == -1 }}" data-v="-1" title="Λάθος match">👎</button>
+  </span>
+{%- endmacro %}
+
+{% macro match_row(m) -%}
+  <div class="match-row">
+    <a class="who" href="{{ url_for('main.client_detail', afm=m.afm) }}">{{ m.business_name or m.name or m.afm }}</a>
+    <span class="why">{{ m.matched_reason }}</span>
+    {% if m.confidence < 1 %}<span class="chip warn" title="Λείπουν στοιχεία στο προφίλ του πελάτη">να επιβεβαιωθεί</span>{% endif %}
+    {{ feedback(m) }}
+  </div>
+{%- endmacro %}
+
+{% macro article_card(g, total_clients=None) -%}
+  <article class="article">
+    <div class="meta">
+      {% if g.topic and g.topic != 'ΑΛΛΟ' %}<span class="chip info">{{ g.topic }}</span>{% endif %}
+      <span>{{ g.source|source_name }}</span><span>·</span><span>{{ g.published_at|date_el }}</span>
+      <span class="right">{{ due_badge(g.deadline) }}</span>
+    </div>
+    <h3><a class="ext" href="{{ g.url }}" target="_blank" rel="noopener">{{ g.title }}</a></h3>
+    {% if g.summary %}<div class="summary">{{ g.summary }}</div>{% endif %}
+    {% if g.action_required %}<div class="action">➜ {{ g.action_required }}</div>{% endif %}
+    {% if g.matches %}
+    <details class="matches">
+      <summary>{% if total_clients and g.n_matches == total_clients %}Αφορά όλους τους {{ g.n_matches }} πελάτες{% else %}Αφορά {{ g.n_matches }} {{ 'πελάτη' if g.n_matches == 1 else 'πελάτες' }}{% endif %}{% if g.n_uncertain %} · <span class="muted">{{ g.n_uncertain }} προς επιβεβαίωση</span>{% endif %}</summary>
+      <div class="match-list">{% for m in g.matches %}{{ match_row(m) }}{% endfor %}</div>
+    </details>
+    {% endif %}
+  </article>
+{%- endmacro %}
+
+{% macro empty(text, sub='') -%}
+  <div class="empty"><img src="{{ url_for('static', filename='img/logo-192.png') }}" alt=""><div><b>{{ text }}</b></div>{% if sub %}<div class="small">{{ sub }}</div>{% endif %}</div>
+{%- endmacro %}
+
+{% macro run_button(label='Έλεγξε τώρα') -%}
+  <button type="button" class="btn primary" data-run-check>⟳ {{ label }}</button>
+{%- endmacro %}

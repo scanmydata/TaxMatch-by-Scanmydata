@@ -1,0 +1,26 @@
+# Secrets — ΠΟΤΕ στο repo
+.env
+.enckey
+*.enckey
+credentials*.json
+
+# Local data
+data/*.db
+data/*.db-*
+data/logs/
+data/webview/
+*.sqlite
+*.sqlite3
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Build output
+build/
+dist/
+Output/
+installer-output/

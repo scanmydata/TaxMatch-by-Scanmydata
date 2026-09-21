@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Ρυθμίσεις — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Ρυθμίσεις</h1><div class="sub">Τα credentials αποθηκεύονται κρυπτογραφημένα και δεν εμφανίζονται ξανά.</div></div></div>
+
+{% macro secret_field(key, label, hint='', type='password') %}
+  <div>
+    <label for="{{ key }}">{{ label }}
+      {% if secrets_state[key] %}<span class="chip ok">ορισμένο{{ ' (από .env)' if from_env[key] }}</span>{% else %}<span class="chip">κενό</span>{% endif %}</label>
+    <input id="{{ key }}" name="{{ key }}" type="{{ type }}" autocomplete="off" placeholder="{{ '•••••••• (αφήστε κενό για να μείνει ως έχει)' if secrets_state[key] else hint }}" style="width:100%">
+    {% if secrets_state[key] and not from_env[key] %}<label style="font-weight:500; margin-top:4px"><input type="checkbox" name="clear_{{ key }}" value="1"> διαγραφή</label>{% endif %}
+  </div>
+{% endmacro %}
+
+<div class="grid-2" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr)">
+<div>
+  <form method="post" class="card">
+    <input type="hidden" name="section" value="keys">
+    <h2>Κλειδιά &amp; credentials</h2>
+    <div class="form-grid">
+      <div class="full">{{ secret_field('groq_api_key', 'Groq API key', 'gsk_…') }}</div>
+      <div class="full">{{ secret_field('openrouter_api_key', 'OpenRouter API key', 'sk-or-…') }}</div>
+      <div class="full">{{ secret_field('business_portal_key', 'Business Portal (ΓΕΜΗ) API key', 'για αυτόματο lookup ΚΑΔ/νομικής μορφής') }}</div>
+      <div>{{ secret_field('aade_user', 'TAXISnet χρήστης', '', 'text') }}</div>
+      <div>{{ secret_field('aade_pass', 'TAXISnet κωδικός') }}</div>
+    </div>
+    <p class="muted small">Οι κωδικοί TAXISnet χρησιμοποιούνται μόνο για ανάκτηση ΔΟΥ, καθεστώτος ΦΠΑ και κατηγορίας βιβλίων από το Μητρώο ΑΑΔΕ και δεν φεύγουν ποτέ προς άλλον προορισμό.</p>
+    <div style="display:flex; gap:8px; flex-wrap:wrap"><button class="btn primary">Αποθήκευση</button></div>
+  </form>
+  <div class="card" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+    <b>Έλεγχος σύνδεσης:</b>
+    <form method="post" action="{{ url_for('main.test_llm') }}" class="inline-form"><button class="btn small">LLM</button></form>
+    <form method="post" action="{{ url_for('main.test_aade') }}" class="inline-form"><button class="btn small">ΑΑΔΕ (TAXISnet)</button></form>
+  </div>
+
+  <form method="post" class="card">
+    <input type="hidden" name="section" value="llm">
+    <h2>Ανάλυση άρθρων (LLM)</h2>
+    <div class="form-grid">
+      <div><label>Πάροχος</label>
+        <select name="llm_provider"><option value="groq" {{ 'selected' if values.llm_provider == 'groq' }}>Groq</option>
+          <option value="openrouter" {{ 'selected' if values.llm_provider == 'openrouter' }}>OpenRouter</option></select></div>
+      <div><label>Ημέρες αναδρομής</label><input type="number" name="lookback_days" min="1" max="60" value="{{ values.lookback_days }}"></div>
+      <div><label>Μοντέλο Groq</label><input type="text" name="llm_model_groq" value="{{ values.llm_model_groq }}"></div>
+      <div><label>Μοντέλο OpenRouter</label><input type="text" name="llm_model_openrouter" value="{{ values.llm_model_openrouter }}"></div>
+      <div><label>Μέγιστα άρθρα ανά έλεγχο</label><input type="number" name="max_extractions_per_run" min="1" max="500" value="{{ values.max_extractions_per_run }}"></div>
+      <div style="align-self:end"><label style="font-weight:500; display:flex; gap:6px; align-items:center">
+        <input type="checkbox" name="fetch_full_text" value="1" {{ 'checked' if values.fetch_full_text != '0' }}> Λήψη πλήρους κειμένου άρθρου</label></div>
+    </div>
+    <p class="muted small">Το δωρεάν tier έχει όρια αιτημάτων· ό,τι δεν προλαβαίνει αναλύεται στον επόμενο έλεγχο.</p>
+    <button class="btn primary">Αποθήκευση</button>
+  </form>
+</div>
+
+<div>
+  <form method="post" class="card">
+    <input type="hidden" name="section" value="schedule">
+    <h2>Καθημερινός έλεγχος (στο παρασκήνιο)</h2>
+    {% if task_supported %}
+      <p>Κατάσταση: {% if task_installed %}<span class="chip ok">ενεργός</span>{% else %}<span class="chip warn">δεν είναι προγραμματισμένος</span>{% endif %}</p>
+      <div class="form-grid"><div><label>Ώρα</label><input type="time" name="daily_time" value="{{ values.daily_time }}"></div></div>
+      <p class="muted small">Τρέχει με το Windows Task Scheduler ακόμη κι αν η εφαρμογή είναι κλειστή (και μόλις ανοίξει ο υπολογιστής αν ήταν σβηστός).</p>
+      <div style="display:flex; gap:8px">
+        <button class="btn primary" name="action" value="install">{{ 'Ενημέρωση ώρας' if task_installed else 'Ενεργοποίηση' }}</button>
+        {% if task_installed %}<button class="btn danger" name="action" value="remove">Απενεργοποίηση</button>{% endif %}
+      </div>
+    {% else %}<p class="muted">Ο προγραμματισμός υποστηρίζεται μόνο στα Windows. Χρησιμοποιήστε cron/systemd με <code>python -m taxmatch --daily</code>.</p>{% endif %}
+    {% if run %}<hr style="border:0; border-top:1px solid var(--border); margin:14px 0">
+      <div class="small muted">Τελευταίος έλεγχος: {{ run.finished_at|datetime_el }} ({{ 'προγραμματισμένος' if run.trigger == 'scheduled' else 'χειροκίνητος' }}) —
+        <span class="chip {{ 'ok' if run.status == 'ok' else 'danger' }}">{{ run.status }}</span>{% if run.error %}<div>{{ run.error }}</div>{% endif %}</div>{% endif %}
+  </form>
+
+  <form method="post" class="card">
+    <input type="hidden" name="section" value="sources">
+    <h2>Πηγές ειδήσεων</h2>
+    {% for s in sources %}
+      <label style="display:flex; gap:8px; align-items:flex-start; font-weight:500; color:var(--text); margin-bottom:8px">
+        <input type="checkbox" name="src_{{ s.id }}" value="1" {{ 'checked' if enabled[s.id] }} style="margin-top:3px">
+        <span>{{ s.name }}{% if s.kind == 'calendar' %} <span class="chip">ημερολόγιο</span>{% endif %}
+          {% if s.note %}<div class="muted small" style="font-weight:400">{{ s.note }}</div>{% endif %}</span>
+      </label>
+    {% endfor %}
+    <button class="btn primary">Αποθήκευση</button>
+  </form>
+</div>
+</div>
+{% endblock %}
