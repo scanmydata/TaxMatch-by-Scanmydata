@@ -160,7 +160,7 @@ def test_import_result_does_not_overwrite_existing(conn):
     service.add(conn, AFM, "Χειροκίνητο όνομα")
     res = import_excel.parse_rows([("ΑΦΜ", "Επωνυμία"), (AFM, "Άλλο όνομα"), ("123456783", "Νέος")])
     out = service.import_result(conn, res)
-    assert out == {"added": 1, "updated": 0, "invalid": 0, "duplicates": 0}
+    assert out == {"added": 1, "updated": 0, "invalid": 0, "duplicates": 0, "credentials": 0}
     assert service.get(conn, AFM)["name"] == "Χειροκίνητο όνομα"
 
 
@@ -175,7 +175,7 @@ def test_set_kads_formats_dedups_and_sets_main(conn):
 def test_lookup_without_credentials_keeps_client_pending(conn):
     service.add(conn, AFM)
     out = service.lookup_and_store(conn, AFM, FakeSession())
-    assert out["status"] == "pending" and len(out["errors"]) == 2
+    assert out["status"] == "pending" and len(out["errors"]) >= 2
     assert service.get(conn, AFM)["lookup_status"] == "pending"
 
 

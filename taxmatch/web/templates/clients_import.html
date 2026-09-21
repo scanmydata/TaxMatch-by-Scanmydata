@@ -2,20 +2,32 @@
 {% block title %}Εισαγωγή πελατών — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="topbar"><div><h1>Εισαγωγή πελατών από Excel</h1>
-  <div class="sub">Αρχείο .xlsx ή .csv με στήλη «ΑΦΜ». Προαιρετικά στήλες «Επωνυμία» και «ΚΑΔ».</div></div></div>
-<div class="card" style="max-width:640px">
-  <form method="post" enctype="multipart/form-data">
-    <label for="file">Αρχείο</label>
-    <input id="file" type="file" name="file" accept=".xlsx,.xlsm,.csv,.txt" required>
-    <div style="margin-top:16px; display:flex; gap:8px">
-      <button class="btn primary">Προεπισκόπηση</button>
-      <a class="btn" href="{{ url_for('main.clients_list') }}">Άκυρο</a>
-    </div>
-  </form>
-  <hr style="border:0; border-top:1px solid var(--border); margin:18px 0">
-  <div class="muted small">
-    Αναγνωρίζονται ΑΦΜ με πρόθεμα EL, με κενά/τελείες και αριθμοί που το Excel «έκοψε» (π.χ. 94259216 → 094259216).
-    Υπάρχοντες πελάτες δεν αντικαθίστανται. Η προεπισκόπηση δεν αποθηκεύει τίποτα μέχρι να επιβεβαιώσετε.
+  <div class="sub">Μαζική εισαγωγή πελατών — και, προαιρετικά, των κωδικών TAXISnet τους.</div></div></div>
+
+<div class="grid-2" style="grid-template-columns: minmax(0, 520px) minmax(0, 1fr)">
+  <div class="card">
+    <form method="post" enctype="multipart/form-data">
+      <label for="file">Αρχείο (.xlsx ή .csv)</label>
+      <input id="file" type="file" name="file" accept=".xlsx,.xlsm,.csv,.txt" required style="width:100%">
+      <div class="row" style="margin-top:14px">
+        <button class="btn primary">Προεπισκόπηση</button>
+        <a class="btn" href="{{ url_for('main.clients_list') }}">Άκυρο</a>
+        <a class="btn right" href="{{ url_for('main.clients_import_template') }}">{{ icon('excel', 16) }} Κατέβασμα προτύπου</a>
+      </div>
+    </form>
+    <hr class="sepline" style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <div class="muted small">Η προεπισκόπηση δεν αποθηκεύει τίποτα μέχρι να επιβεβαιώσετε. Υπάρχοντες πελάτες δεν αντικαθίστανται·
+      οι κωδικοί TAXISnet όμως ενημερώνονται και στους υπάρχοντες. Οι κωδικοί δεν εμφανίζονται ποτέ στην οθόνη.</div>
+  </div>
+
+  <div class="card">
+    <h2>Ποιες μορφές αναγνωρίζονται</h2>
+    <p><b>1. Πίνακας</b> με επικεφαλίδες (μία γραμμή ανά πελάτη). Στήλες: <code>ΑΦΜ</code> (υποχρεωτική), και προαιρετικά
+      <code>Επωνυμία</code>, <code>ΚΑΔ</code>, <code>Όνομα χρήστη TAXISnet</code>, <code>Κωδικός TAXISnet</code>. Σε απλό αρχείο δεκτά είναι και τα σκέτα «Όνομα χρήστη» / «Κωδικός».</p>
+    <p><b>2. Εκτύπωση «Κωδικοί Υπηρεσιών μέσω Internet»</b> (Hyper / Extra Λογιστική, TaxSystem): μπλοκ ανά υπόχρεο· διαβάζεται η γραμμή «Taxis Net».
+      Οι κωδικοί άλλων υπηρεσιών (myDATA, ΕΦΚΑ, ΓΕΜΗ) δεν διαβάζονται ποτέ.</p>
+    <p class="muted small" style="margin-bottom:0">ΑΦΜ με πρόθεμα EL, με κενά/τελείες και αριθμοί που το Excel «έκοψε» (94259216 → 094259216) διορθώνονται αυτόματα.
+      Διαβάζεται μόνο το πρώτο φύλλο.</p>
   </div>
 </div>
 {% endblock %}

@@ -110,9 +110,13 @@ def create_app(token: Optional[str] = None, testing: bool = False) -> Flask:
         src = sources.BY_ID.get(source_id)
         return src.name if src else source_id
 
+    from .icons import icon
+    app.jinja_env.globals["icon"] = icon
+
     @app.context_processor
     def inject():
-        return {"app_title": APP_TITLE, "app_version": __version__, "months_el": MONTHS_EL, "weekdays_el": WEEKDAYS_EL}
+        return {"app_title": APP_TITLE, "app_version": __version__, "months_el": MONTHS_EL, "weekdays_el": WEEKDAYS_EL,
+                "status_summary": _status_summary}
 
     from .views import bp
     app.register_blueprint(bp)
@@ -123,3 +127,13 @@ def get_db():
     if "db" not in g:
         g.db = db.connect()
     return g.db
+
+
+def _status_summary() -> dict:
+    """Για τη γραμμή κατάστασης κάτω από κάθε σελίδα (φθηνά ερωτήματα, κάθε φορά που ζητείται)."""
+    conn = get_db()
+    q = lambda sql: conn.execute(sql).fetchone()[0]
+    return {"clients": q("SELECT COUNT(*) FROM businesses"),
+            "complete": q("SELECT COUNT(*) FROM businesses WHERE lookup_status='ok'"),
+            "with_creds": q("SELECT COUNT(*) FROM client_credentials WHERE taxis_user!='' AND taxis_pass!=''"),
+            "pending_articles": q("SELECT COUNT(*) FROM articles WHERE extraction_status='pending'")}

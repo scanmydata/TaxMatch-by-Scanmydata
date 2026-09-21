@@ -21,10 +21,11 @@
       <div class="full">{{ secret_field('groq_api_key', 'Groq API key', 'gsk_…') }}</div>
       <div class="full">{{ secret_field('openrouter_api_key', 'OpenRouter API key', 'sk-or-…') }}</div>
       <div class="full">{{ secret_field('business_portal_key', 'Business Portal (ΓΕΜΗ) API key', 'για αυτόματο lookup ΚΑΔ/νομικής μορφής') }}</div>
-      <div>{{ secret_field('aade_user', 'TAXISnet χρήστης', '', 'text') }}</div>
-      <div>{{ secret_field('aade_pass', 'TAXISnet κωδικός') }}</div>
+      <div>{{ secret_field('aade_user', 'TAXISnet χρήστης γραφείου', '', 'text') }}</div>
+      <div>{{ secret_field('aade_pass', 'TAXISnet κωδικός γραφείου') }}</div>
     </div>
-    <p class="muted small">Οι κωδικοί TAXISnet χρησιμοποιούνται μόνο για ανάκτηση ΔΟΥ, καθεστώτος ΦΠΑ και κατηγορίας βιβλίων από το Μητρώο ΑΑΔΕ και δεν φεύγουν ποτέ προς άλλον προορισμό.</p>
+    <p class="muted small"><b>Λογαριασμός γραφείου (προαιρετικός):</b> χρησιμοποιείται όταν ένας πελάτης δεν έχει δικούς του κωδικούς TAXISnet (που ορίζονται στο προφίλ του ή μαζικά από Excel).
+      Οι κωδικοί χρησιμοποιούνται μόνο για ανάκτηση ΔΟΥ, καθεστώτος ΦΠΑ και κατηγορίας βιβλίων από το Μητρώο ΑΑΔΕ και δεν φεύγουν ποτέ προς άλλον προορισμό.</p>
     <div style="display:flex; gap:8px; flex-wrap:wrap"><button class="btn primary">Αποθήκευση</button></div>
   </form>
   <div class="card" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
@@ -53,7 +54,7 @@
 </div>
 
 <div>
-  <form method="post" class="card">
+  <form method="post" class="card" id="schedule">
     <input type="hidden" name="section" value="schedule">
     <h2>Καθημερινός έλεγχος (στο παρασκήνιο)</h2>
     {% if task_supported %}
@@ -65,7 +66,7 @@
         {% if task_installed %}<button class="btn danger" name="action" value="remove">Απενεργοποίηση</button>{% endif %}
       </div>
     {% else %}<p class="muted">Ο προγραμματισμός υποστηρίζεται μόνο στα Windows. Χρησιμοποιήστε cron/systemd με <code>python -m taxmatch --daily</code>.</p>{% endif %}
-    {% if run %}<hr style="border:0; border-top:1px solid var(--border); margin:14px 0">
+    {% if run %}<hr style="border:0; border-top:1px solid var(--line); margin:14px 0">
       <div class="small muted">Τελευταίος έλεγχος: {{ run.finished_at|datetime_el }} ({{ 'προγραμματισμένος' if run.trigger == 'scheduled' else 'χειροκίνητος' }}) —
         <span class="chip {{ 'ok' if run.status == 'ok' else 'danger' }}">{{ run.status }}</span>{% if run.error %}<div>{{ run.error }}</div>{% endif %}</div>{% endif %}
   </form>
@@ -74,9 +75,10 @@
     <input type="hidden" name="section" value="sources">
     <h2>Πηγές ειδήσεων</h2>
     {% for s in sources %}
-      <label style="display:flex; gap:8px; align-items:flex-start; font-weight:500; color:var(--text); margin-bottom:8px">
-        <input type="checkbox" name="src_{{ s.id }}" value="1" {{ 'checked' if enabled[s.id] }} style="margin-top:3px">
+      <label style="display:flex; gap:8px; align-items:flex-start; font-weight:500; color:var(--txt); margin-bottom:8px">
+        <input type="checkbox" name="src_{{ s.id }}" value="1" {{ 'checked' if enabled[s.id] and s.available }} {{ 'disabled' if not s.available }} style="margin-top:3px">
         <span>{{ s.name }}{% if s.kind == 'calendar' %} <span class="chip">ημερολόγιο</span>{% endif %}
+          {% if not s.available %} <span class="chip warn">μη διαθέσιμη</span>{% elif s.keywords %} <span class="chip">φίλτρο λέξεων</span>{% endif %}
           {% if s.note %}<div class="muted small" style="font-weight:400">{{ s.note }}</div>{% endif %}</span>
       </label>
     {% endfor %}

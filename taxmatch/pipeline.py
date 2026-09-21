@@ -61,7 +61,7 @@ def run_lock():
 
 
 def enabled_sources(conn: sqlite3.Connection) -> list[sources.Source]:
-    return [s for s in sources.SOURCES if settings_store.source_enabled(conn, s.id, s.default_enabled)]
+    return [s for s in sources.SOURCES if s.available and settings_store.source_enabled(conn, s.id, s.default_enabled)]
 
 
 def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], None]] = None,
@@ -85,7 +85,7 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
 
                 progress("Εμπλουτισμός πελατών…")
                 try:
-                    stats["enrich"] = clients.enrich_pending(conn, on_progress=progress)
+                    stats["enrich"] = clients.enrich_pending(conn, session=session, on_progress=progress)
                 except Exception as exc:
                     log.exception("enrich απέτυχε")
                     errors.append(f"Εμπλουτισμός πελατών: {exc}")

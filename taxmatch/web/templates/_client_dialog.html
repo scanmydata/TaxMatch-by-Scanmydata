@@ -1,0 +1,28 @@
+<dialog id="clientDialog">
+  <form method="post" action="{{ url_for('main.clients_new') }}" autocomplete="off">
+    <h1>{{ icon('add_client', 24) }} Νέος πελάτης</h1>
+    <div class="muted">Γράψτε το ΑΦΜ — μόλις συμπληρωθούν τα 9 ψηφία, η επωνυμία έρχεται αυτόματα από το μητρώο ΦΠΑ της ΕΕ (VIES).</div>
+
+    <div class="frow"><label for="cd_afm">ΑΦΜ:</label>
+      <div class="inline"><input id="cd_afm" name="afm" type="text" inputmode="numeric" maxlength="9" placeholder="9 ψηφία" required>
+        <button type="button" class="btn" id="cd_lookup" title="Αναζήτηση επωνυμίας στο VIES">Αναζήτηση</button></div></div>
+    <div class="status-line muted" id="cd_status"></div>
+    <div class="frow"><label for="cd_name">Επωνυμία:</label>
+      <input id="cd_name" name="name" type="text" placeholder="Συμπληρώνεται αυτόματα ή γράψτε την"></div>
+
+    <hr class="sepline">
+    <div class="muted small" style="margin-bottom:4px"><b>Κωδικοί TAXISnet του πελάτη — προαιρετικά.</b> Χρησιμοποιούνται μόνο για ΔΟΥ, καθεστώς ΦΠΑ και κατηγορία βιβλίων
+      από το Μητρώο ΑΑΔΕ. Αποθηκεύονται κρυπτογραφημένοι. Χωρίς αυτούς χρησιμοποιείται ο λογαριασμός γραφείου των Ρυθμίσεων (αν υπάρχει).</div>
+    <div class="frow"><label for="cd_user">Χρήστης TAXISnet:</label><input id="cd_user" name="taxis_user" type="text" placeholder="Όνομα χρήστη" autocomplete="off"></div>
+    <div class="frow"><label for="cd_pass">Κωδικός TAXISnet:</label><input id="cd_pass" name="taxis_pass" type="password" placeholder="Κωδικός" autocomplete="new-password"></div>
+
+    <hr class="sepline">
+    <div class="row"><span class="muted">Έχετε πολλούς πελάτες;</span>
+      <a class="btn" href="{{ url_for('main.clients_import') }}">{{ icon('excel', 16) }} Εισαγωγή από Excel…</a></div>
+
+    <div class="foot">
+      <button type="submit" class="btn primary">Αποθήκευση</button>
+      <button type="button" class="btn" data-close>Άκυρο</button>
+    </div>
+  </form>
+</dialog>

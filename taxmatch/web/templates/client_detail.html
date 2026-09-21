@@ -5,16 +5,17 @@
 <div class="topbar">
   <div><h1>{{ b.name or 'Χωρίς επωνυμία' }}</h1>
     <div class="sub">ΑΦΜ {{ b.afm }}{% if b.doy %} · ΔΟΥ {{ b.doy }}{% endif %}{% if b.ar_gemi %} · ΓΕΜΗ {{ b.ar_gemi }}{% endif %}</div></div>
-  <span class="right" style="display:flex; gap:8px">
-    <form method="post" action="{{ url_for('main.client_lookup', afm=b.afm) }}" class="inline-form"><button class="btn">⟳ Ανανέωση από ΓΕΜΗ/ΑΑΔΕ</button></form>
-    <form method="post" action="{{ url_for('main.client_delete', afm=b.afm) }}" class="inline-form" data-confirm="Διαγραφή του πελάτη και των matches του;"><button class="btn danger">Διαγραφή</button></form>
+  <span class="right row">
+    <a class="btn" href="{{ url_for('main.clients_list') }}">{{ icon('back', 16) }} Πελάτες</a>
+    <form method="post" action="{{ url_for('main.client_lookup', afm=b.afm) }}" class="inline-form"><button class="btn">{{ icon('refresh', 16) }} Ανανέωση στοιχείων</button></form>
+    <form method="post" action="{{ url_for('main.client_delete', afm=b.afm) }}" class="inline-form" data-confirm="Διαγραφή του πελάτη, των matches και των κωδικών του;"><button class="btn danger">{{ icon('delete', 16) }} Διαγραφή</button></form>
   </span>
 </div>
 
 {% if b.lookup_status in ('failed', 'partial', 'pending') and b.lookup_error %}
 <div class="alert {{ 'danger' if b.lookup_status == 'failed' else 'warn' }}">Ανάκτηση στοιχείων: {{ b.lookup_error }}</div>
 {% elif b.lookup_status == 'pending' %}
-<div class="alert info">Τα στοιχεία περιμένουν ανάκτηση. Συμπληρώστε τα χειροκίνητα ή ρυθμίστε ΓΕΜΗ/ΑΑΔΕ στις Ρυθμίσεις.</div>
+<div class="alert info">Τα στοιχεία περιμένουν ανάκτηση. Συμπληρώστε τα χειροκίνητα ή πατήστε «Ανανέωση στοιχείων».</div>
 {% endif %}
 
 <div class="grid-2">
@@ -46,8 +47,27 @@
         </div>
         <div class="full"><label>Σημειώσεις</label><textarea name="notes" rows="3" style="font-family:inherit">{{ b.notes }}</textarea></div>
       </div>
-      <div style="margin-top:14px"><button class="btn primary">Αποθήκευση</button>
-        <span class="muted small" style="margin-left:8px">Τα matches ξαναϋπολογίζονται μετά την αποθήκευση.</span></div>
+      <div class="row" style="margin-top:12px"><button class="btn primary">Αποθήκευση</button>
+        <span class="muted small">Τα matches και οι προθεσμίες ξαναϋπολογίζονται μετά την αποθήκευση.</span></div>
+    </form>
+
+    <form method="post" action="{{ url_for('main.client_credentials', afm=b.afm) }}" class="card" autocomplete="off">
+      <h2>{{ icon('key', 16) }} Κωδικοί TAXISnet του πελάτη <span class="chip">προαιρετικά</span></h2>
+      <div class="muted small" style="margin-bottom:8px">Για την ανάκτηση ΔΟΥ, καθεστώτος ΦΠΑ και κατηγορίας βιβλίων από το Μητρώο ΑΑΔΕ. Αποθηκεύονται κρυπτογραφημένοι και δεν εμφανίζονται ποτέ ξανά.
+        {% if not cred %}Χωρίς δικούς του κωδικούς, {% if office_creds %}χρησιμοποιείται ο λογαριασμός γραφείου των Ρυθμίσεων{% else %}δεν γίνεται ανάκτηση από ΑΑΔΕ (δεν υπάρχει ούτε λογαριασμός γραφείου){% endif %}.{% endif %}</div>
+      <div class="form-grid">
+        <div><label>Χρήστης TAXISnet</label><input type="text" name="taxis_user" value="{{ cred_user }}" autocomplete="off"></div>
+        <div><label>Κωδικός {% if cred and cred.complete %}<span class="chip ok">αποθηκευμένος</span>{% endif %}</label>
+          <input type="password" name="taxis_pass" placeholder="{{ '•••••••• (αφήστε κενό για να μείνει ως έχει)' if cred and cred.complete else '' }}" autocomplete="new-password"></div>
+      </div>
+      {% if cred and cred.check_status %}
+        <div class="small" style="margin-top:8px"><span class="{{ 'st-ok' if cred.check_status == 'ok' else 'st-bad' }}">● {{ cred.check_message }}</span></div>
+      {% endif %}
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" name="action" value="save">Αποθήκευση κωδικών</button>
+        {% if cred and cred.complete %}<button class="btn" name="action" value="test" title="Δοκιμάζει σύνδεση στο TAXISnet με τους αποθηκευμένους κωδικούς (δεν αλλάζει τίποτα)">Δοκιμή σύνδεσης</button>
+        <button class="btn danger" name="action" value="clear" style="margin-left:auto">Διαγραφή κωδικών</button>{% endif %}
+      </div>
     </form>
 
     {% if has_raw %}
@@ -78,7 +98,7 @@
   </aside>
 </div>
 
-<div class="card" style="margin-top:18px">
+<div class="card" style="margin-top:14px">
   <h2>Νέα που αφορούν τον πελάτη (90 ημέρες)</h2>
   {% for m in matches %}
     <div class="match-row">

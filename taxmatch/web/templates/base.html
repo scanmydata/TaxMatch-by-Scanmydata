@@ -1,39 +1,78 @@
 <!doctype html>
-<html lang="el">
+<html lang="el" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_title }}{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+  <script>
+    /* Θέμα πριν από το πρώτο painting, ώστε να μην αναβοσβήνει. Το σκούρο είναι η προεπιλογή (όπως στο downloader). */
+    try {
+      /* ?theme=light|dark επιβάλλει και αποθηκεύει θέμα (π.χ. όταν η εφαρμογή ανοίγει μέσα από τη σουίτα ScanMyData) */
+      var q = new URLSearchParams(location.search).get('theme'); if (q === 'light' || q === 'dark') localStorage.setItem('tm-theme', q);
+      var t = localStorage.getItem('tm-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
+{% set st = status_summary() %}
 <aside class="side">
-  <div class="brand">
+  <div class="side-head">
     <img src="{{ url_for('static', filename='img/logo-192.png') }}" alt="TaxMatch">
-    <div><b>TaxMatch</b><span>by ScanMyData</span></div>
+    <div class="t"><b>TaxMatch</b><span>Φορολογικά νέα</span></div>
+    <button type="button" class="icon-btn" id="collapseBtn" title="Μάζεμα / άνοιγμα μενού">{{ icon('menu', 20) }}</button>
   </div>
-  <nav class="nav">
-    <a href="{{ url_for('main.dashboard') }}" class="{{ 'active' if nav == 'dashboard' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Αρχική</a>
-    <a href="{{ url_for('main.clients_list') }}" class="{{ 'active' if nav == 'clients' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.4c2 .7 3.5 2.6 3.5 5.6"/></svg>Πελάτες</a>
-    <a href="{{ url_for('main.calendar_view') }}" class="{{ 'active' if nav == 'calendar' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>Ημερολόγιο</a>
-    <a href="{{ url_for('main.news') }}" class="{{ 'active' if nav == 'news' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h13a2 2 0 0 1 2 2v12H6a2 2 0 0 1-2-2z"/><path d="M19 9h1.5a.5.5 0 0 1 .5.5V18a2 2 0 0 1-2 2M8 9h7M8 13h7M8 17h4"/></svg>Νέα &amp; Matches</a>
-    <a href="{{ url_for('main.settings') }}" class="{{ 'active' if nav == 'settings' }}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Ρυθμίσεις</a>
-  </nav>
-  <div class="side-foot">v{{ app_version }} · τα δεδομένα μένουν στον υπολογιστή σας</div>
+  <div class="side-scroll">
+    <nav class="menu">
+      <button type="button" class="mb add" data-open="clientDialog" title="Προσθήκη πελάτη — με ΑΦΜ (η επωνυμία έρχεται αυτόματα) ή από Excel">{{ icon('add_client') }}<span class="lbl">Νέος πελάτης</span></button>
+      <div style="height:6px"></div>
+      <a href="{{ url_for('main.dashboard') }}" class="{{ 'active' if nav == 'dashboard' }}" title="Σημερινό ενημερωτικό: ποιον αφορά τι">{{ icon('stats') }}<span class="lbl">Αρχική</span></a>
+      <a href="{{ url_for('main.clients_list') }}" class="{{ 'active' if nav == 'clients' }}" title="Η λίστα των πελατών σας">{{ icon('clients') }}<span class="lbl">Πελάτες</span></a>
+      <a href="{{ url_for('main.calendar_view') }}" class="{{ 'active' if nav == 'calendar' }}" title="Προθεσμίες υποχρεώσεων: ΦΠΑ, VIES, Intrastat, ΑΠΔ…">{{ icon('calendar') }}<span class="lbl">Ημερολόγιο</span></a>
+      <a href="{{ url_for('main.news') }}" class="{{ 'active' if nav == 'news' }}" title="Όλα τα άρθρα και ποιους πελάτες αφορούν">{{ icon('csv') }}<span class="lbl">Νέα &amp; Matches</span></a>
+
+      <div class="sep">Δεδομένα</div>
+      <a href="{{ url_for('main.clients_import') }}" class="{{ 'active' if nav == 'import' }}" title="Μαζική εισαγωγή πελατών (και κωδικών TAXISnet) από Excel">{{ icon('import') }}<span class="lbl">Εισαγωγή από Excel</span></a>
+      <a href="{{ url_for('main.clients_export') }}" title="Λίστα πελατών σε CSV (χωρίς κωδικούς)">{{ icon('download') }}<span class="lbl">Εξαγωγή πελατών</span></a>
+
+      <div class="sep">Αυτόματα</div>
+      <button type="button" class="mb" data-run-check title="Λήψη νέων, ανάλυση και αντιστοίχιση με πελάτες αυτή τη στιγμή">{{ icon('refresh') }}<span class="lbl">Έλεγχος τώρα</span></button>
+      <a href="{{ url_for('main.settings') }}#schedule" title="Καθημερινός έλεγχος στο παρασκήνιο (Windows Task Scheduler)">{{ icon('schedule') }}<span class="lbl">Χρονοπρογραμματισμός</span></a>
+
+      <div class="sep">Σύστημα</div>
+      <a href="{{ url_for('main.settings') }}" class="{{ 'active' if nav == 'settings' }}" title="Κλειδιά API, κωδικοί γραφείου, πηγές ειδήσεων">{{ icon('settings') }}<span class="lbl">Ρυθμίσεις</span></a>
+
+      <div class="sep">Βοήθεια</div>
+      <a href="{{ url_for('main.logs_view') }}" class="{{ 'active' if nav == 'logs' }}" title="Αναλυτικό ιστορικό λειτουργίας">{{ icon('manual') }}<span class="lbl">Αρχείο καταγραφής</span></a>
+    </nav>
+  </div>
+  <div class="side-foot">
+    <div class="sep" style="padding-top:4px">Ρυθμίσεις</div>
+    <label class="toggle" title="Εναλλαγή ανάμεσα σε σκούρο και φωτεινό"><input type="checkbox" id="themeToggle"><span class="sw"></span><span class="tl">Φωτεινό θέμα</span></label>
+    <label class="toggle" title="Εμφάνιση επεξηγήσεων όταν αφήνετε τον δείκτη πάνω από ένα κουμπί"><input type="checkbox" id="tipToggle" checked><span class="sw"></span><span class="tl">Βοηθητικά μηνύματα</span></label>
+    <div class="brand-foot">
+      <img class="brand-dark" src="{{ url_for('static', filename='img/brand/scanmydata-dark.png') }}" alt="ScanMyData">
+      <img class="brand-light" src="{{ url_for('static', filename='img/brand/scanmydata-light.png') }}" alt="ScanMyData">
+      <span>έκδοση {{ app_version }}</span>
+    </div>
+  </div>
 </aside>
-<main>
-  <div id="jobbar"><span class="spin"></span><span id="jobmsg"></span></div>
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for cat, msg in messages %}<div class="alert {{ cat if cat in ('ok','warn','danger','info') else 'info' }}">{{ msg }}</div>{% endfor %}
-  {% endwith %}
-  {% block content %}{% endblock %}
-</main>
+
+<div class="content">
+  <main>
+    <div id="jobbar"><span class="spin"></span><span id="jobmsg"></span></div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}<div class="alert {{ cat if cat in ('ok','warn','danger','info') else 'info' }}">{{ msg }}</div>{% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <div class="statusbar" id="statusbar" data-default="{{ st.clients }} πελάτες · {{ st.complete }} με πλήρη στοιχεία · {{ st.with_creds }} με κωδικούς TAXISnet{% if st.pending_articles %} · {{ st.pending_articles }} άρθρα σε αναμονή ανάλυσης{% endif %}">
+    {{ st.clients }} πελάτες · {{ st.complete }} με πλήρη στοιχεία · {{ st.with_creds }} με κωδικούς TAXISnet{% if st.pending_articles %} · {{ st.pending_articles }} άρθρα σε αναμονή ανάλυσης{% endif %}
+  </div>
+</div>
+
+{% include "_client_dialog.html" %}
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

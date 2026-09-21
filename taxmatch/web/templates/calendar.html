@@ -2,27 +2,31 @@
 {% from "_macros.html" import due_badge %}
 {% block title %}Ημερολόγιο — {{ app_title }}{% endblock %}
 {% block content %}
-{% set news_flag = '1' if show_news else '0' %}
+{% set flags = {'news': '1' if show_news else '0', 'rules': '1' if show_rules else '0', 'cond': '1' if show_cond else '0'} %}
 <div class="topbar">
   <div><h1>Ημερολόγιο υποχρεώσεων</h1>
-    <div class="sub">Γενικό φορολογικό ημερολόγιο (taxheaven){% if show_news %} + προθεσμίες από νέα που αφορούν πελάτες{% endif %}</div></div>
+    <div class="sub">Γενικό ημερολόγιο (taxheaven) · κανονικές προθεσμίες (ΦΠΑ, VIES, Intrastat, OSS, ΑΠΔ…){% if show_news %} · προθεσμίες από νέα{% endif %}</div></div>
   <span class="right seg">
-    <a href="{{ url_for('main.calendar_view', month=prev_m, afm=afm, news=news_flag) }}">‹</a>
-    <a class="on" href="{{ url_for('main.calendar_view', afm=afm, news=news_flag) }}">{{ month_name }} {{ first.year }}</a>
-    <a href="{{ url_for('main.calendar_view', month=next_m, afm=afm, news=news_flag) }}">›</a>
+    <a href="{{ url_for('main.calendar_view', month=prev_m, afm=afm, **flags) }}">‹</a>
+    <a class="on" href="{{ url_for('main.calendar_view', afm=afm, **flags) }}">{{ month_name }} {{ first.year }}</a>
+    <a href="{{ url_for('main.calendar_view', month=next_m, afm=afm, **flags) }}">›</a>
   </span>
 </div>
 
 <form class="filters" method="get">
   <input type="hidden" name="month" value="{{ first.strftime('%Y-%m') }}">
-  <select name="afm" onchange="this.form.submit()">
+  <select name="afm" onchange="this.form.submit()" title="Οι προθεσμίες ΦΠΑ προσαρμόζονται στο καθεστώς του πελάτη (μηνιαία/τριμηνιαία)">
     <option value="">Όλοι οι πελάτες</option>
     {% for c in client_options %}<option value="{{ c.afm }}" {{ 'selected' if c.afm == afm }}>{{ c.name or c.afm }}</option>{% endfor %}
   </select>
-  <input type="hidden" name="news" value="0">
-  <label style="margin:0; display:flex; align-items:center; gap:6px; font-weight:500">
-    <input type="checkbox" name="news" value="1" {{ 'checked' if show_news }} onchange="this.form.submit()"> προθεσμίες από νέα
+  {% for key, label, on, tip in [('rules', 'κανονικές προθεσμίες', show_rules, 'Υπολογισμένες προθεσμίες: ΦΠΑ, VIES, Intrastat, OSS/IOSS, ΑΠΔ, Ε4, δήλωση εισοδήματος'),
+                                 ('cond', 'υπό προϋποθέσεις', show_cond, 'VIES, Intrastat, OSS/IOSS, ΑΠΔ, Ε4: ισχύουν μόνο αν ο πελάτης έχει τη σχετική δραστηριότητα'),
+                                 ('news', 'προθεσμίες από νέα', show_news, 'Προθεσμίες που εντοπίστηκαν σε άρθρα που αφορούν πελάτες')] %}
+  <input type="hidden" name="{{ key }}" value="0">
+  <label style="margin:0; display:flex; align-items:center; gap:6px; font-weight:500; color:var(--txt)" title="{{ tip }}">
+    <input type="checkbox" name="{{ key }}" value="1" {{ 'checked' if on }} onchange="this.form.submit()"> {{ label }}
   </label>
+  {% endfor %}
 </form>
 
 <table class="cal">
@@ -32,26 +36,32 @@
     {% for day in week %}{% set iso = day.isoformat() %}{% set evs = by_day.get(iso, []) %}
     <td class="{{ 'other' if day.month != first.month }} {{ 'today' if day == today }}">
       <div class="d">{{ day.day }}</div>
-      {% for ev in evs[:3] %}<a class="ev {{ ev.kind }} ext" href="{{ ev.url }}" target="_blank" rel="noopener" title="{{ ev.title }}">{{ ev.title }}</a>{% endfor %}
+      {% for ev in evs[:3] %}<a class="ev {{ ev.kind }} {{ 'cond' if ev.conditional }} ext" href="{{ ev.url }}" target="_blank" rel="noopener" title="{{ ev.title }}{{ ' — ' ~ ev.description if ev.description }}">{{ ev.title }}</a>{% endfor %}
       {% if evs|length > 3 %}<div class="more">+{{ evs|length - 3 }} ακόμη</div>{% endif %}
     </td>{% endfor %}
   </tr>{% endfor %}
   </tbody>
 </table>
 
-<div class="card" style="margin-top:18px">
+<div class="card" style="margin-top:14px">
   <h2>Λίστα μήνα ({{ agenda|length }})</h2>
   {% if agenda %}
+  <div class="tablecard" style="border:0">
   <table class="grid">
-    <thead><tr><th>Ημερομηνία</th><th>Υποχρέωση</th><th>Τύπος</th></tr></thead>
+    <thead><tr><th>Ημερομηνία</th><th style="text-align:left">Υποχρέωση</th><th>Τύπος</th></tr></thead>
     <tbody>
       {% for ev in agenda %}
-      <tr><td class="nowrap">{{ due_badge(ev.date) }}</td>
-        <td><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a></td>
-        <td>{% if ev.kind == 'news' %}<span class="chip info">νέα · {{ ev.n_clients }} πελάτες</span>{% else %}<span class="chip">γενικό</span>{% endif %}</td></tr>
+      <tr><td class="nowrap c">{{ due_badge(ev.date) }}</td>
+        <td><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a>
+          {% if ev.description %}<div class="muted small">{{ ev.description }}</div>{% endif %}</td>
+        <td class="c nowrap">{% if ev.kind == 'news' %}<span class="chip info">νέα · {{ ev.n_clients }} πελάτες</span>
+          {% elif ev.kind == 'rule' %}<span class="chip warn">{{ 'κανόνας · υπό προϋποθέσεις' if ev.conditional else 'κανόνας' }}</span>
+          {% else %}<span class="chip">ημερολόγιο ΑΑΔΕ/taxheaven</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
-  </table>
-  {% else %}<div class="muted">Καμία καταχωρημένη προθεσμία για αυτόν τον μήνα. Το γενικό ημερολόγιο καλύπτει τις επόμενες ~30 ημέρες.</div>{% endif %}
+  </table></div>
+  {% else %}<div class="muted">Καμία προθεσμία για αυτόν τον μήνα με τα τρέχοντα φίλτρα.</div>{% endif %}
+  <p class="muted small" style="margin:10px 0 0">Οι «κανονικές προθεσμίες» υπολογίζονται από τον νόμο και μπορεί να διαφέρουν όταν ανακοινώνεται παράταση· υπερισχύουν πάντα οι ημερομηνίες των ανακοινώσεων ΑΑΔΕ/e-ΕΦΚΑ (γενικό ημερολόγιο).
+    Οι εργάσιμες υπολογίζονται με τις ελληνικές αργίες.</p>
 </div>
 {% endblock %}

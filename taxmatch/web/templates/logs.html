@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Αρχείο καταγραφής — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="topbar"><div><h1>Αρχείο καταγραφής</h1>
+  <div class="sub">Οι τελευταίες 200 γραμμές κάθε αρχείου · φάκελος: <code>{{ log_dir }}</code></div></div></div>
+{% for l in logs %}
+  <h2 style="margin-top:14px">{{ l.name }}</h2>
+  <pre class="log">{{ l.text or '(κενό)' }}</pre>
+{% else %}
+  <div class="card muted">Δεν υπάρχουν ακόμη αρχεία καταγραφής.</div>
+{% endfor %}
+{% endblock %}

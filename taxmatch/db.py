@@ -107,6 +107,22 @@ MIGRATIONS: list[str] = [
         error       TEXT NOT NULL DEFAULT ''
     );
     """,
+    # v2 — κωδικοί TAXISnet ανά πελάτη (προαιρετικοί, κρυπτογραφημένοι), dedup άρθρων
+    """
+    CREATE TABLE client_credentials (
+        afm           TEXT PRIMARY KEY REFERENCES businesses(afm) ON DELETE CASCADE,
+        taxis_user    TEXT NOT NULL DEFAULT '',      -- enc:1:…
+        taxis_pass    TEXT NOT NULL DEFAULT '',      -- enc:1:…
+        check_status  TEXT NOT NULL DEFAULT '',      -- '' | ok | invalid | error
+        check_message TEXT NOT NULL DEFAULT '',
+        checked_at    TEXT,
+        updated_at    TEXT NOT NULL
+    );
+
+    ALTER TABLE articles ADD COLUMN duplicate_of INTEGER;
+    ALTER TABLE articles ADD COLUMN title_key TEXT NOT NULL DEFAULT '';
+    CREATE INDEX idx_articles_titlekey ON articles(title_key)
+    """,
 ]
 
 

@@ -7,10 +7,13 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-from flask import (Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, url_for)
+import csv
+import io
 
-from .. import crypto, deadlines, pipeline, scheduler_win, settings_store
-from ..business_profiles import import_excel, lookup_aade, service as clients
+from flask import (Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for)
+
+from .. import __version__, config, crypto, deadlines, pipeline, scheduler_win, settings_store
+from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
 from ..identifiers import is_valid_afm, normalize_afm
 from ..ingestion import sources
@@ -98,7 +101,7 @@ def clients_list():
     rows = clients.list_all(conn, q=q, kad=kad, books=books, status=status)
     counts = {r["afm"]: r["n"] for r in conn.execute("SELECT afm, COUNT(*) AS n FROM matches GROUP BY afm")}
     return render_template("clients_list.html", nav="clients", rows=rows, q=q, kad=kad, books=books, status=status,
-                           match_counts=counts, total=clients.count(conn))
+                           match_counts=counts, total=clients.count(conn), creds=client_creds.status_map(conn))
 
 
 @bp.route("/clients/new", methods=["GET", "POST"])
@@ -115,10 +118,35 @@ def clients_new():
         if not clients.add(conn, afm, name, source="manual"):
             flash("Ο πελάτης υπάρχει ήδη.", "warn")
             return redirect(url_for("main.client_detail", afm=afm))
+        user, pwd = request.form.get("taxis_user", "").strip(), request.form.get("taxis_pass", "")
+        if bool(user) != bool(pwd):
+            flash("Οι κωδικοί TAXISnet θέλουν και χρήστη και κωδικό — δεν αποθηκεύτηκαν.", "warn")
+        elif user:
+            client_creds.set_(conn, afm, user, pwd)
         _start_lookup(afm)
-        flash("Ο πελάτης προστέθηκε. Ανάκτηση στοιχείων από ΓΕΜΗ/ΑΑΔΕ σε εξέλιξη…", "ok")
+        flash("Ο πελάτης προστέθηκε. Ανάκτηση στοιχείων σε εξέλιξη…", "ok")
         return redirect(url_for("main.client_detail", afm=afm))
     return render_template("client_new.html", nav="clients", form={})
+
+
+@bp.get("/api/lookup-afm")
+def api_lookup_afm():
+    """Επωνυμία/διεύθυνση από ΑΦΜ για τον διάλογο «Νέος πελάτης»: πρώτα ό,τι ξέρουμε ήδη, μετά VIES (χωρίς key)."""
+    afm = normalize_afm(request.args.get("afm"))
+    if len(afm) != 9:
+        return jsonify(ok=False, error="Το ΑΦΜ πρέπει να έχει 9 ψηφία."), 400
+    conn = get_db()
+    row = conn.execute("SELECT name, address FROM businesses WHERE afm=?", (afm,)).fetchone()
+    if row and row["name"]:
+        return jsonify(ok=True, source="local", name=row["name"], address=row["address"], exists=True,
+                       checksum_ok=is_valid_afm(afm))
+    res = vies.lookup(afm)
+    if res.error:
+        return jsonify(ok=False, error=f"{res.error} — γράψτε την επωνυμία χειροκίνητα.")
+    if not res.valid or not res.name:
+        return jsonify(ok=False, error="Το ΑΦΜ δεν βρέθηκε στο VIES (π.χ. μη υπόχρεος ΦΠΑ)· γράψτε την επωνυμία χειροκίνητα.")
+    return jsonify(ok=True, source="vies", name=res.name, address=res.address, exists=bool(row),
+                   checksum_ok=is_valid_afm(afm))
 
 
 def _start_lookup(afm: str) -> bool:
@@ -175,8 +203,9 @@ def clients_import_confirm():
     out = clients.import_result(conn, res)
     engine.rematch(conn)
     flash(f"Προστέθηκαν {out['added']} πελάτες" + (f", ενημερώθηκαν {out['updated']}" if out["updated"] else "")
+          + (f", αποθηκεύτηκαν κωδικοί TAXISnet για {out['credentials']}" if out["credentials"] else "")
           + ". Ο εμπλουτισμός στοιχείων γίνεται στο παρασκήνιο.", "ok")
-    if out["added"]:
+    if out["added"] or out["credentials"]:
         _start_enrich()
     return redirect(url_for("main.clients_list"))
 
@@ -212,12 +241,15 @@ def client_detail(afm: str):
         abort(404)
     matches = engine.digest(conn, days=90, afm=afm)
     today = date.today()
-    events = deadlines.events_between(conn, today, today + timedelta(days=45), afm=afm)
+    events = deadlines.events_between(conn, today, today + timedelta(days=45), afm=afm, include_conditional=False)
     try:
         raw = json.loads(b["lookup_raw"]) if b["lookup_raw"] else {}
     except ValueError:
         raw = {}
-    return render_template("client_detail.html", nav="clients", b=b, matches=matches, events=events, has_raw=bool(raw))
+    cred = client_creds.status_map(conn).get(afm)
+    return render_template("client_detail.html", nav="clients", b=b, matches=matches, events=events, has_raw=bool(raw),
+                           cred=cred, cred_user=client_creds.masked_user(conn, afm) if cred else "",
+                           office_creds=bool(settings_store.is_set(conn, "aade_user") and settings_store.is_set(conn, "aade_pass")))
 
 
 @bp.post("/clients/<afm>/edit")
@@ -252,6 +284,115 @@ def client_lookup(afm: str):
     return redirect(url_for("main.client_detail", afm=afm))
 
 
+@bp.post("/clients/<afm>/credentials")
+def client_credentials(afm: str):
+    conn = get_db()
+    if not clients.get(conn, afm):
+        abort(404)
+    action = request.form.get("action", "save")
+    if action == "clear":
+        client_creds.clear(conn, afm)
+        flash("Οι κωδικοί TAXISnet του πελάτη διαγράφηκαν.", "ok")
+    elif action == "test":
+        if not client_creds.get(conn, afm):
+            flash("Δεν έχουν οριστεί κωδικοί TAXISnet για τον πελάτη.", "warn")
+        else:
+            def work(progress):
+                from .. import db as dbmod
+                progress("Δοκιμή σύνδεσης στο TAXISnet…")
+                c = dbmod.connect()
+                try:
+                    return client_creds.test(c, afm)[1]
+                finally:
+                    c.close()
+            flash("Δοκιμή σύνδεσης σε εξέλιξη…" if _jobs().start("creds-test", work) else "Τρέχει ήδη άλλη εργασία.", "ok")
+    else:
+        user, pwd = request.form.get("taxis_user", "").strip(), request.form.get("taxis_pass", "")
+        if not client_creds.set_(conn, afm, user, pwd):
+            flash("Δεν δόθηκαν κωδικοί.", "warn")
+        else:
+            flash("Οι κωδικοί TAXISnet αποθηκεύτηκαν (κρυπτογραφημένοι).", "ok")
+    return redirect(url_for("main.client_detail", afm=afm))
+
+
+@bp.post("/clients/bulk")
+def clients_bulk():
+    """Μαζικές ενέργειες σε επιλεγμένους πελάτες: lookup | delete | clear_creds | set_creds."""
+    conn = get_db()
+    afms = [a for a in (normalize_afm(x) for x in request.form.getlist("afms")) if a]
+    action = request.form.get("action", "")
+    if not afms:
+        flash("Δεν επιλέχθηκε κανένας πελάτης.", "warn")
+        return redirect(url_for("main.clients_list"))
+    if action == "delete":
+        for a in afms:
+            clients.delete(conn, a)
+        flash(f"Διαγράφηκαν {len(afms)} πελάτες.", "ok")
+    elif action == "clear_creds":
+        for a in afms:
+            client_creds.clear(conn, a)
+        flash(f"Διαγράφηκαν οι κωδικοί TAXISnet σε {len(afms)} πελάτες.", "ok")
+    elif action == "set_creds":
+        user, pwd = request.form.get("taxis_user", "").strip(), request.form.get("taxis_pass", "")
+        if not (user and pwd):
+            flash("Δώστε και χρήστη και κωδικό TAXISnet.", "warn")
+        else:
+            out = client_creds.bulk_set(conn, [(a, user, pwd) for a in afms])
+            flash(f"Οι κωδικοί TAXISnet ορίστηκαν σε {out['saved']} πελάτες.", "ok")
+    elif action == "lookup":
+        def work(progress):
+            from .. import db as dbmod
+            c = dbmod.connect()
+            try:
+                out = clients.enrich_pending(c, afms=afms, on_progress=progress)
+                engine.rematch(c)
+                return out
+            finally:
+                c.close()
+        flash("Ανανέωση στοιχείων σε εξέλιξη…" if _jobs().start("enrich", work) else "Τρέχει ήδη άλλη εργασία.", "ok")
+    else:
+        abort(400)
+    return redirect(url_for("main.clients_list"))
+
+
+@bp.get("/clients/export.csv")
+def clients_export():
+    """Λίστα πελατών σε CSV (UTF-8 με BOM για Excel). ΔΕΝ περιλαμβάνει ποτέ κωδικούς."""
+    conn = get_db()
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["ΑΦΜ", "Επωνυμία", "Νομική μορφή", "ΔΟΥ", "Κύριος ΚΑΔ", "Όλα τα ΚΑΔ", "Κατηγορία βιβλίων", "ΦΠΑ", "Περίοδος ΦΠΑ",
+                "Διεύθυνση", "Κατάσταση στοιχείων"])
+    for b in clients.list_all(conn):
+        kads = "; ".join(r["code"] for r in conn.execute(
+            "SELECT code FROM business_kad WHERE afm=? ORDER BY is_main DESC, code", (b["afm"],)))
+        w.writerow([b["afm"], b["name"], b["legal_form"], b["doy"], b["kad_main_code"], kads, b["books_category"],
+                    {1: "Υπόχρεος", 0: "Όχι"}.get(b["vat_subject"], ""),
+                    {"monthly": "Μηνιαία", "quarterly": "Τριμηνιαία"}.get(b["vat_period_type"], ""), b["address"],
+                    b["lookup_status"]])
+    return Response("\ufeff" + buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=pelates.csv"})
+
+
+@bp.get("/clients/import/template.xlsx")
+def clients_import_template():
+    return Response(import_excel.template_xlsx(),
+                    mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=pelates-protypo.xlsx"})
+
+
+@bp.get("/logs")
+def logs_view():
+    """Τελευταίες γραμμές των αρχείων καταγραφής (εφαρμογή + καθημερινός έλεγχος)."""
+    out = []
+    for name in ("daily.log", "app.log", "crash.log"):
+        path = config.log_dir() / name
+        if path.exists():
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+            out.append({"name": name, "text": "\n".join(lines)})
+    return render_template("logs.html", nav="logs", logs=out, log_dir=str(config.log_dir()))
+
+
 @bp.post("/clients/<afm>/delete")
 def client_delete(afm: str):
     conn = get_db()
@@ -274,8 +415,11 @@ def calendar_view():
         first = today.replace(day=1)
     afm = request.args.get("afm", "").strip() or None
     show_news = ("1" in request.args.getlist("news")) if "news" in request.args else True
+    show_rules = ("1" in request.args.getlist("rules")) if "rules" in request.args else True
+    show_cond = ("1" in request.args.getlist("cond")) if "cond" in request.args else True
     weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(first.year, first.month)
-    events = deadlines.events_between(conn, weeks[0][0], weeks[-1][-1], afm=afm, include_news=show_news)
+    events = deadlines.events_between(conn, weeks[0][0], weeks[-1][-1], afm=afm, include_news=show_news,
+                                     include_rules=show_rules, include_conditional=show_cond)
     by_day: dict[str, list] = {}
     for ev in events:
         by_day.setdefault(ev["date"], []).append(ev)
@@ -284,6 +428,7 @@ def calendar_view():
     agenda = [ev for ev in events if ev["date"][:7] == first.strftime("%Y-%m")]
     return render_template("calendar.html", nav="calendar", first=first, weeks=weeks, by_day=by_day, today=today,
                            prev_m=prev_m.strftime("%Y-%m"), next_m=next_m.strftime("%Y-%m"), afm=afm, show_news=show_news,
+                           show_rules=show_rules, show_cond=show_cond,
                            agenda=agenda, month_name=MONTHS_EL[first.month - 1],
                            client_options=clients.list_all(conn))
 
@@ -307,6 +452,10 @@ def news():
         sql += " AND a.extraction_status='irrelevant'"
     elif only == "pending":
         sql += " AND a.extraction_status IN ('pending','failed')"
+    elif only == "skipped":
+        sql += " AND a.extraction_status='skipped'"
+    elif only == "duplicate":
+        sql += " AND a.extraction_status='duplicate'"
     if src:
         sql += " AND a.source=?"
         args.append(src)

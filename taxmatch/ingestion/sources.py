@@ -16,6 +16,9 @@ class Source:
     publisher: str = ""
     default_enabled: bool = True
     note: str = ""
+    keywords: bool = False        # γενικό portal: μόνο άρθρα με φορολογικές/λογιστικές λέξεις-κλειδιά πάνε στο LLM
+    max_items: int = 0            # >0: κρατά μόνο τα τόσα νεότερα (π.χ. feed με χιλιάδες ιστορικά άρθρα)
+    available: bool = True        # False: δεν μπορεί να ληφθεί αυτόματα (π.χ. Cloudflare challenge) — δεν τρέχει ποτέ
 
 
 SOURCES: list[Source] = [
@@ -31,6 +34,20 @@ SOURCES: list[Source] = [
     Source("eforologia_9", "e-forologia — Αναπτυξιακά", f"{EFOROLOGIA}/rss_id9.xml", publisher="e-forologia.gr"),
     Source("eforologia_5", "e-forologia — Διεθνή", f"{EFOROLOGIA}/rss_id5.xml", publisher="e-forologia.gr",
            default_enabled=False, note="Σπάνια σχετικό με ελληνικές επιχειρήσεις — off από προεπιλογή."),
+    Source("ot_forologia", "Οικονομικός Ταχυδρόμος — Φορολογία", "https://www.ot.gr/category/oikonomia/forologia/feed",
+           publisher="ot.gr", note="Κατηγορία Οικονομία → Φορολογία (περιλαμβάνει και εργασιακά/ασφαλιστικά)."),
+    Source("forologikanea", "Φορολογικά Νέα (forologikanea.gr)", "https://www.forologikanea.gr/RSS/news/",
+           publisher="forologikanea.gr", keywords=True),
+    Source("naftemporiki_tax", "Ναυτεμπορική — θέμα «Φορολογία»", "https://www.naftemporiki.gr/tag/forologia/feed/",
+           publisher="naftemporiki.gr", keywords=True, note="Ετικέτα «φορολογία»· φιλτράρεται με λέξεις-κλειδιά."),
+    Source("capital_all", "Capital.gr (όλα τα νέα)", "https://www.capital.gr/api/tags/all/", publisher="capital.gr",
+           keywords=True, note="Γενικό feed — δεν υπάρχει feed μόνο για φορολογία· φιλτράρεται με λέξεις-κλειδιά."),
+    Source("eforiakoi", "ΠΟΕ-ΔΟΥ (eforiakoi.org)", "https://www.eforiakoi.org/?format=feed&type=rss",
+           publisher="eforiakoi.org", keywords=True, max_items=60,
+           note="Συνδικαλιστική ενημέρωση εφοριακών· κυρίως εργασιακά, μόνο περιστασιακά εγκύκλιοι (φιλτράρεται). "
+                "Το feed είναι ~4 MB."),
+    Source("forin", "forin.gr", "https://www.forin.gr/", publisher="forin.gr", default_enabled=False, available=False,
+           note="Προστατεύεται με Cloudflare (έλεγχος ανθρώπου)· δεν λαμβάνεται αυτόματα και δεν παρακάμπτεται."),
 ]
 
 BY_ID = {s.id: s for s in SOURCES}

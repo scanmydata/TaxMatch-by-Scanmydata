@@ -2,26 +2,29 @@
 {% block title %}Προεπισκόπηση εισαγωγής — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="topbar"><div><h1>Προεπισκόπηση εισαγωγής</h1>
-  <div class="sub">{{ res.rows|length }} έγκυροι ΑΦΜ · {{ new_count }} νέοι · {{ existing_count }} υπάρχοντες</div></div></div>
+  <div class="sub">{{ res.rows|length }} έγκυροι ΑΦΜ · {{ new_count }} νέοι · {{ existing_count }} υπάρχοντες ·
+    {{ res.credential_count }} με κωδικούς TAXISnet · μορφή: {{ 'μπλοκ ανά υπόχρεο' if res.detected == 'blocks' else 'πίνακας' }}</div></div></div>
 
 {% for w in res.warnings %}<div class="alert warn">{{ w }}</div>{% endfor %}
 {% if res.invalid %}<div class="alert danger">{{ res.invalid|length }} γραμμές αγνοήθηκαν (μη έγκυρος ΑΦΜ):
   {% for line, val in res.invalid[:8] %}γρ. {{ line }} «{{ val }}»{{ ', ' if not loop.last }}{% endfor %}{% if res.invalid|length > 8 %}…{% endif %}</div>{% endif %}
 {% if res.duplicates %}<div class="alert info">{{ res.duplicates }} διπλότυποι ΑΦΜ στο αρχείο αγνοήθηκαν.</div>{% endif %}
+{% if not res.credential_count %}<div class="alert info">Δεν βρέθηκαν κωδικοί TAXISnet στο αρχείο — οι πελάτες θα εισαχθούν χωρίς αυτούς (μπορείτε να τους προσθέσετε αργότερα).</div>{% endif %}
 
-<div class="card" style="padding:0">
+<div class="tablecard">
   <table class="grid">
-    <thead><tr><th>ΑΦΜ</th><th>Επωνυμία</th><th>ΚΑΔ</th><th>Έλεγχος ΑΦΜ</th></tr></thead>
+    <thead><tr><th>ΑΦΜ</th><th>Επωνυμία</th><th>ΚΑΔ</th><th>Έλεγχος ΑΦΜ</th><th>Κωδικοί TAXISnet</th></tr></thead>
     <tbody>
       {% for r in res.rows[:50] %}
       <tr><td>{{ r.afm }}</td><td>{{ r.name or '—' }}</td><td>{{ r.kads|join(', ') or '—' }}</td>
-        <td>{% if r.checksum_ok %}<span class="chip ok">έγκυρος</span>{% else %}<span class="chip warn">ψηφίο ελέγχου;</span>{% endif %}</td></tr>
+        <td class="c">{% if r.checksum_ok %}<span class="st-ok">έγκυρος</span>{% else %}<span class="st-warn">ψηφίο ελέγχου;</span>{% endif %}</td>
+        <td class="c">{% if r.has_credentials %}<span class="st-ok">✓ βρέθηκαν</span>{% else %}<span class="muted">—</span>{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>
-  {% if res.rows|length > 50 %}<div class="muted small" style="padding:10px">… και άλλοι {{ res.rows|length - 50 }}.</div>{% endif %}
 </div>
-<form method="post" action="{{ url_for('main.clients_import_confirm') }}" style="margin-top:16px; display:flex; gap:8px">
+{% if res.rows|length > 50 %}<div class="muted small" style="padding:8px">… και άλλοι {{ res.rows|length - 50 }}.</div>{% endif %}
+<form method="post" action="{{ url_for('main.clients_import_confirm') }}" class="row" style="margin-top:14px">
   <input type="hidden" name="token" value="{{ token }}">
   <button class="btn primary" {{ 'disabled' if not res.rows }}>Εισαγωγή {{ res.rows|length }} πελατών</button>
   <a class="btn" href="{{ url_for('main.clients_import') }}">Πίσω</a>

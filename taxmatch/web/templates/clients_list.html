@@ -2,55 +2,77 @@
 {% from "_macros.html" import empty %}
 {% block title %}Πελάτες — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="topbar">
-  <div><h1>Πελάτες</h1><div class="sub">{{ total }} συνολικά{% if rows|length != total %} · εμφανίζονται {{ rows|length }}{% endif %}</div></div>
-  <span class="right" style="display:flex; gap:8px">
-    <form method="post" action="{{ url_for('main.clients_enrich') }}" class="inline-form"><button class="btn" title="Ανάκτηση στοιχείων από ΓΕΜΗ/ΑΑΔΕ για όσους περιμένουν">⟳ Εμπλουτισμός στοιχείων</button></form>
-    <a class="btn" href="{{ url_for('main.clients_import') }}">⬆ Εισαγωγή από Excel</a>
-    <a class="btn primary" href="{{ url_for('main.clients_new') }}">＋ Νέος πελάτης</a>
+<div class="filters" style="align-items:flex-start">
+  <select id="tblStatus" title="Φίλτρο κατάστασης">
+    <option value="">Όλοι</option>
+    <option value="ok">Πλήρη στοιχεία</option><option value="partial">Μερικά στοιχεία</option>
+    <option value="pending">Σε αναμονή</option><option value="failed">Αποτυχία ανάκτησης</option>
+    <option value="creds">Με κωδικούς TAXISnet</option><option value="nocreds">Χωρίς κωδικούς TAXISnet</option>
+  </select>
+  <input type="search" id="tblFilter" placeholder="Αναζήτηση σε όλες τις στήλες…" style="width:280px">
+  <span class="right row">
+    <button class="btn" type="button" data-bulk="lookup" data-needs-selection title="Νέα ανάκτηση επωνυμίας/ΚΑΔ/ΔΟΥ/ΦΠΑ για τους επιλεγμένους πελάτες">{{ icon('refresh', 16) }} Ανανέωση στοιχείων</button>
+    <a class="btn" href="{{ url_for('main.clients_import') }}">{{ icon('import', 16) }} Εισαγωγή Excel</a>
+  </span>
+</div>
+<div class="filters">
+  <span class="muted" id="selLabel">Κανένας πελάτης επιλεγμένος</span>
+  <span class="right row">
+    <button class="btn" type="button" id="btnSelAll">Επιλογή όλων</button>
+    <button class="btn" type="button" id="btnSelNone">Αποεπιλογή όλων</button>
+    <button class="btn" type="button" data-open="bulkCredDialog" data-needs-selection title="Ίδιοι κωδικοί TAXISnet σε όλους τους επιλεγμένους (π.χ. λογαριασμός με εξουσιοδοτήσεις)">{{ icon('key', 16) }} Κωδικοί TAXISnet…</button>
+    <button class="btn danger" type="button" data-bulk="delete" data-needs-selection data-confirm="Διαγραφή {n} πελατών μαζί με τα matches και τους κωδικούς τους;">{{ icon('delete', 16) }} Διαγραφή επιλεγμένων</button>
   </span>
 </div>
 
-<form class="filters" method="get">
-  <input type="search" name="q" value="{{ q }}" placeholder="Αναζήτηση ΑΦΜ ή επωνυμίας…" style="width:260px">
-  <input type="text" name="kad" value="{{ kad }}" placeholder="ΚΑΔ (π.χ. 47.11)" style="width:150px">
-  <select name="books">
-    <option value="">Κατηγορία βιβλίων: όλες</option>
-    <option value="Β" {{ 'selected' if books == 'Β' }}>Β</option><option value="Γ" {{ 'selected' if books == 'Γ' }}>Γ</option>
-  </select>
-  <select name="status">
-    <option value="">Κατάσταση στοιχείων: όλες</option>
-    {% for v, l in [('ok','Πλήρη'),('partial','Μερικά'),('pending','Σε αναμονή'),('failed','Αποτυχία')] %}
-    <option value="{{ v }}" {{ 'selected' if status == v }}>{{ l }}</option>{% endfor %}
-  </select>
-  <button class="btn">Φίλτρο</button>
-  {% if q or kad or books or status %}<a href="{{ url_for('main.clients_list') }}" class="btn">Καθαρισμός</a>{% endif %}
-</form>
-
-<div class="card" style="padding:0">
 {% if rows %}
-<table class="grid">
-  <thead><tr><th>ΑΦΜ</th><th>Επωνυμία</th><th>Νομική μορφή</th><th>Κύριος ΚΑΔ</th><th>Βιβλία</th><th>ΦΠΑ</th><th>Στοιχεία</th><th class="num">Matches</th></tr></thead>
+<div class="tablecard">
+<table class="grid" id="clientsTable">
+  <thead><tr>
+    <th class="chk"><input type="checkbox" id="selAll" title="Επιλογή όλων"></th>
+    <th>ΑΦΜ</th><th>Επωνυμία</th><th>Νομική μορφή</th><th>Κύριος ΚΑΔ</th><th>Βιβλία</th><th>ΦΠΑ</th><th>Στοιχεία</th><th>TAXISnet</th><th class="num">Matches</th>
+  </tr></thead>
   <tbody>
-  {% for r in rows %}
-    <tr>
+  {% for r in rows %}{% set c = creds.get(r.afm) %}
+    <tr data-afm="{{ r.afm }}" data-status="{{ r.lookup_status }}" data-creds="{{ '1' if c and c.complete else '0' }}">
+      <td class="chk"><input type="checkbox" class="rowchk"></td>
       <td class="nowrap"><a href="{{ url_for('main.client_detail', afm=r.afm) }}">{{ r.afm }}</a></td>
       <td>{{ r.name or '—' }}</td>
       <td>{{ r.legal_form or '—' }}</td>
-      <td>{% if r.kad_main_code %}<span class="nowrap">{{ r.kad_main_code }}</span> <span class="muted small">{{ r.kad_main_desc[:38] }}</span>{% else %}<span class="muted">—</span>{% endif %}
+      <td>{% if r.kad_main_code %}<span class="nowrap">{{ r.kad_main_code }}</span> <span class="muted small">{{ r.kad_main_desc[:34] }}</span>{% else %}<span class="muted">—</span>{% endif %}
         {% if r.kad_count > 1 %}<span class="chip">+{{ r.kad_count - 1 }}</span>{% endif %}</td>
-      <td>{{ r.books_category or '—' }}</td>
-      <td>{% if r.vat_subject == 1 %}Υπόχρεος{% elif r.vat_subject == 0 %}Όχι{% else %}<span class="muted">—</span>{% endif %}</td>
-      <td>{% set st = r.lookup_status %}
-        <span class="chip {{ {'ok':'ok','partial':'warn','failed':'danger','pending':'info'}.get(st, '') }}" {% if r.lookup_error %}title="{{ r.lookup_error }}"{% endif %}>
-          {{ {'ok':'πλήρη','partial':'μερικά','failed':'αποτυχία','pending':'αναμονή','manual':'χειροκίνητα'}.get(st, st) }}</span></td>
+      <td class="c">{{ r.books_category or '—' }}</td>
+      <td class="c">{% if r.vat_subject == 1 %}Υπόχρεος{% elif r.vat_subject == 0 %}Όχι{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="c">{% set st = r.lookup_status %}
+        <span class="{{ {'ok':'st-ok','partial':'st-warn','failed':'st-bad','pending':'st-muted'}.get(st, '') }}" {% if r.lookup_error %}title="{{ r.lookup_error }}"{% endif %}>
+          {{ {'ok':'Πλήρη','partial':'Μερικά','failed':'Αποτυχία','pending':'Αναμονή','manual':'Χειροκίνητα'}.get(st, st) }}</span></td>
+      <td class="c">{% if c and c.complete %}
+          {% if c.check_status == 'ok' %}<span class="st-ok" title="{{ c.check_message }}">Έγκυροι</span>
+          {% elif c.check_status in ('invalid','error') %}<span class="st-bad" title="{{ c.check_message }}">Πρόβλημα</span>
+          {% else %}<span class="st-warn" title="Δεν έχουν δοκιμαστεί ακόμη">Ορισμένοι</span>{% endif %}
+        {% else %}<span class="muted">—</span>{% endif %}</td>
       <td class="num">{{ match_counts.get(r.afm, 0) or '—' }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-  {{ empty('Δεν βρέθηκαν πελάτες.', 'Εισάγετε πελάτες από Excel ή προσθέστε έναν με τον ΑΦΜ του.') }}
-{% endif %}
 </div>
+{% else %}
+<div class="card">{{ empty('Δεν υπάρχουν πελάτες ακόμη.', 'Πατήστε «Νέος πελάτης» (με ΑΦΜ — η επωνυμία έρχεται αυτόματα) ή εισάγετε από Excel.') }}</div>
+{% endif %}
+
+<dialog id="bulkCredDialog">
+  <form id="bulkCredForm" autocomplete="off">
+    <h1>{{ icon('key', 22) }} Κωδικοί TAXISnet επιλεγμένων</h1>
+    <div class="muted">Ορίζει τους <b>ίδιους</b> κωδικούς σε όλους τους επιλεγμένους πελάτες (π.χ. ένας λογαριασμός με εξουσιοδοτήσεις για όλους).
+      Για διαφορετικούς κωδικούς ανά πελάτη χρησιμοποιήστε την εισαγωγή από Excel ή το προφίλ κάθε πελάτη.</div>
+    <div class="frow"><label>Χρήστης:</label><input name="taxis_user" type="text" required></div>
+    <div class="frow"><label>Κωδικός:</label><input name="taxis_pass" type="password" required autocomplete="new-password"></div>
+    <div class="foot">
+      <button type="button" class="btn danger" data-bulk="clear_creds" data-confirm="Διαγραφή των κωδικών TAXISnet από {n} πελάτες;" style="margin-right:auto">Διαγραφή κωδικών επιλεγμένων</button>
+      <button type="submit" class="btn primary">Ορισμός</button>
+      <button type="button" class="btn" data-close>Άκυρο</button>
+    </div>
+  </form>
+</dialog>
 {% endblock %}

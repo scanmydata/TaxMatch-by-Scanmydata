@@ -9,7 +9,7 @@
 
 <form class="filters" method="get">
   <div class="seg">
-    {% for v, l in [('matched','Που αφορούν πελάτες'),('all','Όλα'),('irrelevant','Άσχετα'),('pending','Σε αναμονή ανάλυσης')] %}
+    {% for v, l in [('matched','Που αφορούν πελάτες'),('all','Όλα'),('irrelevant','Άσχετα'),('skipped','Φιλτραρισμένα'),('duplicate','Διπλότυπα'),('pending','Σε αναμονή')] %}
     <a href="?only={{ v }}&days={{ days }}&source={{ src }}&q={{ q }}" class="{{ 'on' if only == v }}">{{ l }}</a>{% endfor %}
   </div>
   <select name="source" onchange="this.form.submit()">
@@ -30,7 +30,9 @@
     {% set st = a.extraction_status %}
     {% if st == 'pending' %}<span class="chip">σε αναμονή ανάλυσης</span>
     {% elif st == 'failed' %}<span class="chip danger" title="{{ a.extraction_error }}">αποτυχία ανάλυσης</span>
-    {% elif st == 'irrelevant' %}<span class="chip">άσχετο</span>{% endif %}
+    {% elif st == 'irrelevant' %}<span class="chip">άσχετο</span>
+    {% elif st == 'skipped' %}<span class="chip" title="Γενικό portal: δεν βρέθηκαν φορολογικές λέξεις-κλειδιά, δεν στάλθηκε στο LLM">φιλτραρίστηκε</span>
+    {% elif st == 'duplicate' %}<span class="chip" title="Ίδιο θέμα υπάρχει ήδη από άλλη πηγή">διπλότυπο</span>{% endif %}
     {% if a.scope and a.scope.type == 'targeted' %}<span class="chip warn" title="Στοχευμένο scope">
       {% if a.scope.kad_prefixes %}ΚΑΔ {{ a.scope.kad_prefixes|join(', ') }} {% endif %}{% if a.scope.books_categories %}Βιβλία {{ a.scope.books_categories|join('/') }} {% endif %}{% if a.scope.legal_forms %}{{ a.scope.legal_forms|join('/') }}{% endif %}</span>
     {% elif a.scope and a.scope.type == 'all' and st == 'done' %}<span class="chip ok">για όλους</span>{% endif %}

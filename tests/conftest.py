@@ -15,6 +15,10 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAXMATCH_ENC_KEY", Fernet.generate_key().decode())
     for var in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "BUSINESS_PORTAL_KEY", "AADE_USER", "AADE_PASS"):
         monkeypatch.delenv(var, raising=False)
+    # Ποτέ πραγματική κλήση VIES από tests (και χωρίς το throttle του 1″)
+    from taxmatch.business_profiles import vies
+    monkeypatch.setattr(vies, "MIN_INTERVAL", 0)
+    monkeypatch.setattr(vies, "lookup", lambda afm, session=None: vies.ViesResult(error="offline (test)"))
     yield
 
 

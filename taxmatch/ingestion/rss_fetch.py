@@ -6,7 +6,7 @@ import hashlib
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -17,6 +17,7 @@ import requests
 from .. import db
 from ..http import DEFAULT_TIMEOUT, make_session
 from ..textutil import strip_tags
+from . import filters
 from .sources import Source
 
 log = logging.getLogger(__name__)
@@ -85,22 +86,42 @@ def fetch_feed(source: Source, session: Optional[requests.Session] = None) -> li
     s = session or make_session()
     resp = s.get(source.url, timeout=DEFAULT_TIMEOUT)
     resp.raise_for_status()
-    return parse_feed(resp.content, calendar=(source.kind == "calendar"))
+    items = parse_feed(resp.content, calendar=(source.kind == "calendar"))
+    if source.max_items and len(items) > source.max_items:
+        items = sorted(items, key=lambda i: i.published_at or "", reverse=True)[:source.max_items]
+    return items
 
 
-def store_articles(conn: sqlite3.Connection, source_id: str, items: list[FeedItem]) -> int:
-    """INSERT OR IGNORE βάσει url_hash. Επιστρέφει πόσα ήταν νέα."""
+def store_articles(conn: sqlite3.Connection, source_id: str, items: list[FeedItem], keywords: bool = False) -> int:
+    """INSERT OR IGNORE βάσει url_hash. Επιστρέφει πόσα ήταν νέα.
+
+    * `keywords`: γενικό portal — άρθρα χωρίς φορολογικές λέξεις-κλειδιά μπαίνουν ως 'skipped' (δεν πάνε στο LLM).
+    * Ίδιο θέμα που υπάρχει ήδη από άλλη πηγή (ίδιος/σχεδόν ίδιος τίτλος, τελευταίες 14 μέρες) μπαίνει ως 'duplicate'
+      με `duplicate_of` — δεν αναλύεται ξανά και δεν παράγει διπλά matches."""
     now = db.utcnow()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent = [(r["id"], r["title_key"]) for r in conn.execute(
+        "SELECT id, title_key FROM articles WHERE title_key != '' AND duplicate_of IS NULL "
+        "AND COALESCE(published_at, fetched_at) >= ?", (cutoff,))]
     new = 0
     conn.execute("BEGIN")
     try:
         for it in items:
+            key = filters.title_key(it.title)
+            dup = filters.find_duplicate(key, recent)
+            status = "pending"
+            if dup is not None:
+                status = "duplicate"
+            elif keywords and not filters.is_tax_relevant(it.title, it.summary):
+                status = "skipped"
             cur = conn.execute(
-                "INSERT OR IGNORE INTO articles(source,title,url,url_hash,published_at,fetched_at,category,raw_summary) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (source_id, it.title, it.url, url_hash(it.url), it.published_at, now, it.category, it.summary),
-            )
-            new += cur.rowcount
+                "INSERT OR IGNORE INTO articles(source,title,url,url_hash,published_at,fetched_at,category,raw_summary,"
+                "title_key,duplicate_of,extraction_status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, it.title, it.url, url_hash(it.url), it.published_at, now, it.category, it.summary, key, dup, status))
+            if cur.rowcount:
+                new += 1
+                if dup is None:
+                    recent.append((cur.lastrowid, key))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -142,7 +163,7 @@ def ingest(conn: sqlite3.Connection, sources: list[Source], session: Optional[re
             on_progress(f"Λήψη: {src.name}")
         try:
             items = fetch_feed(src, s)
-            new = store_obligations(conn, items) if src.kind == "calendar" else store_articles(conn, src.id, items)
+            new = store_obligations(conn, items) if src.kind == "calendar" else store_articles(conn, src.id, items, keywords=src.keywords)
             stats[src.id] = {"fetched": len(items), "new": new}
         except Exception as exc:  # δίκτυο, XML, κ.λπ.
             log.warning("Αποτυχία πηγής %s: %s", src.id, exc)

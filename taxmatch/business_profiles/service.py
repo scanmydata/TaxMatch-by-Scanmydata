@@ -1,4 +1,4 @@
-"""Πελάτες: CRUD στη βάση + ενοποίηση lookups (ΓΕΜΗ + ΑΑΔΕ). Το UI και το scheduler περνούν από εδώ."""
+"""Πελάτες: CRUD στη βάση + ενοποίηση lookups (VIES + ΓΕΜΗ + ΑΑΔΕ). Το UI και το scheduler περνούν από εδώ."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ import requests
 
 from .. import db, settings_store
 from ..identifiers import format_kad, kad_digits, normalize_afm
-from . import lookup_aade, lookup_business_portal as portal
+from . import credentials, lookup_aade, lookup_business_portal as portal, vies
 from .import_excel import ImportResult
 from .vat_profile import interpret_vat_profile
 
@@ -125,8 +125,9 @@ def for_matching(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]:
-    """Αποθηκεύει τις γραμμές του import. Υπάρχοντες πελάτες δεν αντικαθίστανται (μόνο συμπληρώνεται κενή επωνυμία)."""
-    added = updated = 0
+    """Αποθηκεύει τις γραμμές του import. Υπάρχοντες πελάτες δεν αντικαθίστανται (συμπληρώνεται μόνο κενή επωνυμία)·
+    οι κωδικοί TAXISnet όμως ΕΝΗΜΕΡΩΝΟΝΤΑΙ και σε υπάρχοντες (η μαζική ρύθμιση κωδικών είναι βασική χρήση)."""
+    added = updated = creds = 0
     for r in res.rows:
         if add(conn, r.afm, r.name, source="excel", kads=r.kads):
             added += 1
@@ -135,7 +136,10 @@ def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]
             if r.name and not existing["name"]:
                 conn.execute("UPDATE businesses SET name=?, updated_at=? WHERE afm=?", (r.name, db.utcnow(), r.afm))
                 updated += 1
-    return {"added": added, "updated": updated, "invalid": len(res.invalid), "duplicates": res.duplicates}
+        if r.has_credentials and credentials.set_(conn, r.afm, r.taxis_user, r.taxis_pass):
+            creds += 1
+    return {"added": added, "updated": updated, "invalid": len(res.invalid), "duplicates": res.duplicates,
+            "credentials": creds}
 
 
 # ------------------------------------------------------------------ lookups
@@ -153,6 +157,7 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     raw: dict[str, Any] = {}
 
     attempted = False
+    definitive = False        # κάποια πηγή απάντησε οριστικά (όχι απλώς σφάλμα δικτύου)
     key = settings_store.get(conn, "business_portal_key")
     if key:
         attempted = True
@@ -167,15 +172,19 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
             kads = c.get("kads") or []
             sources.append("ΓΕΜΗ")
         except portal.NotFound as exc:
+            definitive = True
             errors.append(f"ΓΕΜΗ: {exc}")
         except PermissionError as exc:
+            definitive = True
             errors.append(f"ΓΕΜΗ: {exc}")
         except requests.RequestException as exc:
             errors.append(f"ΓΕΜΗ: σφάλμα δικτύου ({str(exc)[:120]})")
     else:
         errors.append("ΓΕΜΗ: δεν έχει οριστεί API key (Ρυθμίσεις)")
 
-    user, pwd = settings_store.get(conn, "aade_user"), settings_store.get(conn, "aade_pass")
+    # Κωδικοί TAXISnet: πρώτα του ίδιου του πελάτη, αλλιώς του λογαριασμού γραφείου (Ρυθμίσεις).
+    own = credentials.get(conn, afm)
+    user, pwd = own or (settings_store.get(conn, "aade_user"), settings_store.get(conn, "aade_pass"))
     if user and pwd:
         attempted = True
         try:
@@ -190,6 +199,7 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
                 fields["_vat"] = vat
                 sources.append("ΑΑΔΕ")
             else:
+                definitive = definitive or a.get("reason") in ("InvalidCredentials", "NoRegistry")
                 errors.append("ΑΑΔΕ: " + lookup_aade.REASONS_EL.get(a.get("reason") or "", str(a.get("reason"))))
         except requests.RequestException as exc:
             errors.append(f"ΑΑΔΕ: σφάλμα δικτύου ({str(exc)[:120]})")
@@ -197,10 +207,26 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
             log.exception("aade lookup απέτυχε για %s", afm)
             errors.append(f"ΑΑΔΕ: μη αναμενόμενο σφάλμα ({str(exc)[:120]})")
     else:
-        errors.append("ΑΑΔΕ: δεν έχουν οριστεί credentials TAXISnet (Ρυθμίσεις)")
+        errors.append("ΑΑΔΕ: δεν έχουν οριστεί κωδικοί TAXISnet (στον πελάτη ή στις Ρυθμίσεις)")
 
-    if not attempted:
-        # Καμία πηγή δεν είναι ρυθμισμένη: ο πελάτης μένει 'pending' και θα εμπλουτιστεί μόλις μπουν keys.
+    # VIES: επωνυμία/διεύθυνση χωρίς key — μόνο αν καμία άλλη πηγή δεν έδωσε όνομα (και δεν υπάρχει ήδη).
+    current_name = conn.execute("SELECT name FROM businesses WHERE afm=?", (afm,)).fetchone()["name"]
+    if not fields.get("name") and not current_name:
+        attempted = True
+        v = vies.lookup(afm, session)
+        if v.valid and v.name:
+            fields["name"] = v.name
+            if v.address:
+                fields.setdefault("address", v.address)
+            sources.append("VIES")
+        elif v.error:
+            errors.append(f"VIES: {v.error}")
+        elif not v.valid:
+            definitive = True
+            errors.append("VIES: το ΑΦΜ δεν βρέθηκε στο μητρώο ΦΠΑ")
+
+    if not attempted or (not sources and not definitive):
+        # Καμία πηγή ρυθμισμένη, ή μόνο παροδικά σφάλματα δικτύου: ο πελάτης μένει 'pending' και ξαναδοκιμάζεται.
         return {"status": "pending", "errors": errors, "sources": []}
 
     vat = fields.pop("_vat", None)
@@ -227,15 +253,18 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
 
 def enrich_pending(conn: sqlite3.Connection, limit: int = 20, session: Optional[requests.Session] = None,
                    on_progress: Optional[Callable[[str], None]] = None,
-                   aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile) -> dict[str, int]:
-    """Lookup για πελάτες σε κατάσταση 'pending' (νέοι από import). Το ΓΕΜΗ επιτρέπει 8 αιτήματα/λεπτό, γι' αυτό
-    το batch είναι φραγμένο και συνεχίζει στον επόμενο έλεγχο."""
-    rows = conn.execute("SELECT afm FROM businesses WHERE lookup_status='pending' ORDER BY created_at LIMIT ?",
-                        (limit,)).fetchall()
+                   aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile,
+                   afms: Optional[list[str]] = None, include_partial: bool = False) -> dict[str, int]:
+    """Lookup για πελάτες σε κατάσταση 'pending' (νέοι από import) — ή για συγκεκριμένους `afms`. Το ΓΕΜΗ επιτρέπει
+    8 αιτήματα/λεπτό και το VIES 1/δευτ., γι' αυτό το batch είναι φραγμένο και συνεχίζει στον επόμενο έλεγχο.
+    `include_partial`: ξαναδοκιμάζει και όσους έχουν μερικά στοιχεία (π.χ. μετά την προσθήκη key/κωδικών)."""
+    if afms is not None:
+        rows = [{"afm": a} for a in afms]
+    else:
+        statuses = "('pending','partial')" if include_partial else "('pending')"
+        rows = conn.execute(f"SELECT afm FROM businesses WHERE lookup_status IN {statuses} ORDER BY created_at LIMIT ?",
+                            (limit,)).fetchall()
     stats = {"processed": 0, "ok": 0, "partial": 0, "failed": 0, "pending": 0}
-    if not (settings_store.get(conn, "business_portal_key")
-            or (settings_store.get(conn, "aade_user") and settings_store.get(conn, "aade_pass"))):
-        return stats                       # τίποτα ρυθμισμένο: δεν έχει νόημα να διατρέξουμε τους πελάτες
     for i, r in enumerate(rows, 1):
         if on_progress:
             on_progress(f"Εμπλουτισμός πελατών {i}/{len(rows)}")

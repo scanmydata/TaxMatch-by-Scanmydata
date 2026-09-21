@@ -42,5 +42,5 @@
 {%- endmacro %}
 
 {% macro run_button(label='Έλεγξε τώρα') -%}
-  <button type="button" class="btn primary" data-run-check>⟳ {{ label }}</button>
+  <button type="button" class="btn primary" data-run-check>{{ icon('refresh', 16) }} {{ label }}</button>
 {%- endmacro %}
