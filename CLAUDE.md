@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 216 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 220 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
