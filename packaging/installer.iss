@@ -1,9 +1,9 @@
 ; Inno Setup 6 — TaxMatch by ScanMyData
-; Μεταγλώττιση:  ISCC packaging\installer.iss /DAppVersion=0.3.0   (ή packaging\build.ps1 που κάνει τα πάντα)
+; Μεταγλώττιση:  ISCC packaging\installer.iss /DAppVersion=0.3.1   (ή packaging\build.ps1 που κάνει τα πάντα)
 ; Προαπαιτούμενο: dist\TaxMatch\ από `pyinstaller packaging\taxmatch.spec`.
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.3.1"
 #endif
 #define AppName "TaxMatch by ScanMyData"
 #define AppExe "TaxMatch.exe"
