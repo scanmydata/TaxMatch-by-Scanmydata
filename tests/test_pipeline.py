@@ -6,7 +6,7 @@ from taxmatch import db, pipeline, settings_store
 from taxmatch.business_profiles import service
 from taxmatch.ingestion import sources
 from taxmatch.matching import engine
-from tests.fakes import FakeResponse, FakeSession
+from tests.fakes import FakeResponse, FakeSession, calendar_page
 
 AFM_SHOP, AFM_CAFE, AFM_IT = "094259216", "123456783", "999999999"
 
@@ -21,9 +21,8 @@ NEWS_FEED = """<?xml version="1.0" encoding="utf-8"?><rss version="2.0"><channel
 <description>Γ</description><pubDate>Sun, 20 Sep 2026 10:00:00 GMT</pubDate></item>
 </channel></rss>"""
 
-CAL_FEED = """<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>c</title>
-<item><title>Υποβολή ΦΠΑ</title><description>d</description><pubDate>Wed, 30 Sep 2026 00:00:00 +0300</pubDate>
-<guid>https://www.taxheaven.gr/calendar/event/1</guid><link>https://www.taxheaven.gr/calendar/event/1</link></item></channel></rss>"""
+CAL_PAGE = calendar_page("09", "2026", [{"Title": "Υποβολή ΦΠΑ", "Date": "09/30/2026",
+                                        "url": "https://www.taxheaven.gr/calendar/event/1"}])
 
 SCOPES = {
     "ΦΠΑ για όλους": {"relevant": True, "summary": "Παράταση ΦΠΑ", "scope": {"type": "all"}, "deadline": "2026-10-15",
@@ -61,14 +60,16 @@ def world(conn, monkeypatch):
         service.update_fields(conn, afm, {"books_category": books})
     s = FakeSession()
     s.route("soft_new", FakeResponse(NEWS_FEED))
-    s.route("soft_dat", FakeResponse(CAL_FEED))
+    s.route("taxheaven.gr/calendar", FakeResponse(CAL_PAGE, headers={"content-type": "text/html"}))
     s.route("groq.com", llm_handler)
     return s
 
 
 def test_full_pipeline_end_to_end(conn, world):
     stats = pipeline.run_pipeline("manual", session=world, conn=conn)
-    assert stats["ingest"]["taxheaven_new"]["new"] == 4 and stats["ingest"]["taxheaven_dat"]["new"] == 1
+    assert stats["ingest"]["taxheaven_new"]["new"] == 4
+    assert stats["ingest"]["taxheaven_dat"] == {"months": 5, "refreshed": 5, "errors": 0}
+    assert conn.execute("SELECT COUNT(*) FROM obligations_general").fetchone()[0] == 1  # ίδιο guid σε κάθε μήνα -> 1 γραμμή
     assert stats["extract"]["done"] == 3 and stats["extract"]["irrelevant"] == 1
     assert not stats["errors"]
 

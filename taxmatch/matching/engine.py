@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -11,11 +12,18 @@ from ..business_profiles import service as clients
 from .match import match_business
 
 MATCH_WINDOW_DAYS = 45
+_REMATCH_LOCK = threading.Lock()
 
 
 def rematch(conn: sqlite3.Connection, window_days: int = MATCH_WINDOW_DAYS) -> dict[str, int]:
     """Ξαναϋπολογίζει τα matches για πρόσφατα άρθρα. Idempotent: προσθέτει νέα, ενημερώνει αιτιολογία/βεβαιότητα
-    των υπαρχόντων (το feedback μένει) και αφαιρεί όσα δεν ισχύουν πια ΜΟΝΟ αν δεν έχουν feedback."""
+    των υπαρχόντων (το feedback μένει) και αφαιρεί όσα δεν ισχύουν πια ΜΟΝΟ αν δεν έχουν feedback.
+    Το lock σειριοποιεί τα rematch μέσα στο ίδιο process (ουρά ανάκτησης + έλεγχος + επεξεργασία πελάτη)."""
+    with _REMATCH_LOCK:
+        return _rematch(conn, window_days)
+
+
+def _rematch(conn: sqlite3.Connection, window_days: int) -> dict[str, int]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     businesses = clients.for_matching(conn)
     arts = conn.execute("SELECT id, extracted_json FROM articles WHERE extraction_status='done' "

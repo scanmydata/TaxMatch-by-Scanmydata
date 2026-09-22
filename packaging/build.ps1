@@ -1,4 +1,4 @@
-<#
+﻿<#
   Χτίζει τον installer:  powershell -ExecutionPolicy Bypass -File packaging\build.ps1 [-SkipTests]
   Βήματα: venv + εξαρτήσεις -> tests -> εικονίδια -> PyInstaller (dist\TaxMatch) -> Inno Setup (installer-output\).
   Απαιτεί: Python 3.12 (ή uv) και Inno Setup 6 (ISCC.exe).
@@ -11,7 +11,7 @@ Set-Location $root
 $version = (Select-String -Path "taxmatch\__init__.py" -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
 Write-Host "TaxMatch $version" -ForegroundColor Cyan
 
-# 1. venv (Python 3.12: το 3.14 δεν έχει ακόμη wheels για όλα τα dependencies του pywebview/pythonnet)
+# 1. venv (Python 3.12: το ίδιο σε όλο το έργο — βλ. CLAUDE.md)
 $py = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
   if (Get-Command uv -ErrorAction SilentlyContinue) { uv venv --python 3.12 .venv }

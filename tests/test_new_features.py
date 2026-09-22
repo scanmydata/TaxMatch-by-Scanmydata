@@ -299,6 +299,14 @@ def test_keyword_prefilter():
     assert not filters.is_tax_relevant("Ο Ολυμπιακός νίκησε στο Καραϊσκάκη")
 
 
+def test_keyword_prefilter_catches_payroll_and_labor_topics():
+    """Μισθοδοσία/εργατικά από την πλευρά του εργοδότη — να ΜΗΝ σκιπάρονται πριν το LLM."""
+    for title in ("Αύξηση κατώτατου μισθού: πώς επηρεάζει τη μισθοδοσία", "Νέο πλαίσιο για τις υπερωρίες εργαζομένων",
+                  "Τι αλλάζει στις αναγγελίες προσλήψεων στο ΕΡΓΑΝΗ", "Συλλογική σύμβαση εργασίας: οι αλλαγές",
+                  "Δώρο Χριστουγέννων 2026: πότε καταβάλλεται", "Τηλεργασία: οι υποχρεώσεις του εργοδότη"):
+        assert filters.is_tax_relevant(title), title
+
+
 def test_general_portal_articles_are_skipped_not_lost(conn):
     n = rss_fetch.store_articles(conn, "capital_all", [item("Ρωσία: Επίθεση με drone", "https://c.gr/1"),
                                                        item("Νέα ρύθμιση για ΦΠΑ επιχειρήσεων", "https://c.gr/2")], keywords=True)

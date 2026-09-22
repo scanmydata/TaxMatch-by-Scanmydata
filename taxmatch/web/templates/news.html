@@ -38,7 +38,7 @@
     {% elif a.scope and a.scope.type == 'all' and st == 'done' %}<span class="chip ok">για όλους</span>{% endif %}
     <span class="right">{{ due_badge(a.deadline) }}</span>
   </div>
-  <h3><a class="ext" href="{{ a.url }}" target="_blank" rel="noopener">{{ a.title }}</a></h3>
+  <h3><a class="ext" href="{{ a.url }}" target="_blank" rel="noopener" data-summary="{{ a.summary }}" data-action="{{ a.action_required or '' }}" data-source="{{ a.source|source_name }}" data-date="{{ a.published_at|date_el }}">{{ a.title }}</a></h3>
   {% if a.summary %}<div class="summary">{{ a.summary }}</div>{% endif %}
   {% if a.action_required %}<div class="action">➜ {{ a.action_required }}</div>{% endif %}
   {% if a.matches %}

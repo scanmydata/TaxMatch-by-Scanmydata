@@ -1,7 +1,12 @@
-Flask>=3.0,<4
 requests>=2.31
 feedparser>=6.0.11
 cryptography>=42
 openpyxl>=3.1
 python-dotenv>=1.0
-pywebview>=5.0
+pyside6>=6.7
+# Τα Windows δεν έχουν βάση ζωνών ώρας: χωρίς αυτό, το ZoneInfo("Europe/Athens") στο logs.py αποτυγχάνει
+# και το αρχείο καταγραφής γράφει ώρα μηχανήματος αντί για ώρα Ελλάδας.
+tzdata>=2024.1
+# Flask: ΜΟΝΟ για το test suite (tests/test_web.py και συγγενή) και το εσωτερικό `taxmatch --serve` (ανάπτυξη) —
+# η πραγματική εφαρμογή είναι native (taxmatch/gui/), όχι Flask/webview.
+Flask>=3.0,<4

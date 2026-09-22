@@ -30,6 +30,10 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("business_portal_key", "Business Portal (ΓΕΜΗ) API key", secret=True, env="BUSINESS_PORTAL_KEY"),
     SettingDef("aade_user", "TAXISnet χρήστης (γραφείου)", secret=True, env="AADE_USER"),
     SettingDef("aade_pass", "TAXISnet κωδικός (γραφείου)", secret=True, env="AADE_PASS"),
+    # Κατάσταση (όχι ρυθμίσεις χρήστη): αποτέλεσμα της τελευταίας σύνδεσης/ανάλυσης, για τις ειδοποιήσεις της εφαρμογής
+    SettingDef("aade_office_status", "Κατάσταση κωδικών γραφείου (ok|invalid|'')"),
+    SettingDef("aade_office_message", "Μήνυμα σύνδεσης γραφείου"),
+    SettingDef("llm_last_error", "Τελευταίο σφάλμα ανάλυσης LLM"),
     SettingDef("lookback_days", "Ημέρες αναδρομής άρθρων", default="10"),
     SettingDef("max_extractions_per_run", "Μέγιστες εξαγωγές LLM ανά έλεγχο", default="60"),
     SettingDef("fetch_full_text", "Λήψη πλήρους κειμένου άρθρου", default="1"),

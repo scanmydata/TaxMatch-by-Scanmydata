@@ -25,7 +25,7 @@
       <span>{{ g.source|source_name }}</span><span>·</span><span>{{ g.published_at|date_el }}</span>
       <span class="right">{{ due_badge(g.deadline) }}</span>
     </div>
-    <h3><a class="ext" href="{{ g.url }}" target="_blank" rel="noopener">{{ g.title }}</a></h3>
+    <h3><a class="ext" href="{{ g.url }}" target="_blank" rel="noopener" data-summary="{{ g.summary }}" data-action="{{ g.action_required or '' }}" data-source="{{ g.source|source_name }}" data-date="{{ g.published_at|date_el }}">{{ g.title }}</a></h3>
     {% if g.summary %}<div class="summary">{{ g.summary }}</div>{% endif %}
     {% if g.action_required %}<div class="action">➜ {{ g.action_required }}</div>{% endif %}
     {% if g.matches %}

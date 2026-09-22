@@ -10,12 +10,16 @@ tags (`all_tags`) ώστε να διορθωθεί χωρίς νέα ζωντα�
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urljoin, urlsplit
 
 import requests
+
+from ..textutil import strip_accents
 
 log = logging.getLogger(__name__)
 
@@ -154,11 +158,121 @@ REASONS_EL = {
     "NoAfm": "Δεν βρέθηκε ΑΦΜ.",
     "NoRegistry": "Δεν βρέθηκε εγγραφή στο Μητρώο ΑΑΔΕ για αυτό το ΑΦΜ (ή δεν υπάρχει πρόσβαση).",
 }
+# Το Μητρώο (myAADE) δείχνει ΜΟΝΟ τα στοιχεία του ΑΦΜ με το οποίο έγινε η σύνδεση (επαληθεύτηκε ζωντανά με 2 λογαριασμούς).
+REASON_OFFICE_NOREGISTRY = ("Ο λογαριασμός γραφείου βλέπει μόνο το δικό του Μητρώο — για τα στοιχεία του πελάτη "
+                            "χρειάζονται οι δικοί του κωδικοί TAXISnet (ή ΓΕΜΗ).")
 
 
-def fetch_company_profile(username: str, password: str, afm: Optional[str] = None) -> Dict[str, Any]:
-    """Login + Μητρώο (φυσικού + επιχείρησης) για `afm` (κενό = ο ΑΦΜ του λογαριασμού)."""
-    login = aade_login(username, password)
+def _parse_date(text: str) -> Optional[date]:
+    """'30/01/2026' -> date."""
+    try:
+        return datetime.strptime((text or "").strip(), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def parse_activities(payload: str) -> List[Dict[str, Any]]:
+    """JSON του `getMhtrwoDrastiriothtesEpixeir` -> [{code, descr, is_main, ceased}]. Ανεκτικό: άκυρο JSON -> []."""
+    try:
+        data = json.loads(payload or "[]")
+    except ValueError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for row in data if isinstance(data, list) else []:
+        if not isinstance(row, dict) or not str(row.get("kwdikos") or "").strip():
+            continue
+        out.append({
+            "code": str(row["kwdikos"]).strip(),
+            "descr": str(row.get("drasthriothta") or "").strip(),
+            # «ΚΥΡΙΑ» = κύρια δραστηριότητα· οι υπόλοιπες («ΔΕΥΤΕΡΕΥΟΥΣΑ», «ΒΟΗΘΗΤΙΚΗ»…) όχι
+            "is_main": strip_accents(str(row.get("eidos") or "")).upper().startswith("ΚΥΡΙΑ"),
+            "ceased": bool(row.get("hmdiakophs")),
+        })
+    return out
+
+
+def build_profile(target: str, login_afm: str, userdata: str, fysiko: str, epix: str, activities: str = "[]",
+                  today: Optional[date] = None) -> Dict[str, Any]:
+    """Καθαρή ερμηνεία των απαντήσεων του Μητρώου (χωρίς δίκτυο). Κανόνες (επαληθευμένοι σε ζωντανούς λογαριασμούς):
+
+    * Η «κατάσταση επιχείρησης» της ΑΑΔΕ γράφει ΕΝΕΡΓΗ ΚΑΙ ΜΕΤΑ τη διακοπή (είναι η τελευταία κατάσταση *πριν* τη
+      διακοπή)· μόνο το `hmdiakophs` λέει αν η επιχείρηση έκλεισε.
+    * Φυσικό πρόσωπο με κλειστή επιχείρηση είναι ΙΔΙΩΤΗΣ· νομικό πρόσωπο μένει νομικό ακόμη και διακομμένο.
+    * Η ΔΟΥ και η διεύθυνση είναι της επιχείρησης όσο ζει, αλλιώς του φυσικού προσώπου.
+    """
+    today = today or date.today()
+    has_fysiko = f"<afm>{target}</afm>" in fysiko
+    has_epix = "<hmenarxhs>" in epix
+    if not has_fysiko and not has_epix:
+        return {"ok": False, "reason": "NoRegistry", "afm": target}
+
+    cease_date = _tag(epix, "hmdiakophs") if has_epix else ""
+    cease_dt = _parse_date(cease_date)
+    ceased = bool(cease_date) and (cease_dt is None or cease_dt <= today)
+    business_open = has_epix and not ceased
+    if not has_epix:
+        state = "none"                                   # φυσικό πρόσωπο χωρίς επιχείρηση
+    else:
+        state = "ceased" if ceased else "active"
+
+    if has_fysiko:
+        kind = "ΑΤΟΜΙΚΗ ΕΠΙΧΕΙΡΗΣΗ" if business_open else "ΙΔΙΩΤΗΣ"
+    else:
+        kind = "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ"
+
+    same_account = target == login_afm
+    if kind == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ":
+        name = (_tag(userdata, "longepwnymia") or _tag(userdata, "onomatepwnymo")) if same_account else ""
+    elif same_account:
+        name = _tag(userdata, "onomatepwnymo")
+    else:
+        name = _tag(fysiko, "epwnymoa")
+    name = re.sub(r"\s+", " ", name).strip()
+
+    fysiko_tags, epix_tags = _parse_all_tags(fysiko), _parse_all_tags(epix)
+    all_tags = {**fysiko_tags, **epix_tags}
+    # Νομική μορφή: αν το Μητρώο έχει tag «...morfh...» (νομικά πρόσωπα)· αλλιώς το είδος (ΑΤΟΜΙΚΗ ΕΠΙΧΕΙΡΗΣΗ/ΙΔΙΩΤΗΣ)
+    form_tag = next((v for k, v in epix_tags.items() if "morfh" in k), "")
+    legal_form = form_tag or ("" if kind == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ" else kind)
+
+    acts = parse_activities(activities) if has_epix else []
+    live = [a for a in acts if not a["ceased"]]
+    kads = [{"code": a["code"], "descr": a["descr"], "is_main": a["is_main"]} for a in (live or ([] if ceased else acts))]
+
+    # «Ενεργός» αφορά τον ΠΕΛΑΤΗ: όποιος έκλεισε την ατομική του εξακολουθεί να υποβάλλει Ε1, άρα κρίνεται από την
+    # κατάσταση του φυσικού προσώπου· το νομικό πρόσωπο από τη διακοπή της επιχείρησης.
+    if has_fysiko:
+        client_active = bool(re.search(r"ΚΑΝΟΝΙΚΗ", strip_accents(_tag(fysiko, "katastashforologoumenoy")).upper()))
+    else:
+        client_active = not ceased
+    # Το προσωπικό μέρος (ταυτότητα, ημ. γέννησης, γονείς…) ΔΕΝ αποθηκεύεται· μόνο ό,τι αφορά την επιχείρηση.
+    raw = {"kind": kind, "business_state": state, "business": epix_tags if has_epix else {},
+           "person": {k: fysiko_tags[k] for k in ("katastashforologoumenoy", "armodiadoy") if k in fysiko_tags},
+           "activities": acts}
+    return {
+        "ok": True,
+        "afm": target,
+        "name": name,
+        "kind": kind,
+        "legal_form": legal_form,
+        "business_state": state,                          # active | ceased | none
+        "cease_date": cease_date,
+        "cease_reason": _tag(epix, "aitiadiakophs") if has_epix else "",
+        "business_start": _tag(epix, "hmenarxhs") if has_epix else "",
+        "doy": (_tag(epix, "doydescription") if business_open else "") or _tag(fysiko, "armodiadoy")
+               or _tag(epix, "doydescription"),
+        "active": client_active,
+        "address": _guess_address(all_tags if business_open else fysiko_tags or all_tags),
+        "kads": kads,
+        "all_tags": all_tags if has_epix else fysiko_tags,   # για interpret_vat_profile (ΦΠΑ/βιβλία)
+        "raw": raw,
+    }
+
+
+def fetch_company_profile(username: str, password: str, afm: Optional[str] = None,
+                          login_fn=aade_login) -> Dict[str, Any]:
+    """Login + Μητρώο (φυσικού + επιχείρησης + δραστηριοτήτων/ΚΑΔ) για `afm` (κενό = ο ΑΦΜ του λογαριασμού)."""
+    login = login_fn(username, password)
     if not login.get("ok"):
         return {"ok": False, "reason": login.get("reason")}
     http: _HyperHttp = login["http"]
@@ -173,38 +287,11 @@ def fetch_company_profile(username: str, password: str, afm: Optional[str] = Non
         return {"ok": False, "reason": "NoAfm"}
 
     fysiko = http.follow("GET", w + "/getMhtrwoFusikou/" + target)["text"]
-    has_fysiko = f"<afm>{target}</afm>" in fysiko
     epix = http.follow("GET", w + "/getMhtrwoEpixeirhshs/" + target)["text"]
-    has_epix = "<hmenarxhs>" in epix
-
-    if has_fysiko:
-        kind = "ΑΤΟΜΙΚΗ ΕΠΙΧΕΙΡΗΣΗ" if has_epix else "ΙΔΙΩΤΗΣ"
-    elif has_epix:
-        kind = "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ"
-    else:
-        return {"ok": False, "reason": "NoRegistry", "afm": target}
-
-    same_account = target == login_afm
-    if kind == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ":
-        name = (_tag(userdata, "longepwnymia") or _tag(userdata, "onomatepwnymo")) if same_account else ""
-    elif same_account:
-        name = _tag(userdata, "onomatepwnymo")
-    else:
-        name = _tag(fysiko, "epwnymoa")
-
-    all_tags = {**_parse_all_tags(fysiko), **_parse_all_tags(epix)}
-    active = (
-        not re.search(r"ΔΙΑΚΟΠ|ΑΝΕΝΕΡΓ", _tag(epix, "katastashepixeirhshs"), re.I)
-        if has_epix else bool(re.search(r"ΚΑΝΟΝΙΚΗ", _tag(fysiko, "katastashforologoumenoy"), re.I))
-    )
-    return {
-        "ok": True,
-        "afm": target,
-        "name": name,
-        "kind": kind,
-        "doy": _tag(epix, "doydescription") or _tag(fysiko, "armodiadoy"),
-        "active": active,
-        "business_start": _tag(epix, "hmenarxhs"),
-        "address": _guess_address(all_tags),
-        "all_tags": all_tags,
-    }
+    activities = "[]"
+    if "<hmenarxhs>" in epix:
+        try:
+            activities = http.follow("GET", w + "/getMhtrwoDrastiriothtesEpixeir/" + target)["text"]
+        except requests.RequestException:            # οι ΚΑΔ είναι επιπλέον· μην χαλάς όλο το lookup
+            log.warning("οι δραστηριότητες (ΚΑΔ) δεν ανακτήθηκαν για το ΑΦΜ %s", target)
+    return build_profile(target, login_afm, userdata, fysiko, epix, activities)

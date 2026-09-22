@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="el" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ξεκλείδωμα — {{ app_title }}</title>
+  <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+  <script>
+    try {
+      var t = localStorage.getItem('tm-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <style>
+    body { align-items: center; justify-content: center; }
+    .unlock-card { width: min(380px, 92vw); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; text-align: center; }
+    .unlock-card img { width: 56px; height: 56px; margin-bottom: 10px; }
+    .unlock-card h1 { font-size: 17px; margin-bottom: 4px; }
+    .unlock-card p { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+    .unlock-card input[type="password"] { width: 100%; margin-bottom: 12px; text-align: center; }
+    .unlock-card button { width: 100%; }
+  </style>
+</head>
+<body>
+  <form class="unlock-card" method="post">
+    <img src="{{ url_for('static', filename='img/logo-192.png') }}" alt="{{ app_title }}">
+    <h1>Ο φάκελος δεδομένων είναι προστατευμένος</h1>
+    <p>Δώστε τον κύριο κωδικό για να συνεχίσετε. Δίνεται μία φορά ανά εκκίνηση της εφαρμογής.</p>
+    {% if error %}<div class="alert danger" style="text-align:left">{{ error }}</div>{% endif %}
+    <input type="password" name="password" placeholder="Κύριος κωδικός" autofocus autocomplete="current-password" required>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn primary">Ξεκλείδωμα</button>
+  </form>
+</body>
+</html>

@@ -1,5 +1,7 @@
 /* TaxMatch — vanilla JS: θέμα/μενού, διάλογος «Νέος πελάτης» με αυτόματη επωνυμία (VIES), πίνακας πελατών (επιλογή,
-   φίλτρο, μαζικές ενέργειες), feedback 👍/👎, «Έλεγχος τώρα» με πρόοδο. */
+   φίλτρο, μαζικές ενέργειες), feedback 👍/👎, «Έλεγχος τώρα» και ανάκτηση στοιχείων με πρόοδο.
+   Όλα τα μηνύματα/επιβεβαιώσεις/σφάλματα πεδίων εμφανίζονται ΜΕΣΑ στην εφαρμογή (toasts, διάλογος) — ποτέ native
+   alert/confirm ή φυσαλίδες επικύρωσης του browser. */
 (function () {
   "use strict";
   const $ = (s, r) => (r || document).querySelector(s);
@@ -17,7 +19,66 @@
     return { ok: r.ok, status: r.status, data: data };
   }
 
+  // ---------------------------------------------------------------- μηνύματα μέσα στην εφαρμογή
+  function toast(msg, level, ms) {
+    const dlg = document.querySelector("dialog[open]");          // ανοιχτός διάλογος = top layer: το toast μπαίνει μέσα του
+    let box = dlg ? dlg.querySelector(".toasts-host") : $("#toasts");
+    if (dlg && !box) { box = document.createElement("div"); box.className = "toasts-host"; dlg.appendChild(box); }
+    if (!box) return;
+    const el = document.createElement("div");
+    el.className = "toast " + (level || "info");
+    const m = document.createElement("div"); m.className = "msg"; m.textContent = msg;
+    const x = document.createElement("button"); x.type = "button"; x.className = "x"; x.textContent = "×"; x.setAttribute("aria-label", "Κλείσιμο");
+    x.addEventListener("click", function () { el.remove(); });
+    el.appendChild(m); el.appendChild(x); box.appendChild(el);
+    if (ms !== 0) setTimeout(function () { el.remove(); }, ms || (level === "danger" ? 12000 : 7000));
+  }
+  function confirmDialog(msg, okLabel) {
+    const d = $("#confirmDialog");
+    if (!d || !d.showModal) return Promise.resolve(true);
+    $("#confirmMsg").textContent = msg;
+    $("#confirmOk").textContent = okLabel || "Συνέχεια";
+    return new Promise(function (resolve) {
+      const done = function (v) { d.removeEventListener("close", onClose); if (d.open) d.close(); resolve(v); };
+      const onClose = function () { resolve(false); };
+      $("#confirmOk").onclick = function () { done(true); };
+      $("#confirmCancel").onclick = function () { done(false); };
+      d.addEventListener("close", onClose, { once: true });
+      d.showModal();
+      $("#confirmCancel").focus();                  // προεπιλογή το ασφαλές: Άκυρο
+    });
+  }
+  try {                                             // μήνυμα που έμεινε από την προηγούμενη σελίδα (π.χ. μετά από ανανέωση)
+    const pending = sessionStorage.getItem("tm-toast");
+    if (pending) { sessionStorage.removeItem("tm-toast"); const t = JSON.parse(pending); toast(t.msg, t.level, t.ms); }
+  } catch (e) { /* χωρίς sessionStorage */ }
+  function toastAfterReload(msg, level) { try { sessionStorage.setItem("tm-toast", JSON.stringify({ msg: msg, level: level })); } catch (e) { toast(msg, level); } }
+
+  // ---------------------------------------------------------------- έλεγχος πεδίων (αντί για τις φυσαλίδες του browser)
+  function fieldLabel(el) {
+    const id = el.id && document.querySelector('label[for="' + el.id + '"]');
+    let lab = id || (el.closest("div,.frow") && el.closest("div,.frow").querySelector("label"));
+    let t = lab ? lab.textContent.replace(/[*:]/g, "").replace(/\s+/g, " ").trim() : (el.name || "πεδίο");
+    return t.length > 40 ? t.slice(0, 40) : t;
+  }
+  function invalidMessage(el) {
+    const v = el.validity, label = "«" + fieldLabel(el) + "»";
+    if (v.valueMissing) return el.type === "file" ? "Επιλέξτε αρχείο." : "Συμπληρώστε το πεδίο " + label + ".";
+    if (v.rangeUnderflow || v.rangeOverflow) return "Η τιμή του " + label + " πρέπει να είναι από " + (el.min || "…") + " έως " + (el.max || "…") + ".";
+    if (v.typeMismatch || v.patternMismatch) return "Μη έγκυρη τιμή στο πεδίο " + label + ".";
+    if (v.tooShort) return "Το πεδίο " + label + " είναι πολύ σύντομο.";
+    return "Ελέγξτε το πεδίο " + label + ".";
+  }
+  $$("form").forEach(function (f) { f.setAttribute("novalidate", ""); });
+  document.addEventListener("input", function (e) { if (e.target.classList) e.target.classList.remove("invalid-field"); });
+
   // ---------------------------------------------------------------- θέμα, tooltips, μαζεμένο μενού
+  // Το native παράθυρο (τίτλος/μπάρα) ακολουθεί το θέμα μέσω pywebview (desktop.py) — αθόρυβο όταν τρέχει σε browser.
+  function syncTitlebar(theme) {
+    try { if (window.pywebview && window.pywebview.api && window.pywebview.api.set_theme) window.pywebview.api.set_theme(theme); } catch (e) { /* browser */ }
+  }
+  window.addEventListener("pywebviewready", function () { syncTitlebar(document.documentElement.getAttribute("data-theme") || "dark"); });
+  syncTitlebar(document.documentElement.getAttribute("data-theme") || "dark");
   const themeToggle = $("#themeToggle");
   if (themeToggle) {
     themeToggle.checked = document.documentElement.getAttribute("data-theme") === "light";
@@ -25,6 +86,7 @@
       const t = themeToggle.checked ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);
       store.set("tm-theme", t);
+      syncTitlebar(t);
     });
   }
   function applyTips(on) {
@@ -91,10 +153,92 @@
     lookupBtn.addEventListener("click", function () { lookupAfm(true); });
   }
 
+  // ---------------------------------------------------------------- φίλτρο στηλών (χωνί, στυλ Excel — timologio downloader)
+  // Κλικ στο χωνί μιας επικεφαλίδας ανοίγει λίστα με τις τιμές της στήλης (αναζήτηση + «(Όλα)» + κουτάκια)· η
+  // επιλογή φιλτράρει τον πίνακα ζωντανά και συνδυάζεται με την αναζήτηση κειμένου/το φίλτρο κατάστασης.
+  function cellText(row, col) {
+    const cell = row.children[col];
+    return cell ? cell.textContent.replace(/\s+/g, " ").trim() : "";
+  }
+  let openColFilterPopup = null;
+  function closeColFilterPopup() { if (openColFilterPopup) { openColFilterPopup.remove(); openColFilterPopup = null; } }
+  document.addEventListener("click", function (e) { if (openColFilterPopup && !openColFilterPopup.contains(e.target) && !e.target.closest(".th-funnel")) closeColFilterPopup(); });
+  function initColumnFilters(table, colIndexes, onChange) {
+    const filters = {};                                     // { colIndex: Set(τιμές) }
+    const ths = $$("thead th", table);
+    colIndexes.forEach(function (col) {
+      const th = ths[col];
+      if (!th) return;
+      th.classList.add("th-filterable");
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "th-funnel";
+      btn.setAttribute("aria-label", "Φίλτρο στήλης «" + th.textContent.trim() + "»");
+      btn.textContent = "▾";
+      th.appendChild(btn);
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (openColFilterPopup && openColFilterPopup.dataset.col === String(col)) { closeColFilterPopup(); return; }
+        openFilterPopup(table, col, th, btn, filters, onChange);
+      });
+    });
+    return { matches: function (row) {
+      return Object.keys(filters).every(function (col) {
+        const allowed = filters[col];
+        return !allowed || allowed.has(cellText(row, col));
+      });
+    } };
+  }
+  function openFilterPopup(table, col, th, anchorBtn, filters, onChange) {
+    closeColFilterPopup();
+    const rows = $$("tbody tr", table);
+    const values = Array.from(new Set(rows.map(r => cellText(r, col)))).sort(function (a, b) { return a.localeCompare(b, "el"); });
+    const selected = filters[col] || new Set(values);
+    const pop = document.createElement("div");
+    pop.className = "col-filter-popup"; pop.dataset.col = String(col);
+    pop.innerHTML = '<input type="search" class="cf-search" placeholder="Αναζήτηση τιμής…">' +
+      '<label class="cf-item cf-all"><input type="checkbox" class="cf-all-chk"><span>(Όλα)</span></label>' +
+      '<div class="cf-list"></div><button type="button" class="btn cf-close">Κλείσιμο</button>';
+    const list = pop.querySelector(".cf-list"), allChk = pop.querySelector(".cf-all-chk"), search = pop.querySelector(".cf-search");
+    function syncAll() {
+      const boxes = $$("input", list);
+      const checked = boxes.filter(b => b.checked).length;
+      allChk.checked = boxes.length > 0 && checked === boxes.length;
+      allChk.indeterminate = checked > 0 && checked < boxes.length;
+    }
+    function build(needle) {
+      list.innerHTML = "";
+      values.filter(v => !needle || v.toLocaleLowerCase("el").indexOf(needle) >= 0).forEach(function (v) {
+        const row = document.createElement("label"); row.className = "cf-item";
+        const chk = document.createElement("input"); chk.type = "checkbox"; chk.value = v; chk.checked = selected.has(v);
+        const span = document.createElement("span"); span.textContent = v || "—";
+        row.appendChild(chk); row.appendChild(span); list.appendChild(row);
+      });
+      syncAll();
+    }
+    function apply() {
+      const checkedValues = $$("input", list).filter(b => b.checked).map(b => b.value);
+      if (checkedValues.length === values.length || checkedValues.length === 0) delete filters[col];
+      else filters[col] = new Set(checkedValues);
+      th.classList.toggle("active-filter", !!filters[col]);
+      onChange();
+    }
+    list.addEventListener("change", function (e) { if (e.target.matches("input")) { syncAll(); apply(); } });
+    allChk.addEventListener("change", function () { $$("input", list).forEach(b => { b.checked = allChk.checked; }); apply(); });
+    search.addEventListener("input", function () { build(search.value.trim().toLocaleLowerCase("el")); });
+    pop.querySelector(".cf-close").addEventListener("click", closeColFilterPopup);
+    document.body.appendChild(pop);
+    build("");
+    const r = anchorBtn.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 12)) + "px";
+    pop.style.top = (r.bottom + window.scrollY + 4) + "px";
+    openColFilterPopup = pop;
+  }
+
   // ---------------------------------------------------------------- πίνακας πελατών
   const table = $("#clientsTable");
   if (table) {
     const rows = $$("tbody tr", table), all = $("#selAll"), filterInput = $("#tblFilter"), statusSel = $("#tblStatus"), sb = $("#statusbar");
+    const colFilters = initColumnFilters(table, [3, 4, 6, 7, 8, 9], applyFilter);
     const selected = () => rows.filter(r => r.querySelector(".rowchk").checked);
     function refresh() {
       const n = selected().length;
@@ -108,7 +252,10 @@
       const q = (filterInput.value || "").toLocaleLowerCase("el"), st = statusSel.value;
       rows.forEach(function (r) {
         let ok = !q || r.textContent.toLocaleLowerCase("el").indexOf(q) >= 0;
-        if (ok && st) ok = st === "creds" ? r.dataset.creds === "1" : st === "nocreds" ? r.dataset.creds !== "1" : r.dataset.status === st;
+        if (ok && st) ok = st === "creds" ? r.dataset.creds === "1" : st === "nocreds" ? r.dataset.creds !== "1"
+          : st === "badcreds" ? r.dataset.credstatus === "invalid" : (st === "ceased" || st === "active") ? r.dataset.activity === st
+          : r.dataset.status === st;
+        if (ok) ok = colFilters.matches(r);
         r.classList.toggle("hidden", !ok);
         if (!ok) r.querySelector(".rowchk").checked = false;
       });
@@ -128,8 +275,9 @@
         const afms = selected().map(r => r.dataset.afm);
         if (!afms.length) return;
         const msg = btn.dataset.confirm && btn.dataset.confirm.replace("{n}", afms.length);
-        if (msg && !window.confirm(msg)) return;
-        submitBulk(btn.dataset.bulk, afms, {});
+        if (!msg) { submitBulk(btn.dataset.bulk, afms, {}); return; }
+        const dlg = btn.closest("dialog"); if (dlg) dlg.close();
+        confirmDialog(msg, "Ναι, συνέχεια").then(function (yes) { if (yes) submitBulk(btn.dataset.bulk, afms, {}); });
       });
     });
     const credForm = $("#bulkCredForm");
@@ -146,7 +294,9 @@
       add("action", action); afms.forEach(a => add("afms", a)); Object.keys(extra).forEach(k => add(k, extra[k]));
       document.body.appendChild(f); f.submit();
     }
-    refresh();
+    const wanted = location.hash.replace("#", "");            // π.χ. /clients#badcreds από την ειδοποίηση
+    if (wanted && Array.from(statusSel.options).some(o => o.value === wanted)) { statusSel.value = wanted; applyFilter(); }
+    else refresh();
   }
 
   // ---------------------------------------------------------------- feedback
@@ -162,44 +312,104 @@
     $$(".fb-btn", box).forEach(b => b.classList.toggle("on", parseInt(b.dataset.v, 10) === next));
   });
 
-  // ---------------------------------------------------------------- εξωτερικοί σύνδεσμοι / επιβεβαιώσεις
+  // ---------------------------------------------------------------- νέα/ειδοποιήσεις: πρώτα προεπισκόπηση, μετά ο σύνδεσμος
+  // Κλικ σε άρθρο/υποχρέωση ΔΕΝ πηγαίνει κατευθείαν στον browser — ανοίγει popup μέσα στην εφαρμογή με ό,τι ήδη
+  // ξέρουμε (τίτλος, περίληψη, ενέργεια) και ο χρήστης αποφασίζει αν θα ανοίξει τον σύνδεσμο.
+  const newsDialog = $("#newsDialog");
   document.addEventListener("click", function (e) {
     const a = e.target.closest("a.ext");
     if (!a) return;
     e.preventDefault();
-    postJSON("/api/open-external", { url: a.href });
+    if (!newsDialog || !newsDialog.showModal) { postJSON("/api/open-external", { url: a.href }); return; }
+    $("#newsTitle").textContent = a.textContent.trim();
+    const meta = [a.dataset.source, a.dataset.date].filter(Boolean).join(" · ");
+    const metaEl = $("#newsMeta"); metaEl.textContent = meta; metaEl.style.display = meta ? "" : "none";
+    const summaryEl = $("#newsSummary"); summaryEl.textContent = a.dataset.summary || "";
+    summaryEl.style.display = a.dataset.summary ? "" : "none";
+    const actionEl = $("#newsAction");
+    if (a.dataset.action) { actionEl.textContent = "➜ " + a.dataset.action; actionEl.style.display = ""; }
+    else actionEl.style.display = "none";
+    const openLink = $("#newsOpenLink");
+    openLink.href = a.href;
+    openLink.onclick = function (ev) { ev.preventDefault(); postJSON("/api/open-external", { url: a.href }); newsDialog.close(); };
+    newsDialog.showModal();
   });
   document.addEventListener("submit", function (e) {
-    const msg = e.target.dataset && e.target.dataset.confirm;
-    if (msg && !window.confirm(msg)) e.preventDefault();
-  });
+    const form = e.target;
+    if (!form.checkValidity()) {                                 // μήνυμα μέσα στην εφαρμογή, όχι φυσαλίδα browser
+      e.preventDefault(); e.stopImmediatePropagation();
+      const bad = form.querySelector(":invalid");
+      if (bad) { bad.classList.add("invalid-field"); bad.focus(); toast(invalidMessage(bad), "danger"); }
+      return;
+    }
+    const submitter = e.submitter;                                // το κουμπί που πάτησε ο χρήστης (όταν η φόρμα έχει πολλές ενέργειες)
+    const msg = (submitter && submitter.dataset && submitter.dataset.confirm) || (form.dataset && form.dataset.confirm);
+    if (msg && !form._confirmed) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      confirmDialog(msg, "Ναι, συνέχεια").then(function (yes) {
+        if (!yes) return;
+        form._confirmed = true;
+        if (form.requestSubmit) form.requestSubmit(submitter || undefined); else form.submit();
+      });
+    }
+  }, true);
 
-  // ---------------------------------------------------------------- job bar
+  // ---------------------------------------------------------------- job bar (έλεγχος + ουρά ανάκτησης στοιχείων)
   const bar = $("#jobbar"), barMsg = $("#jobmsg");
-  let sawRunning = false, timer = null;
+  let sawMain = false, sawLookup = false, timer = null, lastLookup = null;
   const runBtns = $$("[data-run-check]");
   const setBusy = busy => runBtns.forEach(b => { b.disabled = busy; });
+  function lookupSummary(l) {
+    const parts = [];
+    if (l.ok) parts.push(l.ok + " πλήρη");
+    if (l.partial) parts.push(l.partial + " μερικά");
+    if (l.failed) parts.push(l.failed + " χωρίς αποτέλεσμα");
+    if (l.pending) parts.push(l.pending + " σε αναμονή (δεν βρέθηκε πηγή)");
+    return "Ανάκτηση στοιχείων: " + l.done + " πελάτες" + (parts.length ? " — " + parts.join(", ") : "") + ".";
+  }
+  function finishLookup(l) {
+    let level = "ok", msg = lookupSummary(l);
+    if (l.bad_creds || l.bad_office_creds) {
+      level = "danger";
+      msg += " ΛΑΘΟΣ κωδικοί TAXISnet: " + (l.bad_creds ? l.bad_creds + " πελάτες" : "") + (l.bad_creds && l.bad_office_creds ? " και " : "")
+        + (l.bad_office_creds ? "κωδικοί γραφείου" : "") + " — διορθώστε τους (δείτε την ειδοποίηση πάνω).";
+    } else if (l.failed || l.pending) level = "warn";
+    toastAfterReload(msg, level);
+    setTimeout(function () { window.location.reload(); }, 600);
+  }
   function render(s) {
     if (!bar) return;
+    const l = s.lookup || {};
     if (s.running) {
-      sawRunning = true; bar.className = "on"; barMsg.textContent = s.message || "Σε εξέλιξη…"; setBusy(true);
-    } else if (sawRunning) {
+      sawMain = true; bar.className = "on"; barMsg.textContent = s.message || "Σε εξέλιξη…"; setBusy(true);
+    } else if (sawMain) {
+      sawMain = false;
       bar.className = "on done"; barMsg.textContent = s.error ? "Σφάλμα: " + s.error : "Ολοκληρώθηκε ✓"; setBusy(false);
-      clearInterval(timer);
-      if (!s.error) setTimeout(function () { window.location.reload(); }, 900);
+      if (s.error) toast(s.error, "danger", 0);
+      else if (!l.running) setTimeout(function () { window.location.reload(); }, 900);
     } else setBusy(false);
+    if (l.running) {
+      sawLookup = true; lastLookup = l;
+      if (!s.running) { bar.className = "on"; barMsg.textContent = (l.message || "Ανάκτηση στοιχείων…") + (l.queued ? " · " + l.queued + " στην ουρά" : ""); }
+    } else if (sawLookup) {
+      sawLookup = false;
+      if (!s.running) bar.className = "";
+      finishLookup(l && l.total ? l : lastLookup);
+    }
+    if (!s.running && !l.running && !sawMain) { clearInterval(timer); timer = null; }
   }
   async function poll() {
     try {
       const s = await (await fetch("/api/job", { credentials: "same-origin" })).json();
       render(s);
-      if (s.running && !timer) timer = setInterval(poll, 1200);
+      if ((s.running || (s.lookup && s.lookup.running)) && !timer) timer = setInterval(poll, 1200);
     } catch (e) { /* προσωρινό σφάλμα */ }
   }
   runBtns.forEach(b => b.addEventListener("click", async function () {
     setBusy(true);
-    await postJSON("/api/run", {});
-    sawRunning = true;
+    const r = await postJSON("/api/run", {});
+    if (!r.ok && r.status === 409) toast("Ένας έλεγχος τρέχει ήδη.", "warn");
+    sawMain = true;
     await poll();
     if (!timer) timer = setInterval(poll, 1200);
   }));

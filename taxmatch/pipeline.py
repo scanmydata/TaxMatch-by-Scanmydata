@@ -123,6 +123,11 @@ def _extract_step(conn: sqlite3.Connection, session: Optional[requests.Session],
     out = llm_extract.extract_pending(conn, client, limit, lookback, session or client.session, use_text, progress)
     if out.get("stopped"):
         errors.append(out["stopped"])
+    # Για την ειδοποίηση μέσα στην εφαρμογή: μόνιμο μήνυμα όσο η ανάλυση δεν δουλεύει, σβήνει με την πρώτη επιτυχία
+    if out.get("stopped") or (out.get("failed") and not (out.get("done") or out.get("irrelevant"))):
+        settings_store.set_value(conn, "llm_last_error", out.get("stopped") or "Όλα τα άρθρα απέτυχαν στην ανάλυση (δείτε το Αρχείο καταγραφής).")
+    elif out.get("done") or out.get("irrelevant"):
+        settings_store.set_value(conn, "llm_last_error", "")
     return out
 
 

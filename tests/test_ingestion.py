@@ -1,5 +1,5 @@
 from taxmatch.ingestion import rss_fetch, sources
-from tests.fakes import FakeResponse, FakeSession
+from tests.fakes import FakeResponse, FakeSession, calendar_page
 
 TAXHEAVEN_CAL = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>Taxheaven - Ημερολόγιο</title>
@@ -55,10 +55,13 @@ def test_obligations_upsert_updates_changed_date(conn):
 
 
 def test_one_failing_source_does_not_stop_others(conn):
+    page = calendar_page("09", "2026", [{"Title": "Υποβολή δήλωσης ΦΠΑ μηνός Αυγούστου", "Date": "09/30/2026",
+                                         "url": "https://www.taxheaven.gr/calendar/event/11500"}])
     s = FakeSession()
-    s.route("soft_dat", FakeResponse(TAXHEAVEN_CAL))
+    s.route("taxheaven.gr/calendar", FakeResponse(page, headers={"content-type": "text/html"}))
     s.route("rss_id7", FakeResponse(b"", 500))
     srcs = [sources.BY_ID["eforologia_7"], sources.BY_ID["taxheaven_dat"]]
     stats = rss_fetch.ingest(conn, srcs, s)
     assert "error" in stats["eforologia_7"]
-    assert stats["taxheaven_dat"]["new"] == 1
+    assert stats["taxheaven_dat"]["errors"] == 0 and stats["taxheaven_dat"]["months"] > 0
+    assert conn.execute("SELECT COUNT(*) FROM obligations_general").fetchone()[0] == 1

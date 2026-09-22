@@ -1,16 +1,18 @@
-"""Desktop shell: τοπικός Flask server (127.0.0.1, τυχαία θύρα) μέσα σε native παράθυρο pywebview."""
+"""Εσωτερικός τοπικός Flask server (127.0.0.1, τυχαία θύρα) — ΔΕΝ είναι πλέον η εμφάνιση της εφαρμογής.
+
+Η πραγματική εφαρμογή είναι native (PySide6, `taxmatch/gui/`) — καμία εξάρτηση από webview/browser σε κανονική
+χρήση. Αυτό το module μένει μόνο ως εσωτερικό εργαλείο για το test suite (`tests/test_web.py` και συγγενή, που
+ασκούν τη λογική των `business_profiles`/`matching`/`deadlines` μέσω HTTP) και για `taxmatch --serve` (ανάπτυξη)."""
 from __future__ import annotations
 
 import logging
 import secrets
 import threading
 import time
-import webbrowser
-from typing import Optional
 
 from werkzeug.serving import make_server
 
-from . import APP_TITLE, config, db, logging_setup
+from . import config, db, logs
 from .web import create_app
 
 log = logging.getLogger(__name__)
@@ -38,44 +40,19 @@ class LocalServer:
         self._server.shutdown()
 
 
-def run_gui(use_browser: bool = False, headless: bool = False) -> int:
+def run_gui(headless: bool = True) -> int:
+    """`headless=True` (η μόνη χρήση πλέον, `taxmatch --serve`): τυπώνει το URL και περιμένει — για ανάπτυξη/tests."""
     config.load_env()
-    logging_setup.setup("app.log")
-    db.connect().close()                                   # δημιουργία/migration πριν ανοίξει το UI
+    logs.setup(config.data_dir())
+    db.connect().close()                                   # δημιουργία/migration πριν ξεκινήσει ο server
     server = LocalServer().start()
     log.info("Server στο http://127.0.0.1:%s", server.port)
     try:
-        if headless:
-            print(server.url, flush=True)
-            _wait_forever()
-        elif use_browser or not _open_webview(server.url):
-            webbrowser.open(server.url)
-            _wait_forever()
+        print(server.url, flush=True)
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         pass
     finally:
         server.stop()
     return 0
-
-
-def _open_webview(url: str) -> bool:
-    """True αν άνοιξε και έκλεισε κανονικά το native παράθυρο· False αν το pywebview/WebView2 δεν είναι διαθέσιμο."""
-    try:
-        import webview
-    except Exception:
-        log.warning("Το pywebview δεν είναι διαθέσιμο — άνοιγμα στον προεπιλεγμένο browser.")
-        return False
-    icon = config.resource_dir() / "packaging" / "taxmatch.ico"
-    try:
-        webview.create_window(APP_TITLE, url, width=1360, height=860, min_size=(1000, 640), text_select=True)
-        webview.start(icon=str(icon) if icon.exists() else None,
-                      storage_path=str(config.data_dir() / "webview"), private_mode=False)
-        return True
-    except Exception:
-        log.exception("Αποτυχία ανοίγματος παραθύρου WebView2")
-        return False
-
-
-def _wait_forever() -> None:
-    while True:
-        time.sleep(3600)

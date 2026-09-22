@@ -26,6 +26,25 @@ PROVIDERS = {
     "openrouter": {"url": "https://openrouter.ai/api/v1/chat/completions", "key": "openrouter_api_key",
                    "model": "llm_model_openrouter"},
 }
+# Προτιμώμενα μοντέλα ανά πάροχο, με σειρά. Αν το επιλεγμένο μοντέλο δεν υπάρχει/δεν επιτρέπεται για το κλειδί του
+# χρήστη (HTTP 404 model_not_found, 403 «blocked at the organization level»), η εφαρμογή ρωτά το /models του παρόχου
+# και διαλέγει το πρώτο διαθέσιμο από αυτή τη λίστα (Groq: το ίδιο το λογαριασμό μπορεί να περιορίζει τα μοντέλα).
+# Στο Groq όλος ο κατάλογος είναι στη δωρεάν βαθμίδα (ανοιχτό μοντέλα τιμολόγησης ανά χρήση, όχι ξεχωριστά «δωρεάν»
+# μοντέλα)· στο OpenRouter όμως υπάρχουν ΠΡΑΓΜΑΤΙΚΑ δωρεάν μοντέλα (κατάληξη ':free' στο id) — προτιμώνται πάντα
+# πρώτα. Το «paid» εδώ είναι απλώς το ίδιο μοντέλο χωρίς την κατάληξη, ως έσχατη πρόταση (όχι αυτόματη επιλογή).
+PREFERRED_MODELS = {
+    "groq": ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+             "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
+    "openrouter": ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3.1:free",
+                   "qwen/qwen3-235b-a22b:free", "meta-llama/llama-3.3-70b-instruct", "openai/gpt-oss-120b"],
+}
+# Μοντέλα που δεν είναι για κείμενο→JSON (ομιλία, moderation, agentic)
+_NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "embed", "safeguard", "compound", "distil-whisper", "playai")
+
+
+def is_free_model(provider: str, model_id: str) -> bool:
+    """Groq: όλος ο κατάλογος είναι δωρεάν βαθμίδα. OpenRouter: μόνο όσα λήγουν σε ':free' (πραγματικά χωρίς χρέωση)."""
+    return provider == "groq" or model_id.endswith(":free")
 MAX_TRIES = 3
 FULL_TEXT_MAX = 5000          # χαρακτήρες προς το LLM (τα ελληνικά «κοστίζουν» πολλά tokens)
 STORED_TEXT_MAX = 8000
@@ -33,7 +52,8 @@ MIN_SECONDS_BETWEEN_CALLS = 2.0
 
 
 class LLMError(Exception):
-    """kind: auth | rate_limit | network | bad_response"""
+    """kind: auth | model | rate_limit | network | bad_response
+    (`model`: το μοντέλο δεν υπάρχει ή δεν επιτρέπεται για αυτό το API key — ρύθμιση, όχι σφάλμα του άρθρου)"""
 
     def __init__(self, kind: str, message: str, retry_after: float = 0.0):
         super().__init__(message)
@@ -64,6 +84,12 @@ class LLMClient:
             raise NotConfigured(f"Δεν έχει οριστεί API key για {provider} (Ρυθμίσεις).")
         return cls(provider, key, settings_store.get(conn, cfg["model"]), cfg["url"], session or make_session(retries=1))
 
+    def _headers(self) -> dict:
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        if self.provider == "openrouter":
+            headers["X-Title"] = "TaxMatch by ScanMyData"
+        return headers
+
     def complete_json(self, system: str, user: str, timeout: int = 90) -> str:
         body = {
             "model": self.model,
@@ -71,13 +97,16 @@ class LLMClient:
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        if self.provider == "openrouter":
-            headers["X-Title"] = "TaxMatch by ScanMyData"
         try:
-            resp = self.session.post(self.url, headers=headers, json=body, timeout=timeout)
+            resp = self.session.post(self.url, headers=self._headers(), json=body, timeout=timeout)
+            if resp.status_code == 400 and "response_format" in resp.text.lower() and "json_validate" not in resp.text.lower():
+                body.pop("response_format")          # μοντέλο χωρίς JSON mode: το parse_json_loose βγάζει το {...}
+                resp = self.session.post(self.url, headers=self._headers(), json=body, timeout=timeout)
         except requests.RequestException as exc:
             raise LLMError("network", str(exc)) from exc
+        if _is_model_error(resp.status_code, resp.text):
+            raise LLMError("model", f"Το μοντέλο «{self.model}» δεν είναι διαθέσιμο για αυτό το API key "
+                                    f"(HTTP {resp.status_code}).")
         if resp.status_code in (401, 403):
             raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key")
         if resp.status_code == 429:
@@ -88,6 +117,73 @@ class LLMClient:
             return resp.json()["choices"][0]["message"]["content"] or ""
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError("bad_response", "Μη αναμενόμενη μορφή απάντησης") from exc
+
+
+def _is_model_error(status: int, text: str) -> bool:
+    t = (text or "").lower()
+    if status not in (400, 403, 404) or "model" not in t:
+        return False
+    return any(k in t for k in ("model_not_found", "does not exist", "not found", "decommissioned", "deprecated",
+                                "blocked at the organization", "no access", "not supported", "model_permission"))
+
+
+def _models_url(chat_url: str) -> str:
+    return chat_url.rsplit("/chat/completions", 1)[0] + "/models"
+
+
+def pick_model(provider: str, available: list[str], avoid: str = "", free_only: bool = True) -> str:
+    """Διαλέγει μοντέλο από όσα προσφέρει ο πάροχος: πρώτα η λίστα προτίμησης, μετά (Groq) οποιοδήποτε μοντέλο
+    κειμένου· στο OpenRouter, όσο `free_only=True`, μόνο ανάμεσα σε πραγματικά δωρεάν μοντέλα (`is_free_model`).
+    `avoid`: το μοντέλο που μόλις απέτυχε. '' αν δεν βρεθεί τίποτα κατάλληλο."""
+    ids = [m for m in available if m and m != avoid and (not free_only or is_free_model(provider, m))]
+    for want in PREFERRED_MODELS.get(provider, []):
+        if want in ids:
+            return want
+    if provider == "groq" or (provider == "openrouter" and free_only):
+        # Groq: δεν μαντεύουμε ανάμεσα σε εκατοντάδες πληρωμένα OpenRouter μοντέλα — μόνο ανάμεσα στα δωρεάν.
+        chat = [m for m in ids if not any(x in m.lower() for x in _NOT_CHAT)]
+        return sorted(chat)[0] if chat else ""
+    return ""
+
+
+def list_models(client: "LLMClient", timeout: int = 30) -> list[str]:
+    try:
+        resp = client.session.get(_models_url(client.url), headers=client._headers(), timeout=timeout)
+    except requests.RequestException as exc:
+        raise LLMError("network", str(exc)) from exc
+    if resp.status_code in (401, 403):
+        raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key")
+    if resp.status_code >= 400:
+        raise LLMError("bad_response", f"HTTP {resp.status_code} στη λίστα μοντέλων")
+    try:
+        data = resp.json().get("data", [])
+    except (ValueError, AttributeError) as exc:
+        raise LLMError("bad_response", "Μη αναμενόμενη μορφή λίστας μοντέλων") from exc
+    return [str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id") and m.get("active", True) is not False]
+
+
+def recover_model(conn: sqlite3.Connection, client: "LLMClient") -> str:
+    """Το τρέχον μοντέλο απορρίφθηκε: δοκιμάζει ΜΟΝΟ δωρεάν εναλλακτικές (`pick_model(free_only=True)`) — ποτέ δεν
+    περνά μόνη της σε πληρωμένο μοντέλο, αυτό το αποφασίζει ο χρήστης. Αν βρεθεί δωρεάν μοντέλο, το αποθηκεύει στις
+    Ρυθμίσεις και ξαναβάζει σε αναμονή τα άρθρα που απέτυχαν λόγω μοντέλου (δεν ήταν δικό τους σφάλμα). Αν ΚΑΝΕΝΑ
+    δωρεάν μοντέλο δεν δουλεύει, το μήνυμα προτείνει ρητά μετάβαση σε πληρωμένο (`LLMError('model')`)."""
+    old = client.model
+    available = list_models(client)
+    new = pick_model(client.provider, available, avoid=old, free_only=True)
+    if new:
+        client.model = new
+        settings_store.set_value(conn, PROVIDERS[client.provider]["model"], new)
+        log.warning("Το μοντέλο LLM %s δεν είναι διαθέσιμο· αυτόματη μετάβαση στο δωρεάν %s", old, new)
+        conn.execute("UPDATE articles SET extraction_status='pending', extraction_tries=0, extraction_error='' "
+                     "WHERE extraction_status='failed' AND (extraction_error LIKE '%model%' OR extraction_error LIKE '%HTTP 404%')")
+        return new
+    paid = pick_model(client.provider, available, avoid=old, free_only=False)
+    if paid:
+        raise LLMError("model", f"Κανένα δωρεάν μοντέλο δεν λειτούργησε στο {client.provider} (το «{old}» "
+                                f"απορρίφθηκε). Ως τελική λύση, ορίστε χειροκίνητα στις Ρυθμίσεις ένα πληρωμένο "
+                                f"μοντέλο (π.χ. «{paid}») — θα χρεώνεται ανά χρήση.")
+    raise LLMError("model", f"Το μοντέλο «{old}» δεν είναι διαθέσιμο και δεν βρέθηκε καμία εναλλακτική (ούτε "
+                            f"πληρωμένη) στον λογαριασμό {client.provider}. Ελέγξτε το API key στις Ρυθμίσεις.")
 
 
 def _retry_after(resp: requests.Response) -> float:
@@ -192,8 +288,9 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
         (MAX_TRIES, cutoff, limit),
     ).fetchall()
     system = system_prompt()
-    stats = {"processed": 0, "done": 0, "irrelevant": 0, "failed": 0, "remaining": 0, "stopped": ""}
+    stats = {"processed": 0, "done": 0, "irrelevant": 0, "failed": 0, "remaining": 0, "stopped": "", "model": client.model}
     consecutive_network = 0
+    recovered = False
     for i, art in enumerate(rows, 1):
         if on_progress:
             on_progress(f"Ανάλυση άρθρου {i}/{len(rows)}")
@@ -207,6 +304,22 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                 consecutive_network = 0
                 break
             except LLMError as exc:
+                if exc.kind == "model":
+                    # Άκυρο/μη επιτρεπτό μοντέλο: ΔΕΝ χρεώνεται προσπάθεια στο άρθρο. Μία απόπειρα αυτόματης διόρθωσης.
+                    if not recovered:
+                        recovered = True
+                        try:
+                            new = recover_model(conn, client)
+                        except LLMError as rexc:
+                            stats["stopped"] = str(rexc)
+                            return _finish(conn, stats, cutoff)
+                        stats["model"] = new
+                        if on_progress:
+                            on_progress(f"Αλλαγή μοντέλου σε {new}")
+                        attempts = 0
+                        continue
+                    stats["stopped"] = str(exc)
+                    return _finish(conn, stats, cutoff)
                 if exc.kind == "auth":
                     stats["stopped"] = f"Σφάλμα πιστοποίησης LLM: {exc}"
                     return _finish(conn, stats, cutoff)

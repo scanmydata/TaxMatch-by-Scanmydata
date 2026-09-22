@@ -62,6 +62,11 @@
 <div class="content">
   <main>
     <div id="jobbar"><span class="spin"></span><span id="jobmsg"></span></div>
+    <div id="toasts" aria-live="polite"></div>
+    {% for n in app_notices() %}
+      <div class="alert {{ n.level }} notice"><span>{{ n.text }}</span>
+        <a class="btn" href="{{ url_for(n.endpoint, **(n.args or {})) }}">{{ n.label }}</a></div>
+    {% endfor %}
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% for cat, msg in messages %}<div class="alert {{ cat if cat in ('ok','warn','danger','info') else 'info' }}">{{ msg }}</div>{% endfor %}
     {% endwith %}
@@ -72,6 +77,21 @@
   </div>
 </div>
 
+<dialog id="confirmDialog">
+  <h1>{{ icon('delete', 22) }} Επιβεβαίωση</h1>
+  <p class="msg" id="confirmMsg"></p>
+  <div class="foot"><button type="button" class="btn" id="confirmCancel">Άκυρο</button><button type="button" class="btn primary" id="confirmOk">Συνέχεια</button></div>
+</dialog>
+<dialog id="newsDialog" class="news-dialog">
+  <h1 id="newsTitle"></h1>
+  <div class="muted small" id="newsMeta"></div>
+  <p class="msg" id="newsSummary"></p>
+  <div class="action" id="newsAction" style="display:none"></div>
+  <div class="foot">
+    <button type="button" class="btn" data-close style="margin-right:auto">Κλείσιμο</button>
+    <a class="btn primary" id="newsOpenLink" target="_blank" rel="noopener">{{ icon('link', 16) }} Άνοιγμα συνδέσμου</a>
+  </div>
+</dialog>
 {% include "_client_dialog.html" %}
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

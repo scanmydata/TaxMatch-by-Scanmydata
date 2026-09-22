@@ -5,11 +5,11 @@ import hmac
 import secrets
 from datetime import date, datetime, timezone
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from flask import Flask, abort, g, make_response, redirect, request
 
-from .. import APP_TITLE, __version__, db, jobs
+from .. import APP_TITLE, __version__, db, jobs, notices
 from ..identifiers import format_kad
 from ..ingestion import sources
 
@@ -49,7 +49,8 @@ def create_app(token: Optional[str] = None, testing: bool = False) -> Flask:
             return None
         supplied = request.args.get("t", "")
         if supplied and hmac.compare_digest(supplied, tok):
-            resp = make_response(redirect(request.path))
+            keep = [(k, v) for k, v in request.args.items(multi=True) if k != "t"]      # π.χ. ?theme=light δεν χάνεται
+            resp = make_response(redirect(request.path + ("?" + urlencode(keep) if keep else "")))
             resp.set_cookie(COOKIE, tok, httponly=True, samesite="Strict")
             return resp
         abort(403)
@@ -116,7 +117,7 @@ def create_app(token: Optional[str] = None, testing: bool = False) -> Flask:
     @app.context_processor
     def inject():
         return {"app_title": APP_TITLE, "app_version": __version__, "months_el": MONTHS_EL, "weekdays_el": WEEKDAYS_EL,
-                "status_summary": _status_summary}
+                "status_summary": _status_summary, "app_notices": lambda: notices.collect(get_db())}
 
     from .views import bp
     app.register_blueprint(bp)

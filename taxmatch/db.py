@@ -29,6 +29,7 @@ MIGRATIONS: list[str] = [
         kad_main_code     TEXT NOT NULL DEFAULT '',
         kad_main_desc     TEXT NOT NULL DEFAULT '',
         notes             TEXT NOT NULL DEFAULT '',
+        -- (v3 προσθέτει: activity_state 'active'|'ceased'|'none'|'', cease_date, cease_reason, start_date)
         lookup_status     TEXT NOT NULL DEFAULT 'pending', -- pending | ok | partial | failed | manual
         lookup_error      TEXT NOT NULL DEFAULT '',
         lookup_raw        TEXT NOT NULL DEFAULT '',        -- JSON: ωμά δεδομένα πηγών (για διόρθωση parsing)
@@ -122,6 +123,21 @@ MIGRATIONS: list[str] = [
     ALTER TABLE articles ADD COLUMN duplicate_of INTEGER;
     ALTER TABLE articles ADD COLUMN title_key TEXT NOT NULL DEFAULT '';
     CREATE INDEX idx_articles_titlekey ON articles(title_key)
+    """,
+    # v3 — κατάσταση επιχείρησης από το Μητρώο ΑΑΔΕ (ενεργή / διακοπή)
+    """
+    ALTER TABLE businesses ADD COLUMN activity_state TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN cease_date TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN cease_reason TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN start_date TEXT NOT NULL DEFAULT ''
+    """,
+    # v4 — ποιοι μήνες του πλήρους ημερολογίου taxheaven (σελίδα, όχι soft_dat.xml) έχουν ήδη κατέβει
+    """
+    CREATE TABLE calendar_sync (
+        year_month  TEXT PRIMARY KEY,       -- 'YYYY-MM'
+        synced_at   TEXT NOT NULL,
+        event_count INTEGER NOT NULL DEFAULT 0
+    )
     """,
 ]
 

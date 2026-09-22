@@ -75,6 +75,12 @@ def test(conn: sqlite3.Connection, afm: str,
     return ok, msg
 
 
+def record_check(conn: sqlite3.Connection, afm: str, status: str, message: str) -> None:
+    """Αποθηκεύει το αποτέλεσμα σύνδεσης που προέκυψε από lookup (status: ok | invalid | error). Όχι τον κωδικό."""
+    conn.execute("UPDATE client_credentials SET check_status=?, check_message=?, checked_at=? WHERE afm=?",
+                 (status, message, db.utcnow(), afm))
+
+
 def bulk_set(conn: sqlite3.Connection, rows: Iterable[tuple[str, str, str]]) -> dict[str, int]:
     """rows: (afm, user, password) για ΥΠΑΡΧΟΝΤΕΣ πελάτες. Επιστρέφει {saved, skipped_unknown}."""
     saved = skipped = 0

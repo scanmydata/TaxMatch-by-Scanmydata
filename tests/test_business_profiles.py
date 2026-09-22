@@ -191,7 +191,7 @@ def test_lookup_merges_portal_and_aade(conn):
                               "all_tags": {"ypagwghfpa": "NAI", "kathgoriabibliwn": "Γ-ΔΙΠΛΟΓΡΑΦΙΚΑ"}}
     out = service.lookup_and_store(conn, AFM, s, aade)
     b = service.get(conn, AFM)
-    assert out["status"] == "ok" and out["sources"] == ["ΓΕΜΗ", "ΑΑΔΕ"]
+    assert out["status"] == "ok" and out["sources"] == ["ΑΑΔΕ", "ΓΕΜΗ"]     # ΑΑΔΕ πρώτα, ΓΕΜΗ fallback για τα ΚΑΔ
     assert (b["name"], b["doy"], b["books_category"], b["vat_subject"], b["vat_period_type"]) == \
            ("ΤΟ ΒΑΨΙΜΟ Ε.Ε.", "Α' ΑΘΗΝΩΝ", "Γ", 1, "monthly")        # όνομα από ΓΕΜΗ, όχι από ΑΑΔΕ
     assert b["kads"][0]["code"] == "47.11.10.01" and b["lookup_raw"]
@@ -205,7 +205,9 @@ def test_aade_failure_is_reported_but_portal_data_kept(conn):
     service.add(conn, AFM)
     s = portal_session2({"arGemi": "9", "coNameEl": "Α", "activities": [{"code": "47.11", "descr": ""}]})
     out = service.lookup_and_store(conn, AFM, s, lambda *a: {"ok": False, "reason": "InvalidCredentials"})
-    assert out["status"] == "ok" and any("λανθασμένο" in e or "Λάθος" in e for e in out["errors"])
+    assert out["status"] == "ok" and any("κωδικοί TAXISnet" in e for e in out["errors"])
+    assert [i["code"] for i in out["issues"]] == ["bad_creds_office"]        # για την ειδοποίηση μέσα στην εφαρμογή
+    assert settings_store.get(conn, "aade_office_status") == "invalid"
 
     def boom(*a):
         raise RuntimeError("άλλαξε το HTML της ΑΑΔΕ")

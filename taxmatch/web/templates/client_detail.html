@@ -12,10 +12,16 @@
   </span>
 </div>
 
+{% if cred and cred.check_status == 'invalid' %}
+<div class="alert danger"><b>Λάθος κωδικοί TAXISnet.</b> {{ cred.check_message }} Διορθώστε τους στην κάρτα «Κωδικοί TAXISnet του πελάτη» παρακάτω — ώσπου να διορθωθούν δεν ανακτώνται ΔΟΥ, ΚΑΔ, κατηγορία βιβλίων και καθεστώς ΦΠΑ από την ΑΑΔΕ.</div>
+{% endif %}
+{% if b.activity_state == 'ceased' %}
+<div class="alert warn"><b>Διακοπή εργασιών{% if b.cease_date %} από {{ b.cease_date }}{% endif %}</b>{% if b.cease_reason %} ({{ b.cease_reason }}){% endif %} — σύμφωνα με το Μητρώο ΑΑΔΕ η επιχείρηση δεν είναι πλέον ενεργή.</div>
+{% endif %}
 {% if b.lookup_status in ('failed', 'partial', 'pending') and b.lookup_error %}
 <div class="alert {{ 'danger' if b.lookup_status == 'failed' else 'warn' }}">Ανάκτηση στοιχείων: {{ b.lookup_error }}</div>
 {% elif b.lookup_status == 'pending' %}
-<div class="alert info">Τα στοιχεία περιμένουν ανάκτηση. Συμπληρώστε τα χειροκίνητα ή πατήστε «Ανανέωση στοιχείων».</div>
+<div class="alert info">Τα στοιχεία ανακτώνται αυτόματα (ΑΑΔΕ → ΓΕΜΗ → VIES). Αν δεν εμφανιστούν, συμπληρώστε τα χειροκίνητα ή πατήστε «Ανανέωση στοιχείων».</div>
 {% endif %}
 
 <div class="grid-2">
@@ -54,7 +60,7 @@
     <form method="post" action="{{ url_for('main.client_credentials', afm=b.afm) }}" class="card" autocomplete="off">
       <h2>{{ icon('key', 16) }} Κωδικοί TAXISnet του πελάτη <span class="chip">προαιρετικά</span></h2>
       <div class="muted small" style="margin-bottom:8px">Για την ανάκτηση ΔΟΥ, καθεστώτος ΦΠΑ και κατηγορίας βιβλίων από το Μητρώο ΑΑΔΕ. Αποθηκεύονται κρυπτογραφημένοι και δεν εμφανίζονται ποτέ ξανά.
-        {% if not cred %}Χωρίς δικούς του κωδικούς, {% if office_creds %}χρησιμοποιείται ο λογαριασμός γραφείου των Ρυθμίσεων{% else %}δεν γίνεται ανάκτηση από ΑΑΔΕ (δεν υπάρχει ούτε λογαριασμός γραφείου){% endif %}.{% endif %}</div>
+        {% if not cred %}Χωρίς δικούς του κωδικούς η ΑΑΔΕ δεν δίνει στοιχεία: το Μητρώο δείχνει μόνο τα στοιχεία του ΑΦΜ με το οποίο γίνεται η σύνδεση (ο λογαριασμός γραφείου των Ρυθμίσεων δεν βλέπει τους πελάτες). Θα χρησιμοποιηθούν ΓΕΜΗ/VIES όπου υπάρχουν.{% endif %}</div>
       <div class="form-grid">
         <div><label>Χρήστης TAXISnet</label><input type="text" name="taxis_user" value="{{ cred_user }}" autocomplete="off"></div>
         <div><label>Κωδικός {% if cred and cred.complete %}<span class="chip ok">αποθηκευμένος</span>{% endif %}</label>
@@ -81,6 +87,12 @@
     <div class="card">
       <h2>Στοιχεία</h2>
       <dl class="kv">
+        <dt>Κατάσταση</dt><dd>{% if b.activity_state == 'active' %}<span class="st-ok">● Ενεργή</span>
+          {% elif b.activity_state == 'ceased' %}<span class="st-bad">● Διακοπή{% if b.cease_date %} {{ b.cease_date }}{% endif %}</span>
+          {% elif b.activity_state == 'none' %}<span class="st-muted">Ιδιώτης χωρίς επιχείρηση</span>
+          {% else %}<span class="muted">— (δεν έχει ανακτηθεί από ΑΑΔΕ)</span>{% endif %}
+          {% if b.start_date %}<div class="muted small">Έναρξη {{ b.start_date }}</div>{% endif %}</dd>
+        <dt>Είδος</dt><dd>{{ b.legal_form or '—' }}</dd>
         <dt>Κύριος ΚΑΔ</dt><dd>{% if b.kad_main_code %}{{ b.kad_main_code }}<div class="muted small">{{ b.kad_main_desc }}</div>{% else %}—{% endif %}</dd>
         <dt>Ενεργοί ΚΑΔ</dt><dd>{{ b.kads|length }}</dd>
         <dt>Πηγή</dt><dd>{{ {'manual':'χειροκίνητα','excel':'Excel','lookup':'ανάκτηση'}.get(b.source, b.source) }}</dd>
@@ -90,7 +102,7 @@
     <div class="card">
       <h2>Προσεχείς προθεσμίες</h2>
       {% if events %}<ul class="upcoming">{% for ev in events[:10] %}
-        <li><div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a></div><div>{{ due_badge(ev.date) }}</div></li>
+        <li><div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener" data-summary="{{ ev.description }}" data-date="{{ ev.date|date_el }}">{{ ev.title }}</a></div><div>{{ due_badge(ev.date) }}</div></li>
       {% endfor %}</ul>
       <a href="{{ url_for('main.calendar_view', afm=b.afm) }}">Ημερολόγιο πελάτη →</a>
       {% else %}<div class="muted">Καμία προσεχής προθεσμία.</div>{% endif %}
@@ -102,7 +114,7 @@
   <h2>Νέα που αφορούν τον πελάτη (90 ημέρες)</h2>
   {% for m in matches %}
     <div class="match-row">
-      <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener">{{ m.title }}</a>
+      <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener" data-summary="{{ m.summary }}" data-action="{{ m.action_required or '' }}" data-date="{{ m.published_at|date_el }}">{{ m.title }}</a>
         <div class="muted small">{{ m.published_at|date_el }} · {{ m.matched_reason }}</div>
         {% if m.action_required %}<div class="small" style="color:var(--accent); font-weight:600">➜ {{ m.action_required }}</div>{% endif %}</span>
       {{ due_badge(m.deadline) }}

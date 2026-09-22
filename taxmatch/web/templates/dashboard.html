@@ -49,7 +49,7 @@
             <span class="chip">{{ c['items']|length }} θέματα</span><span class="muted small">ΑΦΜ {{ c.afm }}</span></div>
           {% for m in c['items'] %}
             <div class="match-row">
-              <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener">{{ m.title }}</a>
+              <span class="who" style="flex:1; min-width:0"><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener" data-summary="{{ m.summary }}" data-action="{{ m.action_required or '' }}">{{ m.title }}</a>
                 <div class="muted small">{{ m.matched_reason }}</div></span>
               {{ due_badge(m.deadline) }}
               {% if m.confidence < 1 %}<span class="chip warn">να επιβεβαιωθεί</span>{% endif %}
@@ -70,7 +70,7 @@
       <ul class="upcoming">
         {% for ev in upcoming %}
         <li>
-          <div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a></div>
+          <div class="t"><span class="ev-dot {{ ev.kind }}"></span><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener" data-summary="{{ ev.description }}" data-date="{{ ev.date|date_el }}">{{ ev.title }}</a></div>
           <div>{{ due_badge(ev.date) }}
             {% if ev.kind == 'news' %}<span class="chip info">{{ ev.n_clients }} πελάτες</span>{% elif ev.kind == 'rule' %}<span class="chip warn">{{ 'κανόνας · αν ισχύει' if ev.conditional else 'κανόνας' }}</span>{% else %}<span class="chip">γενικό</span>{% endif %}</div>
         </li>

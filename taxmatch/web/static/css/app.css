@@ -231,3 +231,39 @@ pre.log { max-height: none; }
   .content { height: auto; } main { overflow: visible; }
   .grid-2 { grid-template-columns: 1fr; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ---- ειδοποιήσεις, toasts, διάλογος επιβεβαίωσης, έλεγχος πεδίων: όλα μέσα στην εφαρμογή (όχι native browser) ---- */
+.alert.notice { align-items: flex-start; }
+.alert.notice > span { flex: 1; min-width: 0; }
+.alert.notice .btn { margin-left: 10px; flex: none; }
+#toasts, .toasts-host { position: fixed; right: 18px; bottom: 44px; z-index: 50; display: flex; flex-direction: column; gap: 8px; width: min(420px, 92vw); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--panel);
+  border: 1px solid var(--accent); box-shadow: 0 6px 24px rgba(0, 0, 0, .35); animation: toast-in .18s ease-out; }
+.toast.ok { border-color: var(--ok); } .toast.warn { border-color: var(--warn); } .toast.danger { border-color: var(--bad); }
+.toast .msg { flex: 1; } .toast .x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+#confirmDialog { width: min(440px, 94vw); }
+#confirmDialog .msg { margin: 6px 0 2px; font-size: 13.5px; line-height: 1.5; }
+.invalid-field, input.invalid-field, select.invalid-field, textarea.invalid-field { border-color: var(--bad) !important; box-shadow: 0 0 0 2px rgba(239, 68, 68, .25); }
+
+/* ---- popup προεπισκόπησης νέου/ειδοποίησης πριν τον εξωτερικό σύνδεσμο ---- */
+.news-dialog { width: min(520px, 94vw); }
+.news-dialog h1 { font-size: 16px; line-height: 1.35; }
+#newsMeta { margin: 2px 0 8px; }
+#newsSummary { color: var(--txt); }
+#newsAction { background: var(--chip); border: 1px solid var(--accent); color: var(--accent); border-radius: 9px; padding: 5px 10px; font-weight: 600; margin: 4px 0 2px; }
+
+/* ---- φίλτρο στηλών (χωνί, στυλ Excel) — ίδια αλληλεπίδραση με το timologio downloader ---- */
+table.grid th.th-filterable { position: relative; padding-right: 20px; }
+.th-funnel { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; padding: 0;
+  border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11px; line-height: 16px; border-radius: 4px; opacity: 0; }
+table.grid th.th-filterable:hover .th-funnel, table.grid th.active-filter .th-funnel { opacity: 1; }
+table.grid th.active-filter .th-funnel, table.grid th.active-filter { color: var(--accent); }
+.th-funnel:hover { background: var(--tile-hover); }
+.col-filter-popup { position: absolute; z-index: 40; width: 230px; max-height: 320px; display: flex; flex-direction: column;
+  gap: 6px; padding: 10px; background: var(--panel); border: 1px solid var(--accent); border-radius: 9px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.col-filter-popup .cf-search { width: 100%; }
+.cf-list { overflow-y: auto; max-height: 190px; display: flex; flex-direction: column; gap: 2px; }
+.cf-item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 400; padding: 3px 4px; border-radius: 6px; cursor: pointer; text-align: left; color: var(--txt); }
+.cf-item:hover { background: var(--tile-hover); }
+.cf-all { border-bottom: 1px solid var(--line); padding-bottom: 6px; font-weight: 600; }

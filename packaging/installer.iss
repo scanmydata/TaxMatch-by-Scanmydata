@@ -86,7 +86,6 @@ UninstalledAll=Το %1 καταργήθηκε επιτυχώς από τον υ�
 el.TaskDesktopIcon=Δημιουργία εικονιδίου στην &επιφάνεια εργασίας
 el.TaskDailyCheck=Καθημερινός έλεγχος φορολογικών νέων στο παρασκήνιο (08:00, ακόμη κι αν η εφαρμογή είναι κλειστή)
 el.RunApp=Εκκίνηση του TaxMatch
-el.WebView2Missing=Δεν βρέθηκε το Microsoft Edge WebView2 Runtime.%n%nΗ εφαρμογή θα λειτουργεί κανονικά, αλλά θα ανοίγει στον προεπιλεγμένο περιηγητή σας αντί για δικό της παράθυρο. Μπορείτε να το εγκαταστήσετε αργότερα από τη Microsoft.%n%nΣυνέχεια της εγκατάστασης;
 el.AskDeleteData=Να διαγραφούν και τα δεδομένα της εφαρμογής (πελάτες, ρυθμίσεις, αποθηκευμένα credentials);%n%nΠατήστε Όχι για να τα κρατήσετε (π.χ. αν θα ξαναεγκαταστήσετε).
 
 [Tasks]
@@ -109,24 +108,7 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:RunApp}"; Flags: nowait postinsta
 Filename: "{app}\{#AppExe}"; Parameters: "--remove-task"; RunOnceId: "RemoveTaxMatchTask"; Flags: runhidden waituntilterminated
 
 [Code]
-function WebView2Installed(): Boolean;
-var
-  v: String;
-begin
-  Result :=
-    RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) or
-    RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) or
-    RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v);
-  if Result then
-    Result := (v <> '') and (v <> '0.0.0.0');
-end;
-
-function InitializeSetup(): Boolean;
-begin
-  Result := True;
-  if (not WebView2Installed()) and (not WizardSilent()) then
-    Result := MsgBox(CustomMessage('WebView2Missing'), mbInformation, MB_YESNO) = IDYES;
-end;
+; Δεν χρειάζεται πλέον έλεγχος WebView2 Runtime — η εφαρμογή είναι native (PySide6/Qt), όχι webview.
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var

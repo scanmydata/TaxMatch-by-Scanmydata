@@ -12,6 +12,21 @@
   </div>
 {% endmacro %}
 
+<form method="post" action="{{ url_for('main.master_password') }}" class="card" id="master-password" autocomplete="off">
+  <h2>{{ icon('lock', 16) }} Κύριος κωδικός <span class="chip {{ 'ok' if master_protected else '' }}">{{ 'ενεργός' if master_protected else 'ανενεργός' }}</span></h2>
+  <p class="muted small">Προαιρετική επιπλέον προστασία του φακέλου δεδομένων (ίδιο σχήμα με τον timologio downloader): χωρίς αυτόν, οι κωδικοί TAXISnet/API κλειδώνουν μόνο στον χρήστη Windows·
+    με αυτόν, χρειάζεται ο κωδικός σε κάθε εκκίνηση της εφαρμογής — χωρίς αυτόν ο φάκελος δεδομένων είναι άχρηστος ακόμη κι αν αντιγραφεί ολόκληρος.</p>
+  <div class="form-grid">
+    {% if master_protected %}<div><label>Τρέχων κωδικός</label><input type="password" name="current_password" autocomplete="current-password"></div>{% endif %}
+    <div><label>{{ 'Νέος κωδικός' if master_protected else 'Κωδικός' }} (τουλάχιστον {{ min_password_length }} χαρακτήρες)</label><input type="password" name="new_password" autocomplete="new-password"></div>
+    <div><label>Επιβεβαίωση</label><input type="password" name="confirm_password" autocomplete="new-password"></div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <button class="btn primary" name="action" value="{{ 'change' if master_protected else 'set' }}">{{ 'Αλλαγή κωδικού' if master_protected else 'Ενεργοποίηση προστασίας' }}</button>
+    {% if master_protected %}<button class="btn danger" name="action" value="remove" style="margin-left:auto" data-confirm="Αφαίρεση του κύριου κωδικού; Ο φάκελος δεδομένων θα ξεκλειδώνει χωρίς κωδικό.">Αφαίρεση προστασίας</button>{% endif %}
+  </div>
+</form>
+
 <div class="grid-2" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr)">
 <div>
   <form method="post" class="card">

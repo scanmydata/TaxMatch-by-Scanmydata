@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar as pycal
 import json
+import logging
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -16,9 +17,11 @@ from .. import __version__, config, crypto, deadlines, pipeline, scheduler_win, 
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
 from ..identifiers import is_valid_afm, normalize_afm
-from ..ingestion import sources
+from ..ingestion import sources, taxheaven_calendar
 from ..matching import engine
 from . import MONTHS_EL, get_db
+
+log = logging.getLogger(__name__)
 
 bp = Blueprint("main", __name__)
 
@@ -41,6 +44,62 @@ def _int_arg(name: str, default: int, allowed: Optional[tuple] = None) -> int:
 @bp.errorhandler(crypto.KeyUnavailable)
 def key_unavailable(exc):
     return render_template("error.html", title="Μη διαθέσιμο κλειδί κρυπτογράφησης", message=crypto.KeyUnavailable.message_el), 500
+
+
+@bp.errorhandler(crypto.KeyfileLocked)
+def keyfile_locked(exc):
+    """Ο φάκελος δεδομένων έχει κύριο κωδικό και δεν έχει δοθεί ακόμη σε αυτή την εκτέλεση — στην οθόνη ξεκλειδώματος."""
+    return redirect(url_for("main.unlock_view", next=request.path))
+
+
+# ================================================================== Κύριος κωδικός (ίδιο σχήμα με το timologio downloader)
+
+@bp.route("/unlock", methods=["GET", "POST"])
+def unlock_view():
+    path = crypto.keyfile_path()
+    if not crypto.is_protected(path):
+        return redirect(url_for("main.dashboard"))
+    nxt = request.values.get("next") or url_for("main.dashboard")
+    if not nxt.startswith("/"):                        # ποτέ redirect εκτός εφαρμογής
+        nxt = url_for("main.dashboard")
+    error = ""
+    if request.method == "POST":
+        try:
+            crypto.unlock(path, request.form.get("password", ""))
+            return redirect(nxt)
+        except crypto.WrongPassword:
+            error = "Λάθος κωδικός."
+    return render_template("unlock.html", next=nxt, error=error)
+
+
+@bp.post("/settings/master-password")
+def master_password():
+    conn = get_db()
+    path = crypto.keyfile_path()
+    protected = crypto.is_protected(path)
+    action = request.form.get("action", "")
+    try:
+        if action in ("set", "change"):
+            new, confirm = request.form.get("new_password", ""), request.form.get("confirm_password", "")
+            current = request.form.get("current_password", "") if protected else None
+            if len(new) < crypto.MIN_PASSWORD_LENGTH:
+                flash(f"Ο κωδικός πρέπει να έχει τουλάχιστον {crypto.MIN_PASSWORD_LENGTH} χαρακτήρες.", "danger")
+            elif new != confirm:
+                flash("Οι κωδικοί δεν ταιριάζουν.", "danger")
+            else:
+                crypto.set_password(path, new, current)
+                flash("Ο κύριος κωδικός ενεργοποιήθηκε." if not protected else "Ο κύριος κωδικός άλλαξε.", "ok")
+        elif action == "remove":
+            crypto.remove_password(path, request.form.get("current_password", ""))
+            flash("Ο κύριος κωδικός αφαιρέθηκε — ο φάκελος δεδομένων δεν είναι πια προστατευμένος με κωδικό "
+                  "(παραμένει κρυπτογραφημένος με το κλειδί συσκευής).", "warn")
+        else:
+            abort(400)
+    except crypto.WrongPassword:
+        flash("Λάθος τρέχων κωδικός.", "danger")
+    except ValueError as exc:
+        flash(str(exc), "danger")
+    return redirect(url_for("main.settings") + "#master-password")
 
 
 # ================================================================== Dashboard
@@ -74,12 +133,11 @@ def dashboard():
     alerts = []
     if total_clients == 0:
         alerts.append(("info", "Δεν υπάρχουν πελάτες ακόμη.", url_for("main.clients_import"), "Εισαγωγή πελατών"))
-    if not settings_store.is_set(conn, settings_store_llm_key(conn)):
-        alerts.append(("warn", "Δεν έχει οριστεί API key για το LLM — τα άρθρα δεν αναλύονται.", url_for("main.settings"), "Ρυθμίσεις"))
+    # (το LLM key / οι λάθος κωδικοί TAXISnet εμφανίζονται ως ειδοποιήσεις πάνω-πάνω σε κάθε σελίδα — βλ. notices.py)
     pending_clients = conn.execute("SELECT COUNT(*) FROM businesses WHERE lookup_status='pending'").fetchone()[0]
-    if pending_clients and not (settings_store.is_set(conn, "business_portal_key") or settings_store.is_set(conn, "aade_user")):
-        alerts.append(("warn", f"{pending_clients} πελάτες περιμένουν εμπλουτισμό στοιχείων (ΓΕΜΗ/ΑΑΔΕ) — χρειάζονται credentials.",
-                       url_for("main.settings"), "Ρυθμίσεις"))
+    if pending_clients and not (settings_store.is_set(conn, "business_portal_key") or client_creds.status_map(conn)):
+        alerts.append(("warn", f"{pending_clients} πελάτες περιμένουν στοιχεία: δώστε τους κωδικούς TAXISnet του κάθε πελάτη (προφίλ πελάτη ή Excel) "
+                       "ή API key ΓΕΜΗ (Ρυθμίσεις). Το VIES δίνει μόνο επωνυμία.", url_for("main.settings"), "Ρυθμίσεις"))
     run = pipeline.last_run(conn)
     if run and run["status"] == "error":
         alerts.append(("danger", f"Ο τελευταίος έλεγχος απέτυχε: {run['error'] or 'άγνωστο σφάλμα'}", None, None))
@@ -115,16 +173,19 @@ def clients_new():
             return render_template("client_new.html", nav="clients", form=request.form), 400
         if not is_valid_afm(afm):
             flash("Ο ΑΦΜ δεν περνά τον έλεγχο ψηφίου ελέγχου — ελέγξτε τον. Καταχωρήθηκε όμως.", "warn")
-        if not clients.add(conn, afm, name, source="manual"):
-            flash("Ο πελάτης υπάρχει ήδη.", "warn")
-            return redirect(url_for("main.client_detail", afm=afm))
+        created = clients.add(conn, afm, name, source="manual")
         user, pwd = request.form.get("taxis_user", "").strip(), request.form.get("taxis_pass", "")
         if bool(user) != bool(pwd):
             flash("Οι κωδικοί TAXISnet θέλουν και χρήστη και κωδικό — δεν αποθηκεύτηκαν.", "warn")
         elif user:
             client_creds.set_(conn, afm, user, pwd)
-        _start_lookup(afm)
-        flash("Ο πελάτης προστέθηκε. Ανάκτηση στοιχείων σε εξέλιξη…", "ok")
+        if not created:
+            flash("Ο πελάτης υπάρχει ήδη." + (" Οι κωδικοί TAXISnet ενημερώθηκαν και τα στοιχεία ανακτώνται ξανά." if user and pwd else ""), "warn")
+            if user and pwd:
+                _start_lookup(afm)
+            return redirect(url_for("main.client_detail", afm=afm))
+        _start_lookup(afm)                        # αυτόματη ανάκτηση + αποθήκευση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES)
+        flash("Ο πελάτης προστέθηκε. Τα στοιχεία του (ΚΑΔ, κατάσταση, ΔΟΥ, βιβλία) ανακτώνται αυτόματα.", "ok")
         return redirect(url_for("main.client_detail", afm=afm))
     return render_template("client_new.html", nav="clients", form={})
 
@@ -149,19 +210,9 @@ def api_lookup_afm():
                    checksum_ok=is_valid_afm(afm))
 
 
-def _start_lookup(afm: str) -> bool:
-    from .. import db as dbmod
-
-    def work(progress):
-        progress(f"Ανάκτηση στοιχείων για ΑΦΜ {afm}…")
-        c = dbmod.connect()
-        try:
-            out = clients.lookup_and_store(c, afm)
-            engine.rematch(c)
-            return out
-        finally:
-            c.close()
-    return _jobs().start("lookup", work)
+def _start_lookup(*afms: str) -> int:
+    """Βάζει πελάτες στην ουρά ανάκτησης (ξεχωριστή από τον έλεγχο: δεν απορρίπτεται όσο τρέχει άλλη εργασία)."""
+    return _jobs().lookups.enqueue(afms)
 
 
 @bp.route("/clients/import", methods=["GET", "POST"])
@@ -202,34 +253,24 @@ def clients_import_confirm():
     conn = get_db()
     out = clients.import_result(conn, res)
     engine.rematch(conn)
+    _start_lookup(*[r.afm for r in res.rows if r.has_credentials or _lookup_status(conn, r.afm) in ("pending", "partial")])
     flash(f"Προστέθηκαν {out['added']} πελάτες" + (f", ενημερώθηκαν {out['updated']}" if out["updated"] else "")
           + (f", αποθηκεύτηκαν κωδικοί TAXISnet για {out['credentials']}" if out["credentials"] else "")
-          + ". Ο εμπλουτισμός στοιχείων γίνεται στο παρασκήνιο.", "ok")
-    if out["added"] or out["credentials"]:
-        _start_enrich()
+          + ". Η ανάκτηση στοιχείων (ΚΑΔ, κατάσταση, ΔΟΥ, βιβλία) γίνεται αυτόματα στο παρασκήνιο.", "ok")
     return redirect(url_for("main.clients_list"))
 
 
-def _start_enrich() -> bool:
-    from .. import db as dbmod
-
-    def work(progress):
-        c = dbmod.connect()
-        try:
-            out = clients.enrich_pending(c, limit=10_000, on_progress=progress)
-            engine.rematch(c)
-            return out
-        finally:
-            c.close()
-    return _jobs().start("enrich", work)
+def _lookup_status(conn, afm: str) -> str:
+    row = conn.execute("SELECT lookup_status FROM businesses WHERE afm=?", (afm,)).fetchone()
+    return row["lookup_status"] if row else ""
 
 
 @bp.post("/clients/enrich")
 def clients_enrich():
-    if _start_enrich():
-        flash("Ξεκίνησε ο εμπλουτισμός στοιχείων πελατών.", "ok")
-    else:
-        flash("Τρέχει ήδη άλλη εργασία.", "warn")
+    conn = get_db()
+    n = _start_lookup(*[r["afm"] for r in conn.execute(
+        "SELECT afm FROM businesses WHERE lookup_status IN ('pending','partial','failed') ORDER BY created_at")])
+    flash(f"Ξεκίνησε η ανάκτηση στοιχείων για {n} πελάτες." if n else "Δεν υπάρχουν πελάτες που να χρειάζονται ανάκτηση.", "ok")
     return redirect(request.referrer or url_for("main.clients_list"))
 
 
@@ -277,10 +318,8 @@ def client_edit(afm: str):
 def client_lookup(afm: str):
     if not clients.get(get_db(), afm):
         abort(404)
-    if _start_lookup(afm):
-        flash("Ανάκτηση στοιχείων σε εξέλιξη…", "ok")
-    else:
-        flash("Τρέχει ήδη άλλη εργασία.", "warn")
+    _start_lookup(afm)
+    flash("Ανάκτηση στοιχείων σε εξέλιξη…", "ok")
     return redirect(url_for("main.client_detail", afm=afm))
 
 
@@ -297,21 +336,15 @@ def client_credentials(afm: str):
         if not client_creds.get(conn, afm):
             flash("Δεν έχουν οριστεί κωδικοί TAXISnet για τον πελάτη.", "warn")
         else:
-            def work(progress):
-                from .. import db as dbmod
-                progress("Δοκιμή σύνδεσης στο TAXISnet…")
-                c = dbmod.connect()
-                try:
-                    return client_creds.test(c, afm)[1]
-                finally:
-                    c.close()
-            flash("Δοκιμή σύνδεσης σε εξέλιξη…" if _jobs().start("creds-test", work) else "Τρέχει ήδη άλλη εργασία.", "ok")
+            ok, msg = client_creds.test(conn, afm)             # ~5"· συγχρονικά ώστε το αποτέλεσμα να φαίνεται αμέσως
+            flash(msg if ok else "Αποτυχία σύνδεσης TAXISnet: " + msg, "ok" if ok else "danger")
     else:
         user, pwd = request.form.get("taxis_user", "").strip(), request.form.get("taxis_pass", "")
         if not client_creds.set_(conn, afm, user, pwd):
             flash("Δεν δόθηκαν κωδικοί.", "warn")
         else:
-            flash("Οι κωδικοί TAXISnet αποθηκεύτηκαν (κρυπτογραφημένοι).", "ok")
+            _start_lookup(afm)                                  # με τους νέους κωδικούς ανακτώνται τα στοιχεία αυτόματα
+            flash("Οι κωδικοί TAXISnet αποθηκεύτηκαν (κρυπτογραφημένοι). Τα στοιχεία του πελάτη ανακτώνται αυτόματα.", "ok")
     return redirect(url_for("main.client_detail", afm=afm))
 
 
@@ -338,18 +371,11 @@ def clients_bulk():
             flash("Δώστε και χρήστη και κωδικό TAXISnet.", "warn")
         else:
             out = client_creds.bulk_set(conn, [(a, user, pwd) for a in afms])
-            flash(f"Οι κωδικοί TAXISnet ορίστηκαν σε {out['saved']} πελάτες.", "ok")
+            _start_lookup(*afms)
+            flash(f"Οι κωδικοί TAXISnet ορίστηκαν σε {out['saved']} πελάτες. Ξεκίνησε η ανάκτηση των στοιχείων τους.", "ok")
     elif action == "lookup":
-        def work(progress):
-            from .. import db as dbmod
-            c = dbmod.connect()
-            try:
-                out = clients.enrich_pending(c, afms=afms, on_progress=progress)
-                engine.rematch(c)
-                return out
-            finally:
-                c.close()
-        flash("Ανανέωση στοιχείων σε εξέλιξη…" if _jobs().start("enrich", work) else "Τρέχει ήδη άλλη εργασία.", "ok")
+        _start_lookup(*afms)
+        flash(f"Ανανέωση στοιχείων σε εξέλιξη για {len(afms)} πελάτες…", "ok")
     else:
         abort(400)
     return redirect(url_for("main.clients_list"))
@@ -383,9 +409,11 @@ def clients_import_template():
 
 @bp.get("/logs")
 def logs_view():
-    """Τελευταίες γραμμές των αρχείων καταγραφής (εφαρμογή + καθημερινός έλεγχος)."""
+    """Τελευταίες γραμμές των αρχείων καταγραφής — ένα κοινό αρχείο (`taxmatch.log`) για GUI και προγραμματισμένο
+    έλεγχο μαζί, όπως στο timologio downloader (βλ. `logs.py`), συν το `crash.log` για σφάλματα πριν προλάβει να
+    ανοίξει το logging (packaging/entry.py)."""
     out = []
-    for name in ("daily.log", "app.log", "crash.log"):
+    for name in ("taxmatch.log", "crash.log"):
         path = config.log_dir() / name
         if path.exists():
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
@@ -417,6 +445,12 @@ def calendar_view():
     show_news = ("1" in request.args.getlist("news")) if "news" in request.args else True
     show_rules = ("1" in request.args.getlist("rules")) if "rules" in request.args else True
     show_cond = ("1" in request.args.getlist("cond")) if "cond" in request.args else True
+    # Ο μήνας που βλέπει ο χρήστης ΤΩΡΑ κατεβαίνει πλήρης (ό,τι δείχνει η ίδια η σελίδα taxheaven), όχι μόνο το
+    # κυλιόμενο παράθυρο του «Έλεγχος τώρα». Φθηνό: μία φορά ανά μήνα (ή αν είναι κοντινός και μπαγιάτικος).
+    try:
+        taxheaven_calendar.ensure_month_synced(conn, None, first.year, first.month)
+    except Exception:
+        log.exception("ensure_month_synced απέτυχε για %s-%s", first.year, first.month)
     weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(first.year, first.month)
     events = deadlines.events_between(conn, weeks[0][0], weeks[-1][-1], afm=afm, include_news=show_news,
                                      include_rules=show_rules, include_conditional=show_cond)
@@ -496,6 +530,11 @@ def settings():
                     settings_store.set_value(conn, key, "")
                 elif request.form.get(key, "").strip():
                     settings_store.set_value(conn, key, request.form[key].strip())
+                if key in ("aade_user", "aade_pass") and (request.form.get(key, "").strip() or request.form.get(f"clear_{key}")):
+                    settings_store.set_value(conn, "aade_office_status", "")          # νέοι κωδικοί: ξεκινά από την αρχή
+                    settings_store.set_value(conn, "aade_office_message", "")
+                if key in ("groq_api_key", "openrouter_api_key") and request.form.get(key, "").strip():
+                    settings_store.set_value(conn, "llm_last_error", "")
             flash("Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).", "ok")
         elif section == "llm":
             provider = request.form.get("llm_provider", "groq")
@@ -536,7 +575,8 @@ def settings():
         values={k: settings_store.get(conn, k) for k in ("llm_provider", "llm_model_groq", "llm_model_openrouter",
                                                          "lookback_days", "max_extractions_per_run", "fetch_full_text", "daily_time")},
         sources=sources.SOURCES, enabled={s.id: settings_store.source_enabled(conn, s.id, s.default_enabled) for s in sources.SOURCES},
-        task_supported=scheduler_win.supported(), task_installed=scheduler_win.is_installed(), run=pipeline.last_run(conn))
+        task_supported=scheduler_win.supported(), task_installed=scheduler_win.is_installed(), run=pipeline.last_run(conn),
+        master_protected=crypto.is_protected(crypto.keyfile_path()), min_password_length=crypto.MIN_PASSWORD_LENGTH)
 
 
 @bp.post("/settings/test-llm")
@@ -544,7 +584,16 @@ def test_llm():
     conn = get_db()
     try:
         client = llm_extract.LLMClient.from_settings(conn)
-        client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
+        try:
+            client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
+        except llm_extract.LLMError as exc:
+            if exc.kind != "model":
+                raise
+            old = client.model                               # το μοντέλο δεν επιτρέπεται: βρες ένα που επιτρέπεται
+            client.model = llm_extract.recover_model(conn, client)
+            client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
+            flash(f"Το μοντέλο «{old}» δεν είναι διαθέσιμο για το API key σας — έγινε αυτόματη αλλαγή σε «{client.model}».", "warn")
+        settings_store.set_value(conn, "llm_last_error", "")
         flash(f"Η σύνδεση με {client.provider} ({client.model}) λειτουργεί.", "ok")
     except llm_extract.NotConfigured as exc:
         flash(str(exc), "warn")
@@ -562,10 +611,13 @@ def test_aade():
     else:
         try:
             res = lookup_aade.aade_login(user, pwd)
+            reason = res.get("reason") or ""
+            settings_store.set_value(conn, "aade_office_status", "ok" if res.get("ok") else ("invalid" if reason == "InvalidCredentials" else ""))
+            settings_store.set_value(conn, "aade_office_message", "" if res.get("ok") else lookup_aade.REASONS_EL.get(reason, reason))
             if res.get("ok"):
                 flash("Η σύνδεση στη ΑΑΔΕ (TAXISnet) πέτυχε.", "ok")
             else:
-                flash("Η σύνδεση στη ΑΑΔΕ απέτυχε: " + lookup_aade.REASONS_EL.get(res.get("reason") or "", str(res.get("reason"))), "danger")
+                flash("Η σύνδεση στη ΑΑΔΕ απέτυχε: " + lookup_aade.REASONS_EL.get(reason, reason), "danger")
         except Exception as exc:
             flash(f"Σφάλμα σύνδεσης με ΑΑΔΕ: {exc}", "danger")
     return redirect(url_for("main.settings"))

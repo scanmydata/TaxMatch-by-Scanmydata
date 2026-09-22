@@ -36,7 +36,7 @@
     {% for day in week %}{% set iso = day.isoformat() %}{% set evs = by_day.get(iso, []) %}
     <td class="{{ 'other' if day.month != first.month }} {{ 'today' if day == today }}">
       <div class="d">{{ day.day }}</div>
-      {% for ev in evs[:3] %}<a class="ev {{ ev.kind }} {{ 'cond' if ev.conditional }} ext" href="{{ ev.url }}" target="_blank" rel="noopener" title="{{ ev.title }}{{ ' — ' ~ ev.description if ev.description }}">{{ ev.title }}</a>{% endfor %}
+      {% for ev in evs[:3] %}<a class="ev {{ ev.kind }} {{ 'cond' if ev.conditional }} ext" href="{{ ev.url }}" target="_blank" rel="noopener" title="{{ ev.title }}{{ ' — ' ~ ev.description if ev.description }}" data-summary="{{ ev.description }}" data-date="{{ ev.date|date_el }}">{{ ev.title }}</a>{% endfor %}
       {% if evs|length > 3 %}<div class="more">+{{ evs|length - 3 }} ακόμη</div>{% endif %}
     </td>{% endfor %}
   </tr>{% endfor %}
@@ -52,7 +52,7 @@
     <tbody>
       {% for ev in agenda %}
       <tr><td class="nowrap c">{{ due_badge(ev.date) }}</td>
-        <td><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener">{{ ev.title }}</a>
+        <td><a class="ext" href="{{ ev.url }}" target="_blank" rel="noopener" data-summary="{{ ev.description }}" data-date="{{ ev.date|date_el }}">{{ ev.title }}</a>
           {% if ev.description %}<div class="muted small">{{ ev.description }}</div>{% endif %}</td>
         <td class="c nowrap">{% if ev.kind == 'news' %}<span class="chip info">νέα · {{ ev.n_clients }} πελάτες</span>
           {% elif ev.kind == 'rule' %}<span class="chip warn">{{ 'κανόνας · υπό προϋποθέσεις' if ev.conditional else 'κανόνας' }}</span>

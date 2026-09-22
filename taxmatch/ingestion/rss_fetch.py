@@ -162,6 +162,10 @@ def ingest(conn: sqlite3.Connection, sources: list[Source], session: Optional[re
         if on_progress:
             on_progress(f"Λήψη: {src.name}")
         try:
+            if src.scrape:
+                from . import taxheaven_calendar                    # lazy: αποφυγή κυκλικού import
+                stats[src.id] = taxheaven_calendar.sync_rolling_window(conn, s)
+                continue
             items = fetch_feed(src, s)
             new = store_obligations(conn, items) if src.kind == "calendar" else store_articles(conn, src.id, items, keywords=src.keywords)
             stats[src.id] = {"fetched": len(items), "new": new}

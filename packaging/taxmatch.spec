@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller (onedir):  pyinstaller packaging/taxmatch.spec --noconfirm
-# ΕΝΑ exe: TaxMatch.exe (GUI). Το ίδιο exe με `--daily` τρέχει τον έλεγχο χωρίς UI (Task Scheduler).
+# ΕΝΑ exe: TaxMatch.exe — native GUI (PySide6, taxmatch/gui/). Το ίδιο exe με `--daily` τρέχει τον έλεγχο χωρίς UI
+# (Task Scheduler). Το Flask (taxmatch/web/) ΔΕΝ είναι η εμφάνιση της εφαρμογής πλέον — μπαίνει στο πακέτο μόνο
+# επειδή το `--serve` (εσωτερικό εργαλείο ανάπτυξης) το χρειάζεται.
 import os
 from pathlib import Path
 
@@ -9,18 +11,18 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).parent
 
 datas = [
+    (str(ROOT / "taxmatch" / "gui" / "assets"), "taxmatch/gui/assets"),
     (str(ROOT / "taxmatch" / "web" / "templates"), "taxmatch/web/templates"),
     (str(ROOT / "taxmatch" / "web" / "static"), "taxmatch/web/static"),
     (str(ROOT / "taxmatch" / "extraction" / "prompts"), "taxmatch/extraction/prompts"),
     (str(ROOT / "packaging" / "taxmatch.ico"), "packaging"),
 ]
-datas += collect_data_files("webview")           # JS/DLLs του pywebview
 datas += collect_data_files("feedparser")
+datas += collect_data_files("tzdata")            # ζώνες ώρας (Europe/Athens) για το αρχείο καταγραφής
 
 hiddenimports = (
-    collect_submodules("webview")
-    + collect_submodules("feedparser")
-    + ["openpyxl.cell._writer", "clr_loader", "pythonnet"]
+    collect_submodules("feedparser")
+    + ["openpyxl.cell._writer", "PySide6.QtSvg", "PySide6.QtNetwork"]
 )
 
 a = Analysis(
@@ -31,7 +33,9 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PIL", "pytest", "PyQt5", "PyQt6", "PySide2", "PySide6", "gi", "qtpy"],
+    # Μόνο PySide6-essentials χρειάζεται — τα υπόλοιπα bindings Qt, και ό,τι δεν αγγίζει καθόλου η εφαρμογή.
+    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PIL", "pytest", "PyQt5", "PyQt6", "PySide2", "gi", "qtpy",
+             "webview", "clr_loader", "pythonnet"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

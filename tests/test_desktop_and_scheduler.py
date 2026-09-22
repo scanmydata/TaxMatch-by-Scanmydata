@@ -70,4 +70,4 @@ def test_daily_entry_returns_zero_and_records_run(tmp_path, monkeypatch):
     conn = db.connect()
     run = pipeline.last_run(conn)
     assert run["trigger"] == "scheduled" and run["finished_at"]
-    assert (tmp_path / "data" / "logs" / "daily.log").exists()
+    assert (tmp_path / "data" / "logs" / "taxmatch.log").exists()          # ένα κοινό αρχείο, όπως το timologio downloader

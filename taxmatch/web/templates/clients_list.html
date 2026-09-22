@@ -8,6 +8,8 @@
     <option value="ok">Πλήρη στοιχεία</option><option value="partial">Μερικά στοιχεία</option>
     <option value="pending">Σε αναμονή</option><option value="failed">Αποτυχία ανάκτησης</option>
     <option value="creds">Με κωδικούς TAXISnet</option><option value="nocreds">Χωρίς κωδικούς TAXISnet</option>
+    <option value="badcreds">Λάθος κωδικοί TAXISnet</option>
+    <option value="ceased">Διακοπή εργασιών</option><option value="active">Ενεργές επιχειρήσεις</option>
   </select>
   <input type="search" id="tblFilter" placeholder="Αναζήτηση σε όλες τις στήλες…" style="width:280px">
   <span class="right row">
@@ -30,15 +32,20 @@
 <table class="grid" id="clientsTable">
   <thead><tr>
     <th class="chk"><input type="checkbox" id="selAll" title="Επιλογή όλων"></th>
-    <th>ΑΦΜ</th><th>Επωνυμία</th><th>Νομική μορφή</th><th>Κύριος ΚΑΔ</th><th>Βιβλία</th><th>ΦΠΑ</th><th>Στοιχεία</th><th>TAXISnet</th><th class="num">Matches</th>
+    <th>ΑΦΜ</th><th>Επωνυμία</th><th>Είδος</th><th>Κατάσταση</th><th>Κύριος ΚΑΔ</th><th>Βιβλία</th><th>ΦΠΑ</th><th>Στοιχεία</th><th>TAXISnet</th><th class="num">Matches</th>
   </tr></thead>
   <tbody>
   {% for r in rows %}{% set c = creds.get(r.afm) %}
-    <tr data-afm="{{ r.afm }}" data-status="{{ r.lookup_status }}" data-creds="{{ '1' if c and c.complete else '0' }}">
+    <tr data-afm="{{ r.afm }}" data-status="{{ r.lookup_status }}" data-creds="{{ '1' if c and c.complete else '0' }}"
+        data-credstatus="{{ c.check_status if c else '' }}" data-activity="{{ r.activity_state }}">
       <td class="chk"><input type="checkbox" class="rowchk"></td>
       <td class="nowrap"><a href="{{ url_for('main.client_detail', afm=r.afm) }}">{{ r.afm }}</a></td>
       <td>{{ r.name or '—' }}</td>
       <td>{{ r.legal_form or '—' }}</td>
+      <td class="c">{% if r.activity_state == 'active' %}<span class="st-ok">Ενεργή</span>
+        {% elif r.activity_state == 'ceased' %}<span class="st-bad" title="{{ r.cease_reason }}">Διακοπή{% if r.cease_date %} {{ r.cease_date }}{% endif %}</span>
+        {% elif r.activity_state == 'none' %}<span class="st-muted" title="Φυσικό πρόσωπο χωρίς επιχείρηση στο Μητρώο">Ιδιώτης</span>
+        {% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{% if r.kad_main_code %}<span class="nowrap">{{ r.kad_main_code }}</span> <span class="muted small">{{ r.kad_main_desc[:34] }}</span>{% else %}<span class="muted">—</span>{% endif %}
         {% if r.kad_count > 1 %}<span class="chip">+{{ r.kad_count - 1 }}</span>{% endif %}</td>
       <td class="c">{{ r.books_category or '—' }}</td>

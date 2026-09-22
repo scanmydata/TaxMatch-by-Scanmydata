@@ -53,3 +53,11 @@ class FakeSession:
 
     def mount(self, *a, **k):
         pass
+
+
+def calendar_page(month: str, year: str, events: list[dict]) -> str:
+    """Ελάχιστη σελίδα `taxheaven.gr/calendar` με το ενσωματωμένο `var calendarData = {...}` που διαβάζει το
+    `taxmatch.ingestion.taxheaven_calendar`. `events`: [{"Title","Date" (MM/DD/YYYY),"url"}, ...]."""
+    events_json = _json.dumps(events, ensure_ascii=False)
+    return ("<html><body><script>\n    var calendarData = {\n        events: " + events_json +
+            f",\n        month: '{month}',\n        year: '{year}'\n    }};\n</script></body></html>")

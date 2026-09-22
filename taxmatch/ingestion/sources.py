@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 TAXHEAVEN = "https://www.taxheaven.gr/bibliothiki/soft/xml"
 EFOROLOGIA = "https://www.e-forologia.gr/_RSS"
+CALENDAR_URL = "https://www.taxheaven.gr/calendar"
 
 
 @dataclass(frozen=True)
@@ -19,13 +20,17 @@ class Source:
     keywords: bool = False        # γενικό portal: μόνο άρθρα με φορολογικές/λογιστικές λέξεις-κλειδιά πάνε στο LLM
     max_items: int = 0            # >0: κρατά μόνο τα τόσα νεότερα (π.χ. feed με χιλιάδες ιστορικά άρθρα)
     available: bool = True        # False: δεν μπορεί να ληφθεί αυτόματα (π.χ. Cloudflare challenge) — δεν τρέχει ποτέ
+    scrape: bool = False          # True: όχι απλό RSS — δικιά της συνάρτηση λήψης (βλ. ingestion/taxheaven_calendar.py)
 
 
 SOURCES: list[Source] = [
     Source("taxheaven_new", "Taxheaven — Νέα", f"{TAXHEAVEN}/soft_new.xml", publisher="taxheaven.gr"),
     Source("taxheaven_law", "Taxheaven — Νέες αποφάσεις/εγκύκλιοι", f"{TAXHEAVEN}/soft_law.xml", publisher="taxheaven.gr"),
-    Source("taxheaven_dat", "Taxheaven — Φορολογικό ημερολόγιο", f"{TAXHEAVEN}/soft_dat.xml", kind="calendar",
-           publisher="taxheaven.gr", note="Δομημένες ημερομηνίες λήξης — δεν χρησιμοποιεί LLM."),
+    # ΟΧΙ το soft_dat.xml: επαληθεύτηκε (2026-09-22) ότι είναι κυλιόμενο παράθυρο ~6 εβδομάδων — για τον Ιούλιο 2026
+    # π.χ. δεν έχει ΚΑΜΙΑ εγγραφή, ενώ η ίδια η σελίδα δείχνει 90. Διαβάζουμε απευθείας τη σελίδα ημερολογίου
+    # (taxheaven_calendar.py): «κοντινοί» μήνες φρεσκάρονται σε κάθε έλεγχο, μακρινοί μία φορά όταν ζητηθούν.
+    Source("taxheaven_dat", "Taxheaven — Φορολογικό ημερολόγιο", CALENDAR_URL, kind="calendar", scrape=True,
+           publisher="taxheaven.gr", note="Ό,τι δείχνει η ίδια η σελίδα ημερολογίου (πιο εύθραυστο από RSS αν αλλάξει η σελίδα τους) — δεν χρησιμοποιεί LLM."),
     Source("eforologia_7", "e-forologia — Τρέχοντα Φορολογικά", f"{EFOROLOGIA}/rss_id7.xml", publisher="e-forologia.gr",
            note="Πλήρες κείμενο εγκυκλίων/αποφάσεων ΑΑΔΕ — η πιο πρωτογενής πηγή."),
     Source("eforologia_1", "e-forologia — Επικαιρότητα", f"{EFOROLOGIA}/rss_id1.xml", publisher="e-forologia.gr"),
