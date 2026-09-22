@@ -241,6 +241,29 @@ def icon(name: str, color: str = "#e6edf6", size: int = 20) -> QIcon:
     return result
 
 
+_dot_cache: dict[tuple[str, int], QIcon] = {}
+
+
+def dot_icon(color: str, size: int = 10) -> QIcon:
+    """Μικρή γεμάτη κουκκίδα — δείχνει το «είδος» μιας γραμμής (νέα/κανόνας/ημερολόγιο) σε λίστες, όπως το
+    `.ev-dot` του παλιού web UI. Δεν είναι SVG από το `_SVG` (χρειάζεται γέμισμα, όχι περίγραμμα)."""
+    key = (color, size)
+    if key in _dot_cache:
+        return _dot_cache[key]
+    pixmap = QPixmap(QSize(size, size))
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    from PySide6.QtGui import QColor
+    painter.setBrush(QColor(color))
+    painter.drawEllipse(0, 0, size, size)
+    painter.end()
+    result = QIcon(pixmap)
+    _dot_cache[key] = result
+    return result
+
+
 #: Το ✓ των checkbox. Ξεχωριστό από το "check" των κουμπιών: σε 14 pixel μια
 #: γραμμή πάχους 2 χάνεται, ενώ οι στρογγυλεμένες άκρες γίνονται μουτζούρα.
 _CHECK_SVG = (

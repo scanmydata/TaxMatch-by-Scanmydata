@@ -6,12 +6,13 @@ from __future__ import annotations
 import calendar as pycal
 import json
 import logging
+import sqlite3
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
@@ -31,7 +32,7 @@ from . import i18n
 from .busy import BusyOverlay
 from .client_detail_dialog import ClientDetailDialog
 from .client_dialog import ClientDialog
-from .icons import icon, logo_pixmap
+from .icons import dot_icon, icon, logo_pixmap
 from .manual import ensure_manual
 from .news_dialog import NewsDialog
 from .side_menu import SideMenu
@@ -41,7 +42,7 @@ from .toast import toast
 from .tour import Step, Tour
 from .tray import Tray
 from . import unlock
-from .widgets import ToggleSwitch, resort, setup_columns
+from .widgets import ToggleSwitch, due_badge, kind_colour, resort, setup_columns
 from .workers import run_task
 
 log = logging.getLogger(__name__)
@@ -61,32 +62,74 @@ TOUR_VERSION = 1
 _WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
 
 
-class _DayCell(QPushButton):
-    """Ένα κελί ημέρας στο grid του μηνιαίου ημερολογίου — αριθμός + πλήθος υποχρεώσεων αν υπάρχουν."""
+_CELL_CHIPS = 3  # πόσα events δείχνονται πλήρη μέσα στο κελί πριν το «+N ακόμη» — όπως στο παλιό .cal .ev του web UI
 
-    def __init__(self, day: int, count: int, *, in_month: bool, is_today: bool) -> None:
-        label = str(day)
-        if count:
-            noun = "υποχρέωση" if count == 1 else "υποχρεώσεις"
-            label += f"\n{count} {noun}" if count <= 3 else f"\n{count} υπ/σεις"
-        super().__init__(label)
-        self.setMinimumSize(0, 60)
+
+class _DayCell(QFrame):
+    """Ένα κελί ημέρας στο grid του μηνιαίου ημερολογίου: αριθμός + μέχρι `_CELL_CHIPS` πραγματικά events
+    (μικρά chips, χρωματισμένα κατά είδος — νέα/κανόνας/ημερολόγιο), όπως έδειχνε το παλιό web UI (`.cal .ev`)
+    αντί για ένα ξερό πλήθος."""
+
+    clicked = Signal()
+
+    def __init__(self, day: int, events: list[dict], *, in_month: bool, is_today: bool) -> None:
+        super().__init__()
+        self._clickable = in_month
+        self.setMinimumSize(0, 78)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setEnabled(in_month)
         self.setCursor(Qt.CursorShape.PointingHandCursor if in_month else Qt.CursorShape.ArrowCursor)
-        if not in_month:
-            bg, border, colour = "transparent", "transparent", CURRENT.muted
-        elif count:
-            bg, border, colour = CURRENT.chip, CURRENT.accent, CURRENT.txt
-        else:
-            bg, border, colour = "transparent", CURRENT.line, CURRENT.txt
-        ring = f"3px solid {CURRENT.accent_deep}" if is_today else f"1px solid {border}"
-        self.setStyleSheet(
-            f"QPushButton {{ background:{bg}; border:{ring}; border-radius:8px; color:{colour}; "
-            f"font-weight:{700 if count else 400}; padding:4px; text-align:center; }}"
-            f"QPushButton:hover {{ border-color:{CURRENT.accent}; }}"
-            f"QPushButton:disabled {{ color:{CURRENT.muted}; }}"
+
+        bg = CURRENT.panel if in_month else "transparent"
+        border = CURRENT.line if in_month else "transparent"
+        ring = f"2px solid {CURRENT.accent_deep}" if is_today else f"1px solid {border}"
+        hover = f"QFrame:hover {{ border-color:{CURRENT.accent}; }}" if in_month else ""
+        self.setStyleSheet(f"QFrame {{ background:{bg}; border:{ring}; border-radius:8px; }} {hover}")
+
+        box = QVBoxLayout(self)
+        box.setContentsMargins(6, 4, 6, 4)
+        box.setSpacing(2)
+        num = QLabel(str(day))
+        num.setStyleSheet(
+            f"background:transparent; border:none; font-weight:700; "
+            f"color:{CURRENT.txt if in_month else CURRENT.muted};"
         )
+        box.addWidget(num)
+
+        for ev in events[:_CELL_CHIPS]:
+            chip = QLabel(ev["title"])
+            chip.setToolTip(ev["title"])
+            chip.setStyleSheet(
+                f"background:{CURRENT.panel_alt}; color:{CURRENT.txt}; font-size:10px; "
+                f"border:none; border-left:3px solid {kind_colour(ev['kind'])}; border-radius:3px; padding:1px 4px;"
+            )
+            box.addWidget(chip)
+        extra = len(events) - _CELL_CHIPS
+        if extra > 0:
+            more = QLabel(f"+{extra} ακόμη")
+            more.setStyleSheet(f"background:transparent; border:none; color:{CURRENT.muted}; font-size:10px;")
+            box.addWidget(more)
+        box.addStretch()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+def _section_header(text: str, icon_name: str) -> QWidget:
+    """Τίτλος ενότητας με μικρό εικονίδιο μπροστά — όπως τα `<h2>{{ icon(...) }} …` του παλιού web UI."""
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+    pic = QLabel()
+    pic.setPixmap(icon(icon_name, CURRENT.muted, 14).pixmap(14, 14))
+    row.addWidget(pic)
+    lbl = QLabel(text)
+    lbl.setObjectName("muted")
+    row.addWidget(lbl)
+    row.addStretch()
+    return holder
 
 
 def _reveal(path: Path) -> None:
@@ -305,18 +348,14 @@ class MainWindow(QMainWindow):
         self.dash_articles = QListWidget()
         self.dash_articles.itemActivated.connect(self._open_dash_article)
         left = QVBoxLayout()
-        lbl1 = QLabel("Πρόσφατα άρθρα που αφορούν πελάτες")
-        lbl1.setObjectName("muted")
-        left.addWidget(lbl1)
+        left.addWidget(_section_header("Πρόσφατα άρθρα που αφορούν πελάτες", "bell"))
         left.addWidget(self.dash_articles, 1)
         split.addLayout(left, 2)
 
         self.dash_deadlines = QListWidget()
         self.dash_deadlines.itemActivated.connect(self._open_dash_deadline)
         right = QVBoxLayout()
-        lbl2 = QLabel("Προσεχείς προθεσμίες (21 ημέρες)")
-        lbl2.setObjectName("muted")
-        right.addWidget(lbl2)
+        right.addWidget(_section_header("Προσεχείς προθεσμίες (21 ημέρες)", "calendar"))
         right.addWidget(self.dash_deadlines, 1)
         split.addLayout(right, 1)
         root.addLayout(split, 1)
@@ -337,13 +376,20 @@ class MainWindow(QMainWindow):
 
         self.dash_articles.clear()
         for g in groups[:25]:
-            item = QListWidgetItem(f"{g['title']}  —  {g['n_matches']} πελάτες" + (f" · λήξη {g['deadline']}" if g["deadline"] else ""))
+            text = f"{g['title']}  —  {g['n_matches']} πελάτες"
+            badge = due_badge(g["deadline"])
+            item = QListWidgetItem(dot_icon(kind_colour("news")), text + (f"  ·  {badge[0]}" if badge else ""))
+            if badge:
+                item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, g)
             self.dash_articles.addItem(item)
 
         self.dash_deadlines.clear()
         for ev in upcoming[:25]:
-            item = QListWidgetItem(f"{ev['date']}  {ev['title']}")
+            badge = due_badge(ev["date"])
+            item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])), f"{ev['title']}" + (f"  ·  {badge[0]}" if badge else ""))
+            if badge:
+                item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.dash_deadlines.addItem(item)
 
@@ -702,11 +748,31 @@ class MainWindow(QMainWindow):
         self.reload_calendar()
 
     def reload_calendar(self) -> None:
+        """Δείχνει αμέσως ό,τι υπάρχει ήδη στη βάση, ΧΩΡΙΣ να περιμένει δίκτυο — το `ensure_month_synced` (HTTP GET
+        στο taxheaven.gr) γίνεται σε background thread. Πριν έτρεχε συγχρονισμένα εδώ, και επειδή αυτή η συνάρτηση
+        καλείται ΣΥΧΝΑ (εκκίνηση, αλλαγή μήνα, αλλαγή φίλτρου/πελάτη) πάγωνε όλο το παράθυρο σε κάθε τέτοια ενέργεια
+        όποτε το δίκτυο ήταν αργό — αυτό ήταν το «κολλάει πολύ»."""
+        self._render_calendar_from_db()
         first = self._cal_month
-        try:
+
+        def work(_progress):
             taxheaven_calendar.ensure_month_synced(self.conn, None, first.year, first.month)
-        except Exception:
-            log.exception("ensure_month_synced απέτυχε")
+
+        def done(_result) -> None:
+            if self._cal_month != first:          # ο χρήστης μπορεί να άλλαξε μήνα όσο περιμέναμε το δίκτυο
+                return
+            try:
+                self._render_calendar_from_db()
+            except sqlite3.ProgrammingError:
+                pass  # το παράθυρο έκλεισε (conn κλειστό) πριν προλάβει να παραδοθεί το αποτέλεσμα
+
+        def failed(msg: str) -> None:
+            log.warning("ensure_month_synced απέτυχε: %s", msg)
+
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
+
+    def _render_calendar_from_db(self) -> None:
+        first = self._cal_month
         self.cal_label.setText(i18n.month_year(first))
         last_day = pycal.monthrange(first.year, first.month)[1]
         afm = self.cal_client.currentData() or None
@@ -740,10 +806,10 @@ class MainWindow(QMainWindow):
         for row, week in enumerate(weeks):
             for col, day_date in enumerate(week):
                 in_month = day_date.month == first.month
-                count = len(by_day.get(day_date.isoformat(), []))
-                cell = _DayCell(day_date.day, count, in_month=in_month, is_today=day_date == today)
+                evs = by_day.get(day_date.isoformat(), [])
+                cell = _DayCell(day_date.day, evs, in_month=in_month, is_today=day_date == today)
                 if in_month:
-                    cell.clicked.connect(lambda _=False, d=day_date: self._open_cal_day_date(d))
+                    cell.clicked.connect(lambda d=day_date: self._open_cal_day_date(d))
                 self.cal_grid.addWidget(cell, row, col)
 
     def _open_cal_day_date(self, d: date) -> None:
@@ -764,7 +830,13 @@ class MainWindow(QMainWindow):
             if ev["date"] != day_str:
                 continue
             kind_label = {"news": "νέα", "rule": "κανόνας", "general": "ΑΑΔΕ/taxheaven"}.get(ev["kind"], ev["kind"])
-            item = QListWidgetItem(f"{ev['title']}  ·  [{kind_label}]")
+            text = f"{ev['title']}  ·  {kind_label}"
+            if ev.get("conditional"):
+                text += " · υπό προϋποθέσεις"
+            item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])), text)
+            badge = due_badge(ev["date"])
+            if badge:
+                item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.cal_list.addItem(item)
         if self.cal_list.count() == 0:
@@ -1188,8 +1260,14 @@ class MainWindow(QMainWindow):
         settings_store.set_value(self.conn, "tour_version", str(TOUR_VERSION))
 
     def _maybe_first_run_tour(self) -> None:
-        seen = settings_store.get(self.conn, "tour_seen") == "1"
-        seen_version = int(settings_store.get(self.conn, "tour_version") or 0)
+        # Καθυστερημένο (QTimer.singleShot στο __init__): αν το παράθυρο έκλεισε πριν προλάβει να πυροδοτηθεί
+        # (π.χ. στα tests, όπου κάθε test φτιάχνει/καταστρέφει το δικό του MainWindow), το self.conn μπορεί να
+        # έχει ήδη κλείσει.
+        try:
+            seen = settings_store.get(self.conn, "tour_seen") == "1"
+            seen_version = int(settings_store.get(self.conn, "tour_version") or 0)
+        except sqlite3.ProgrammingError:
+            return
         if seen and seen_version >= TOUR_VERSION:
             return
         if not self.isVisible():

@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -13,9 +14,11 @@ from PySide6.QtWidgets import (
 from .. import deadlines
 from ..business_profiles import credentials as client_creds, service as clients
 from ..matching import engine
+from .icons import dot_icon, icon
 from .news_dialog import NewsDialog
 from .theme import CURRENT
 from .toast import toast
+from .widgets import due_badge, kind_colour
 from .workers import run_task
 
 if TYPE_CHECKING:
@@ -39,10 +42,10 @@ class ClientDetailDialog(QDialog):
         title.setObjectName("h1")
         header.addWidget(title)
         header.addStretch()
-        refresh_btn = QPushButton("  Ανανέωση στοιχείων")
+        refresh_btn = QPushButton(icon("refresh", CURRENT.txt, 16), "  Ανανέωση στοιχείων")
         refresh_btn.clicked.connect(self._refresh_lookup)
         header.addWidget(refresh_btn)
-        del_btn = QPushButton("  Διαγραφή")
+        del_btn = QPushButton(icon("delete", CURRENT.bad, 16), "  Διαγραφή")
         del_btn.setObjectName("danger")
         del_btn.clicked.connect(self._delete_client)
         header.addWidget(del_btn)
@@ -53,11 +56,12 @@ class ClientDetailDialog(QDialog):
         root.addWidget(self.status_banner)
 
         tabs = QTabWidget()
+        tabs.setIconSize(QSize(16, 16))
         root.addWidget(tabs, 1)
-        tabs.addTab(self._profile_tab(), "Προφίλ")
-        tabs.addTab(self._credentials_tab(), "Κωδικοί TAXISnet")
-        tabs.addTab(self._deadlines_tab(), "Προσεχείς προθεσμίες")
-        news_index = tabs.addTab(self._matches_tab(), "Νέα που τον αφορούν")
+        tabs.addTab(self._profile_tab(), icon("edit", CURRENT.muted, 16), "Προφίλ")
+        tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet")
+        tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προσεχείς προθεσμίες")
+        news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
         if b["lookup_status"] == "ok":
             # Τα στοιχεία του πελάτη είναι ήδη πλήρη· αυτό που θα κοιτάξει πρώτα ο λογιστής είναι τι νέο τον αφορά,
             # όχι το προφίλ που δεν έχει αλλάξει.
@@ -150,10 +154,10 @@ class ClientDetailDialog(QDialog):
         save.setObjectName("primary")
         save.clicked.connect(self._save_credentials)
         row.addWidget(save)
-        test = QPushButton("Δοκιμή σύνδεσης")
+        test = QPushButton(icon("network", CURRENT.txt, 16), "  Δοκιμή σύνδεσης")
         test.clicked.connect(self._test_credentials)
         row.addWidget(test)
-        clear = QPushButton("Διαγραφή κωδικών")
+        clear = QPushButton(icon("delete", CURRENT.bad, 16), "  Διαγραφή κωδικών")
         clear.setObjectName("danger")
         clear.clicked.connect(self._clear_credentials)
         row.addWidget(clear)
@@ -283,14 +287,39 @@ class ClientDetailDialog(QDialog):
         today = date.today()
         events = deadlines.events_between(self.conn, today, today + timedelta(days=45), afm=self.afm, include_conditional=False)
         self.deadlines_list.clear()
+        if not events:
+            placeholder = QListWidgetItem("Καμία προσεχής προθεσμία.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.deadlines_list.addItem(placeholder)
         for ev in events[:20]:
-            item = QListWidgetItem(f"{ev['date']}  {ev['title']}")
+            badge = due_badge(ev["date"])
+            text = f"{ev['title']}  ·  {badge[0]}" if badge else ev["title"]
+            item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])), text)
+            if badge:
+                item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.deadlines_list.addItem(item)
 
         matches = engine.digest(self.conn, days=90, afm=self.afm)
         self.matches_list.clear()
+        if not matches:
+            placeholder = QListWidgetItem("Κανένα άρθρο δεν έχει ταιριάξει ακόμη.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.matches_list.addItem(placeholder)
         for m in matches[:50]:
-            item = QListWidgetItem(f"{(m['published_at'] or '')[:10]}  {m['title']}  ·  {m['matched_reason']}")
+            feedback_dot = {1: CURRENT.ok, -1: CURRENT.bad}.get(m["user_feedback"], CURRENT.muted)
+            text = f"{(m['published_at'] or '')[:10]}  {m['title']}  ·  {m['matched_reason']}"
+            colour = None
+            if m["confidence"] < 1:
+                text += "  ·  να επιβεβαιωθεί"
+                colour = CURRENT.warn
+            elif m["deadline"]:
+                badge = due_badge(m["deadline"])
+                if badge:
+                    text += f"  ·  {badge[0]}"
+                    colour = badge[1]
+            item = QListWidgetItem(dot_icon(feedback_dot), text)
+            if colour:
+                item.setForeground(QColor(colour))
             item.setData(Qt.ItemDataRole.UserRole, m)
             self.matches_list.addItem(item)

@@ -37,6 +37,15 @@ def window(qapp, conn):
     from taxmatch.gui.main_window import MainWindow
     win = MainWindow()
     yield win
+    # reload_calendar() (καλείται ήδη στο __init__) ξεκινά ένα background QThread· το σήμα «finished» παραδίδεται
+    # μόνο όταν το event loop το αντλήσει (queued connection ανάμεσα σε threads). Αν κλείσουμε το `conn` πριν
+    # προλάβει να παραδοθεί, ο callback (`done` -> `_render_calendar_from_db`) θα σκάσει ΑΡΓΟΤΕΡΑ πάνω σε κλειστό
+    # `conn` — π.χ. στο πρώτο processEvents() ενός ΕΠΟΜΕΝΟΥ test. Περιμένουμε πρώτα να τελειώσει πραγματικά το
+    # thread (`thread.wait`) και μετά αδειάζουμε το event loop, ώστε ο callback να τρέξει όσο το `conn` ακόμη ζει.
+    for task in list(getattr(win, "_tasks", [])):
+        task.thread.wait(3000)
+    for _ in range(5):
+        QApplication.processEvents()
     win.conn.close()
     win.deleteLater()
 
@@ -113,6 +122,33 @@ def test_llm_model_refresh_populates_combo_and_keeps_current_selection(window, c
     assert window._combo_model_value(window.llm_model_groq) == "llama-3.3-70b-versatile"
 
 
+def test_reload_calendar_does_not_block_on_slow_network(window, conn, monkeypatch):
+    """Το `ensure_month_synced` (HTTP GET στο taxheaven.gr) έτρεχε ΣΥΓΧΡΟΝΑ μέσα στο `reload_calendar()` — και επειδή
+    αυτό καλείται συχνά (εκκίνηση, αλλαγή μήνα, αλλαγή φίλτρου) πάγωνε όλο το παράθυρο σε κάθε αργό δίκτυο. Αυτό το
+    test προσομοιώνει «αργό δίκτυο» (μπλοκάρει μέχρι να το απελευθερώσουμε) και επιβεβαιώνει ότι το reload_calendar()
+    επιστρέφει σχεδόν ακαριαία παρ' όλα αυτά — δηλαδή ο συγχρονισμός τρέχει σε background thread, όχι στο UI thread."""
+    import threading
+    import time
+
+    from taxmatch.ingestion import taxheaven_calendar
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_sync(*_a, **_k):
+        started.set()
+        release.wait(timeout=5)
+        return False
+
+    monkeypatch.setattr(taxheaven_calendar, "ensure_month_synced", slow_sync)
+    t0 = time.monotonic()
+    window.reload_calendar()
+    elapsed = time.monotonic() - t0
+    release.set()  # ελευθέρωσε το background thread ώστε να μην κρεμάσει τον teardown του test
+    assert elapsed < 0.5, f"το reload_calendar() μπλόκαρε {elapsed:.2f}s περιμένοντας δίκτυο — έπρεπε να τρέξει στο background"
+    assert started.wait(timeout=2), "ο συγχρονισμός έπρεπε να έχει ξεκινήσει έστω σε background thread"
+
+
 def test_calendar_page_shows_month_grid_with_day_drilldown(window, conn):
     from datetime import date
     window._cal_month = date(2026, 7, 1)          # μήνας χωρίς εγγραφές feed -> μόνο κανόνες (βλ. taxheaven_calendar)
@@ -136,6 +172,26 @@ def test_calendar_page_shows_month_grid_with_day_drilldown(window, conn):
     assert window.cal_stack.currentIndex() == 0    # «Πίσω στον μήνα» -> ξαναγυρνά στο grid
 
 
+def test_calendar_cells_show_real_event_titles_not_just_a_count(window, conn):
+    """Το κελί μιας ημέρας με υποχρεώσεις πρέπει να δείχνει τους ΠΡΑΓΜΑΤΙΚΟΥΣ τίτλους (chips), όπως έδειχνε το
+    παλιό web UI (`.cal .ev`) — όχι απλώς «3 υποχρεώσεις»."""
+    from datetime import date
+    window._cal_month = date(2026, 7, 1)
+    window.cal_news.setChecked(False)
+    window.reload_calendar()
+    from taxmatch.gui.main_window import _DayCell
+    by_day: dict = {}
+    for ev in window._cal_events:
+        by_day.setdefault(ev["date"], []).append(ev)
+    day_str, evs = sorted(by_day.items())[0]
+    cells = [window.cal_grid.itemAt(i).widget() for i in range(window.cal_grid.count())]
+    match = next(c for c in cells if isinstance(c, _DayCell) and c.layout().count() > 2
+                and str(int(day_str[-2:])) == c.layout().itemAt(0).widget().text())
+    chip_texts = [match.layout().itemAt(i).widget().text() for i in range(1, match.layout().count() - 1)
+                 if match.layout().itemAt(i).widget() is not None]
+    assert any(ev["title"] in chip_texts for ev in evs[:3]), "το κελί πρέπει να δείχνει τον πραγματικό τίτλο του event"
+
+
 def test_calendar_day_cell_click_opens_that_day(window, conn):
     from datetime import date
     window._cal_month = date(2026, 7, 1)
@@ -143,9 +199,10 @@ def test_calendar_day_cell_click_opens_that_day(window, conn):
     window.reload_calendar()
     from taxmatch.gui.main_window import _DayCell
     cells = [window.cal_grid.itemAt(i).widget() for i in range(window.cal_grid.count())]
-    clickable = [c for c in cells if isinstance(c, _DayCell) and c.isEnabled() and "\n" in c.text()]
-    assert clickable, "πρέπει να υπάρχει τουλάχιστον μία ημέρα με υποχρέωση, με ενεργό κελί"
-    clickable[0].click()
+    # Κελί με events: μπορεί να κάνει κλικ (_clickable) και δείχνει πάνω από τον αριθμό ημέρας τουλάχιστον 1 chip.
+    clickable = [c for c in cells if isinstance(c, _DayCell) and c._clickable and c.layout().count() > 2]
+    assert clickable, "πρέπει να υπάρχει τουλάχιστον μία ημέρα με υποχρέωση, με ενεργό κελί που δείχνει events"
+    clickable[0].clicked.emit()
     assert window.cal_stack.currentIndex() == 1
 
 

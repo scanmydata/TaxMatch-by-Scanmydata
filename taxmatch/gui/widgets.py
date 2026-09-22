@@ -26,6 +26,37 @@ from PySide6.QtWidgets import QCheckBox, QDateEdit, QHeaderView, QLineEdit, QTab
 from .theme import CURRENT
 
 
+def due_badge(iso: str | None) -> tuple[str, str] | None:
+    """«⏰ 22/09/2026 · σε 3 ημ.» με χρώμα κατά επικαιρότητα — ίδια λογική με το `due_badge()` του παλιού web UI
+    (`web/templates/_macros.html`, `due` filter στο `web/__init__.py`). `None` αν δεν υπάρχει ημερομηνία."""
+    if not iso:
+        return None
+    try:
+        d = date.fromisoformat(iso[:10])
+    except ValueError:
+        return None
+    n = (d - date.today()).days
+    if n < 0:
+        label, colour = f"έληξε πριν {-n} ημ.", CURRENT.bad
+    elif n == 0:
+        label, colour = "σήμερα", CURRENT.bad
+    elif n == 1:
+        label, colour = "αύριο", CURRENT.warn
+    else:
+        label = f"σε {n} ημ."
+        colour = CURRENT.warn if n <= 7 else CURRENT.accent
+    return f"⏰ {d.strftime('%d/%m/%Y')} · {label}", colour
+
+
+def kind_colour(kind: str) -> str:
+    """Χρώμα κατά «είδος» γεγονότος — ίδιο με το `.ev-dot`/`.cal .ev` του παλιού web UI.
+
+    Συνάρτηση και όχι σταθερό dict: το `CURRENT.accent` κ.λπ. πρέπει να διαβάζεται ΤΗ ΣΤΙΓΜΗ της κλήσης, αλλιώς
+    ένα dict φτιαγμένο στο import θα κρατούσε τα χρώματα του αρχικού θέματος για πάντα, ακόμη κι αν ο χρήστης
+    άλλαζε σε φωτεινό/σκούρο θέμα αργότερα."""
+    return {"news": CURRENT.accent, "rule": CURRENT.warn}.get(kind, CURRENT.muted)
+
+
 def add_reveal(field: QLineEdit) -> QLineEdit:
     """Βάζει «ματάκι» μέσα στο πεδίο, για να φαίνεται ο κωδικός με ένα κλικ.
 
