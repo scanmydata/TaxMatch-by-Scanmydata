@@ -281,3 +281,34 @@ def test_run_task_executes_in_background_and_delivers_result(qapp):
     loop.exec()
     assert results == [42]
     del task
+
+
+def test_run_task_callbacks_run_on_the_ui_thread_not_the_worker_thread(qapp):
+    """on_progress/on_done/on_error αγγίζουν widgets (toast, combo.addItem, ...) — αν έτρεχαν στο background
+    thread (π.χ. επειδή είναι plain closures/lambdas χωρίς δικό τους QObject thread affinity, η Qt δεν μπορεί να
+    τα παραδώσει queued αυτόματα), θα πάγωνε/χαλούσε το πραγματικό (όχι offscreen) παράθυρο — βλ. σχόλιο στο
+    `workers.Task`. Το test ελέγχει ρητά ΣΕ ΠΟΙΟ thread τρέχει το callback, όχι μόνο ότι φτάνει."""
+    import threading
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from taxmatch.gui.workers import run_task
+
+    main_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+    loop = QEventLoop()
+
+    def work(_progress):
+        return threading.get_ident()
+
+    def done(worker_thread_id: int) -> None:
+        seen["callback_thread"] = threading.get_ident()
+        seen["worker_thread"] = worker_thread_id
+        loop.quit()
+
+    task = run_task(None, work, on_done=done)
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+    assert seen["callback_thread"] == main_thread
+    assert seen["worker_thread"] != main_thread
+    del task

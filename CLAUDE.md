@@ -88,6 +88,20 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 ## Κανόνες
 - **Ποτέ credentials** (TAXISnet, API keys) σε κώδικα, docs, comments, commits, tests, logs. Το repo είναι public. `.env`/`.enckey` είναι στο `.gitignore`.
 - Ό,τι αγγίζει δίκτυο/LLM/ΑΑΔΕ στο `gui/` τρέχει σε background thread (`gui/workers.py: run_task`) — ΠΟΤΕ στο UI thread (παγώνει το παράθυρο).
+- **`run_task`'s `on_progress/on_done/on_error` παραδίδονται ΠΑΝΤΑ στο UI thread — ΜΗΝ υποθέσεις ότι απλή σύνδεση σήματος το κάνει αυτό
+  αυτόματα.** Βρέθηκε πραγματικό, συστημικό bug (2026-09-22): το παλιό `Task` ήταν plain Python class (όχι `QObject`) και τα
+  `on_done=done`/`on_error=lambda ...` που περνά κάθε caller είναι closures/lambdas χωρίς δικό τους QObject thread affinity — η Qt/PySide
+  ΔΕΝ μπορεί να προσδιορίσει αν πρέπει να τα παραδώσει queued σε τέτοια περίπτωση, άρα τα εκτελούσε ΣΥΓΧΡΟΝΑ μέσα στο background thread
+  (επαληθεύτηκε πειραματικά: `worker.finished.connect(plain_function)` τρέχει το `plain_function` στο thread του `worker`, ΟΧΙ στο UI
+  thread — ούτε καν με ρητό `Qt.ConnectionType.QueuedConnection`, γιατί χωρίς QObject receiver η Qt δεν έχει event loop στόχο). Αυτό
+  σήμαινε ότι widgets (`toast()`, `combo.clear()/addItem()`) χτίζονταν/άλλαζαν από μη-UI thread σε ΚΑΘΕ `run_task` σε όλη την εφαρμογή —
+  αυτό παγώνει/χαλάει πραγματικό (όχι offscreen) Windows παράθυρο, αν και τα offscreen tests δεν το έπιαναν (κανένα existing test δεν
+  έλεγχε ΣΕ ΠΟΙΟ thread έτρεχε το callback, μόνο ότι έφτανε). Πιθανή αιτία πίσω από «κολλάει η Δοκιμή LLM/Ανανέωση μοντέλων» ΚΑΙ πίσω από
+  το «μόνιμο 403 banner» (`toast(..., ms=0)` για danger-level errors δημιουργημένο από background thread μπορεί να μείνει κολλημένο).
+  **Διορθώθηκε:** το `Task` είναι πλέον `QObject` που ΠΑΡΑΜΕΝΕΙ στο calling (UI) thread (ποτέ `moveToThread`) — τα signals του `worker`
+  συνδέονται σε bound methods ΑΥΤΟΥ του `Task` (η Qt ΜΠΟΡΕΙ να βρει thread affinity από πραγματικό QObject άρα σωστά queued), κι αυτές οι
+  μέθοδοι με τη σειρά τους καλούν το callable του caller — άρα πλέον ΕΓΓΥΗΜΕΝΑ στο UI thread. Regression test:
+  `test_run_task_callbacks_run_on_the_ui_thread_not_the_worker_thread` (ελέγχει ρητά `threading.get_ident()`).
 - **Κανένα native μήνυμα browser στο web/** (νεκρό πλέον, αλλά αν αγγιχτεί): όχι `alert/confirm`, όχι φυσαλίδες επικύρωσης. Στο `gui/`: κανένα
   `QMessageBox`/απευθείας σύνδεσμος για νέα/προθεσμίες — πάντα `news_dialog.NewsDialog` πρώτα (προεπισκόπηση), ο σύνδεσμος ανοίγει μόνο με ρητό κλικ «Άνοιγμα συνδέσμου».
 - **Ειδοποιήσεις στο `gui/` = `toast.toast()` (side flash message), ΟΧΙ `QMessageBox.information/warning`.** Εξαίρεση: `QMessageBox.question`
@@ -145,6 +159,18 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    Protect (όχι στον κώδικα): επαναφορά από το quarantine του + εξαίρεση (exclusion) για το `%LOCALAPPDATA%\Programs\TaxMatch\` (και το
    dev `dist\TaxMatch\` για build/test). Δύο εναλλακτικές μόνιμες λύσεις παραμένουν: (α) **code signing certificate** (πληρωμένο)·
    (β) υποβολή false-positive στον πάροχο. Μην ξαναπροτείνεις αλλαγές στο spec γι' αυτό — έχει ήδη διερευνηθεί.
+   Η εξαίρεση φακέλου στο Acronis που πρόσθεσε ο χρήστης (2026-09-22) ΔΕΝ κράτησε: το φρεσκοχτισμένο `TaxMatch.exe` (v0.3.0) εξαφανίστηκε
+   ξανά μέσα σε ~15 δευτερόλεπτα μετά από silent install, ενώ έμειναν `unins000.exe`/`_internal` — άρα ο γενικός exclusion list του Acronis
+   δεν αρκεί· πιθανότατα χρειάζεται ξεχωριστή εξαίρεση στο δικό του «Active Protection»/anti-ransomware τμήμα (διαφορετικό από το γενικό
+   antivirus exclusion list), όχι μόνο στο γενικό. **Σύγκριση με το `mydata-etimologio-bridge/desktop` (TimologioDownloader, αδελφό
+   εργαλείο) που ΔΕΝ το χτυπά το antivirus σε αυτό το μηχάνημα:** ελέγχθηκε ρητά (2026-09-22) — το `timologio.spec` έχει ΤΙΣ ΙΔΙΕΣ βασικές
+   μετριάσεις με το `taxmatch.spec` (one-dir COLLECT όχι one-file, πλήρες VersionInfo με CompanyName/FileDescription/ProductName, χωρίς
+   UPX), και το `TimologioDownloader.exe` είναι ΕΠΙΣΗΣ ανυπόγραφο (`Get-AuthenticodeSignature` → `NotSigned`) — δεν βρέθηκε καμία
+   ουσιαστική διαφορά κώδικα/packaging που να εξηγεί τη διαφορετική συμπεριφορά. Πιθανότερη εξήγηση: το `TimologioDownloader.exe` είναι
+   στον δίσκο αμετάβλητο από τις 16/09 (ίδιο hash εδώ και μέρες, πιθανώς ήδη «αξιολογημένο»/cached ως ασφαλές από το Acronis), ενώ το
+   `TaxMatch.exe` ξαναχτίζεται συνέχεια μέσα στην ίδια συνεδρία (νέο hash σε κάθε build) — κάθε νέο, άγνωστο, ανυπόγραφο exe ξαναπυροδοτεί
+   το heuristic από την αρχή. Άρα ΔΕΝ είναι κάτι διορθώσιμο μέσω spec/κώδικα (μην το ξαναδιερευνήσεις έτσι) — μόνο μέσω code signing,
+   σταθεροποίησης του build (λιγότερα rebuilds = το ίδιο hash μένει «γνωστό» στο Acronis) ή σωστής ρύθμισης εξαίρεσης ΜΕΣΑ στο Acronis.
 11. **Native GUI (2026-09-22, πρώτη έκδοση + διορθώσεις):** επαληθεύτηκε οπτικά σε πραγματικό παράθυρο Windows (dashboard, sidebar, tour,
    notices, πίνακας πελατών, ημερολόγιο με πραγματικά δεδομένα, διάλογος «Νέος πελάτης») και με 12 headless (offscreen) tests
    (`test_gui_smoke.py`). Το **εγχειρίδιο PDF επαληθεύτηκε ΟΠΤΙΚΑ (rendered→PNG) με το πραγματικό "windows" Qt platform** — σωστά ελληνικά,

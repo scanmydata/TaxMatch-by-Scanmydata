@@ -26,15 +26,51 @@ class _Runnable(QObject):
         self.finished.emit(result)
 
 
-class Task:
+class Task(QObject):
     """Κρατά ζωντανά το thread+worker όσο τρέχει (αλλιώς ο garbage collector τα μαζεύει στη μέση της εκτέλεσης).
-    Ο καλών πρέπει να κρατήσει αναφορά στο ίδιο το `Task` (π.χ. `self._task = run_task(...)`)."""
+    Ο καλών πρέπει να κρατήσει αναφορά στο ίδιο το `Task` (π.χ. `self._task = run_task(...)`).
 
-    def __init__(self, thread: QThread, worker: _Runnable) -> None:
+    ΚΡΙΣΙΜΟ: το `Task` ΠΑΡΑΜΕΝΕΙ στο thread που το δημιούργησε (το UI thread — ΠΟΤΕ δεν καλείται `moveToThread`
+    πάνω του, μόνο πάνω στο `worker`). Το `on_progress/on_done/on_error` του καλούντος είναι απλά Python callables
+    (closures/lambdas), όχι bound methods πάνω σε QObject — η Qt δεν μπορεί να καθορίσει thread affinity για αυτά,
+    άρα ΔΕΝ γίνονται ποτέ αυτόματα queued connection: αν συνδέονταν απευθείας πάνω στα signals του `worker` (που
+    ζει στο background thread), θα εκτελούνταν ΣΥΓΧΡΟΝΑ μέσα στο background thread — δηλαδή θα άγγιζαν widgets
+    (π.χ. `toast()`, `combo.addItem()`) από μη-UI thread, κάτι που η Qt δεν υποστηρίζει (παγώνει/χαλάει το
+    παράθυρο σε πραγματικό Windows platform, ακόμη κι αν φαίνεται να «δουλεύει» σε offscreen tests).
+    Εδώ συνδέουμε τα signals του `worker` σε bound methods ΑΥΤΟΥ ΕΔΩ του `Task` (QObject με thread affinity = UI
+    thread) — η Qt ΤΩΡΑ αναγνωρίζει σωστά το cross-thread και τα παραδίδει ως queued connection στο UI thread·
+    οι δικές μας `_relay_*` μέθοδοι τρέχουν λοιπόν εγγυημένα στο UI thread και μόνο ΤΟΤΕ καλούν το callable του
+    καλούντος."""
+
+    def __init__(self, parent: QObject, thread: QThread, worker: _Runnable,
+                on_progress: Optional[Callable[[str], None]] = None,
+                on_done: Optional[Callable[[Any], None]] = None,
+                on_error: Optional[Callable[[str], None]] = None) -> None:
+        super().__init__(parent)
         self.thread = thread
         self.worker = worker
+        self._on_progress = on_progress
+        self._on_done = on_done
+        self._on_error = on_error
+        worker.progress.connect(self._relay_progress)
+        worker.finished.connect(self._relay_done)
+        worker.failed.connect(self._relay_error)
 
-    def _cleanup(self, *_args: Any) -> None:
+    def _relay_progress(self, msg: str) -> None:
+        if self._on_progress:
+            self._on_progress(msg)
+
+    def _relay_done(self, result: Any) -> None:
+        self._cleanup()
+        if self._on_done:
+            self._on_done(result)
+
+    def _relay_error(self, msg: str) -> None:
+        self._cleanup()
+        if self._on_error:
+            self._on_error(msg)
+
+    def _cleanup(self) -> None:
         self.thread.quit()
         self.thread.wait(5000)
 
@@ -43,19 +79,13 @@ def run_task(parent: QObject, fn: Callable[[Callable[[str], None]], Any],
             on_progress: Optional[Callable[[str], None]] = None,
             on_done: Optional[Callable[[Any], None]] = None,
             on_error: Optional[Callable[[str], None]] = None) -> Task:
-    """Τρέχει `fn(progress_callback)` σε background thread. Επιστρέφει `Task` — κρατήστε αναφορά (π.χ. `self._task`)."""
+    """Τρέχει `fn(progress_callback)` σε background thread. Επιστρέφει `Task` — κρατήστε αναφορά (π.χ. `self._task`).
+    Τα `on_progress/on_done/on_error` παραδίδονται ΠΑΝΤΑ στο UI thread (βλ. σχόλιο στο `Task`), όποιο κι αν είναι
+    το thread affinity τους — ασφαλές να αγγίζουν widgets."""
     thread = QThread(parent)
     worker = _Runnable(fn)
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
-    task = Task(thread, worker)
-    if on_progress:
-        worker.progress.connect(on_progress)
-    if on_done:
-        worker.finished.connect(on_done)
-    if on_error:
-        worker.failed.connect(on_error)
-    worker.finished.connect(task._cleanup)
-    worker.failed.connect(task._cleanup)
+    task = Task(parent, thread, worker, on_progress=on_progress, on_done=on_done, on_error=on_error)
     thread.start()
     return task
