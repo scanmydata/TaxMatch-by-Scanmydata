@@ -58,6 +58,22 @@ class GreekFormatter(logging.Formatter):
         return super().format(record)
 
 
+def format_local(iso_utc: str, fmt: str = "%d/%m/%Y %H:%M") -> str:
+    """Ένα αποθηκευμένο UTC timestamp (`db.utcnow()`) σε τοπική ώρα Ελλάδας, για την οθόνη.
+
+    Ίδια λογική ζώνης με το `GreekFormatter` παραπάνω, ώστε ό,τι δείχνει το UI να συμφωνεί με το αρχείο
+    καταγραφής. `''` αν το timestamp είναι κενό/άκυρο (π.χ. δεν έχει τρέξει ποτέ έλεγχος ακόμη).
+    """
+    if not iso_utc:
+        return ""
+    try:
+        moment = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    athens = _athens_tz()
+    return (moment.astimezone(athens) if athens else moment.astimezone()).strftime(fmt)
+
+
 def log_dir(data_dir: Path) -> Path:
     return data_dir / "logs"
 

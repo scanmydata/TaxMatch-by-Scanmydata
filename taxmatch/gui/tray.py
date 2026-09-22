@@ -15,12 +15,14 @@ from __future__ import annotations
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
+from .. import APP_TITLE
+
 
 class Tray(QSystemTrayIcon):
     def __init__(self, window: QWidget, app_icon: QIcon, role_label: str) -> None:
         super().__init__(app_icon, window)
         self._window = window
-        self.setToolTip(f"Timologio Downloader — {role_label}")
+        self.setToolTip(f"{APP_TITLE} — {role_label}" if role_label else APP_TITLE)
 
         menu = QMenu()
         self.act_show = QAction("Άνοιγμα", menu)

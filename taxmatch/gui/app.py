@@ -96,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     icon = app_icon()
     app.setWindowIcon(icon)
 
+    from . import i18n
+    app._greek_translator = i18n.install(app)  # noqa: SLF001 - πρέπει να μείνει ζωντανός, βλ. i18n.install
+
     from .theme import CURRENT, apply_theme, install_title_bar_painter
     install_title_bar_painter(app)
 

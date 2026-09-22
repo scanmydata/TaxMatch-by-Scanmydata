@@ -85,18 +85,19 @@ class FilterHeader(QHeaderView):
         if logical_index not in self._filterable:
             return
         active = logical_index in self._active
-        # Το χωνί φαίνεται μόνο όταν χρειάζεται: σε hover ή όταν η στήλη είναι ήδη
-        # φιλτραρισμένη. Έτσι οι υπόλοιπες κεφαλίδες μένουν καθαρές, χωρίς να
-        # «μπλέκει» το εικονίδιο με το κείμενο.
-        if not active and logical_index != self._hover:
-            return
+        hovered = logical_index == self._hover
         painter.save()
         # Καθαρή ζώνη κάτω από το χωνί ώστε να μην περνά από πίσω κείμενο.
         zone = QRect(rect.right() - _ARROW - _HOT, rect.top() + 1, _HOT,
                      rect.height() - 2)
         painter.fillRect(zone, QColor(CURRENT.bg))
-        color = CURRENT.accent if active else CURRENT.muted
+        # Το χωνί μένει πάντα ορατό (αχνό) στις φιλτραρίσιμες στήλες — αλλιώς ο χρήστης δεν ανακαλύπτει ποτέ ότι
+        # μπορεί να φιλτράρει εκτός αν περάσει τυχαία το ποντίκι από πάνω. Γίνεται πιο έντονο σε hover/ενεργό
+        # φίλτρο, ώστε να ξεχωρίζει ποια στήλη φιλτράρεται τώρα.
+        color = CURRENT.accent if active else (CURRENT.txt if hovered else CURRENT.muted)
         pixmap = icon("filter", color, _GLYPH).pixmap(QSize(_GLYPH, _GLYPH))
+        if not active and not hovered:
+            painter.setOpacity(0.45)
         painter.drawPixmap(self._funnel_rect(rect), pixmap)
         painter.restore()
 
@@ -236,16 +237,25 @@ class TableColumnFilter(QObject):
     Φιλτράρει κρύβοντας γραμμές (``setRowHidden``) βάσει του **κειμένου** των
     κελιών — δεν χρειάζεται να ξέρει το μοντέλο δεδομένων του πίνακα. Ξανα-
     εφαρμόζεται μόνο του μετά από ταξινόμηση ή ξαναγέμισμα του πίνακα.
+
+    ΠΡΟΣΟΧΗ αν ο πίνακας συνδυάζει αυτό το φίλτρο με άλλο κριτήριο (π.χ. πεδίο
+    αναζήτησης κειμένου): το ``_schedule()``/``_run()`` παρακάτω τρέχει
+    ασύγχρονα (``QTimer.singleShot(0, …)``) κάθε φορά που ο πίνακας ξαναγεμίζει
+    ή ταξινομείται, και χωρίς `apply_fn` θα καλούσε το δικό του `apply()` που
+    ξέρει ΜΟΝΟ τα φίλτρα στηλών — σβήνοντας σιωπηλά ό,τι είχε κρύψει η
+    αναζήτηση ένα «tick» νωρίτερα. Πέρασε `apply_fn` = τη συνάρτηση που
+    συνδυάζει ΟΛΑ τα κριτήρια (π.χ. `main_window._apply_client_filter`).
     """
 
     #: Εκπέμπεται όταν αλλάζει το σύνολο των ενεργών φίλτρων στήλης.
     filtersChanged = Signal()
 
-    def __init__(self, table: QTableWidget, filterable: Iterable[int]) -> None:
+    def __init__(self, table: QTableWidget, filterable: Iterable[int], apply_fn=None) -> None:
         super().__init__(table)
         self.table = table
         self.filters: dict[int, set[str]] = {}
         self._pending = False
+        self._apply_fn = apply_fn or self.apply
         header = FilterHeader(filterable, table)
         header.filterClicked.connect(self._open)
         table.setHorizontalHeader(header)
@@ -274,7 +284,8 @@ class TableColumnFilter(QObject):
                 self.filters.pop(col, None)
             else:
                 self.filters[col] = chosen
-            self.apply()
+            self._update_header_active()
+            self._apply_fn()
             self.filtersChanged.emit()
 
         open_filter_popup(self._header, col, title or "Στήλη", values, selected, apply)
@@ -283,7 +294,8 @@ class TableColumnFilter(QObject):
         """Καθαρίζει όλα τα φίλτρα στήλης και ξαναδείχνει τις γραμμές."""
         if self.filters:
             self.filters.clear()
-            self.apply()
+            self._update_header_active()
+            self._apply_fn()
             self.filtersChanged.emit()
 
     def has_filters(self) -> bool:
@@ -297,13 +309,18 @@ class TableColumnFilter(QObject):
 
     def _run(self) -> None:
         self._pending = False
-        self.apply()
+        self._apply_fn()
+
+    def _update_header_active(self) -> None:
+        self._header.set_active({c for c, v in self.filters.items() if v})
 
     def apply(self) -> None:
+        """Προεπιλεγμένη εφαρμογή: κρύβει βάσει ΜΟΝΟ των φίλτρων στηλών. Αν ο πίνακας έχει και άλλο κριτήριο
+        (π.χ. αναζήτηση), μην καλείς αυτό απευθείας — πέρασε `apply_fn` στο `__init__` (βλ. docstring κλάσης)."""
         for row in range(self.table.rowCount()):
             hide = any(
                 allowed and self._text(row, col) not in allowed
                 for col, allowed in self.filters.items()
             )
             self.table.setRowHidden(row, hide)
-        self._header.set_active({c for c, v in self.filters.items() if v})
+        self._update_header_active()

@@ -20,12 +20,13 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .. import APP_TITLE, __version__, config, crypto, deadlines, notices as notices_mod, pipeline, scheduler_win, settings_store
+from .. import APP_TITLE, __version__, config, crypto, deadlines, logs, notices as notices_mod, pipeline, scheduler_win, settings_store
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
 from ..identifiers import is_valid_afm, kad_digits, normalize_afm
 from ..ingestion import sources, taxheaven_calendar
 from ..matching import engine
+from . import i18n
 from .busy import BusyOverlay
 from .client_detail_dialog import ClientDetailDialog
 from .client_dialog import ClientDialog
@@ -35,6 +36,7 @@ from .news_dialog import NewsDialog
 from .side_menu import SideMenu
 from .table_filter import TableColumnFilter
 from .theme import CURRENT, apply_theme, paint_title_bar
+from .toast import toast
 from .tour import Step, Tour
 from .tray import Tray
 from . import unlock
@@ -124,6 +126,17 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(14, 12, 14, 10)
         root.setSpacing(9)
         shell.addWidget(right, 1)
+
+        quick_row = QHBoxLayout()
+        quick_row.addStretch()
+        self.quick_search = QLineEdit()
+        self.quick_search.setPlaceholderText("Γρήγορη αναζήτηση πελάτη (ΑΦΜ ή επωνυμία)…  [Ctrl+K]")
+        self.quick_search.setFixedWidth(300)
+        self.quick_search.returnPressed.connect(self._quick_client_search)
+        quick_row.addWidget(self.quick_search)
+        root.addLayout(quick_row)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        QShortcut(QKeySequence("Ctrl+K"), self, activated=lambda: (self.quick_search.setFocus(), self.quick_search.selectAll()))
 
         self.notices_box = QVBoxLayout()
         self.notices_box.setSpacing(6)
@@ -219,9 +232,15 @@ class MainWindow(QMainWindow):
     def _dashboard_page(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
+        head_row = QHBoxLayout()
         title = QLabel("Σημερινό ενημερωτικό")
         title.setObjectName("h1")
-        root.addWidget(title)
+        head_row.addWidget(title)
+        head_row.addStretch()
+        self.last_update_label = QLabel("")
+        self.last_update_label.setObjectName("muted")
+        head_row.addWidget(self.last_update_label)
+        root.addLayout(head_row)
 
         kpi_row = QHBoxLayout()
         self._kpi_labels: dict[str, QLabel] = {}
@@ -283,6 +302,7 @@ class MainWindow(QMainWindow):
         self._kpi_labels["articles"].setText(str(articles_n))
         self._kpi_labels["matched"].setText(str(len(groups)))
         self._kpi_labels["urgent"].setText(str(urgent))
+        self._update_last_run_label()
 
         self.dash_articles.clear()
         for g in groups[:25]:
@@ -295,6 +315,17 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{ev['date']}  {ev['title']}")
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.dash_deadlines.addItem(item)
+
+    def _update_last_run_label(self) -> None:
+        row = self.conn.execute(
+            "SELECT finished_at, status FROM runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            self.last_update_label.setText("Δεν έχει τρέξει ακόμη κανένας έλεγχος.")
+            return
+        when = logs.format_local(row["finished_at"])
+        suffix = "" if row["status"] == "ok" else "  ·  με σφάλματα"
+        self.last_update_label.setText(f"Τελευταία ενημέρωση: {when}{suffix}")
 
     def _open_dash_article(self, item: QListWidgetItem) -> None:
         g = item.data(Qt.ItemDataRole.UserRole)
@@ -350,10 +381,12 @@ class MainWindow(QMainWindow):
         self.client_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.client_table.setSortingEnabled(True)
         self.client_table.doubleClicked.connect(self._open_selected_client)
-        self._client_col_filter = TableColumnFilter(self.client_table, (_C_KIND, _C_STATE, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS))
-        # Το TableColumnFilter.apply() ξαναγράφει το setRowHidden ΟΛΩΝ των γραμμών βάσει ΜΟΝΟ των φίλτρων στηλών —
-        # θα σβήσει ό,τι έκανε η αναζήτηση κειμένου αν κληθεί ξεχωριστά. Το _apply_client_filter() συνδυάζει και
-        # τα δύο κριτήρια (βλ. εκεί) και είναι η ΜΟΝΗ συνάρτηση που αγγίζει setRowHidden σε αυτόν τον πίνακα.
+        # apply_fn=self._apply_client_filter: το TableColumnFilter ξαναφιλτράρει μόνο του και ασύγχρονα μετά από
+        # κάθε ξαναγέμισμα/ταξινόμηση του πίνακα (βλ. docstring της κλάσης) — χωρίς αυτό θα καλούσε το δικό του
+        # `apply()` που δεν ξέρει τίποτα για το πεδίο αναζήτησης και θα έσβηνε ό,τι είχε κρύψει αυτή.
+        # _apply_client_filter() συνδυάζει και τα δύο κριτήρια και είναι η ΜΟΝΗ συνάρτηση που αγγίζει setRowHidden.
+        self._client_col_filter = TableColumnFilter(self.client_table, (_C_KIND, _C_STATE, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS),
+                                                    apply_fn=lambda: self._apply_client_filter())
         self._client_col_filter.filtersChanged.connect(self._apply_client_filter)
         setup_columns(self.client_table, _CLIENT_COLS, self._prefs, "clients")
         self.client_table.itemChanged.connect(lambda _i: self._sync_client_selection_label())
@@ -427,6 +460,23 @@ class MainWindow(QMainWindow):
         n = len(self._selected_client_afms())
         self.client_sel_label.setText(f"{n} επιλεγμένοι" if n else "Κανένας πελάτης επιλεγμένος")
 
+    def _quick_client_search(self) -> None:
+        """Ctrl+K / Enter στο πεδίο πάνω-δεξιά: φιλτράρει τους πελάτες από ΟΠΟΙΑΔΗΠΟΤΕ σελίδα και, αν μείνει
+        ακριβώς ένας, ανοίγει κατευθείαν την καρτέλα του — χωρίς να χρειάζεται πρώτα να πάει κανείς στους «Πελάτες»."""
+        needle = self.quick_search.text().strip()
+        if not needle:
+            return
+        self._show_page("clients")
+        self.client_search.setText(needle)
+        visible = [row for row in range(self.client_table.rowCount()) if not self.client_table.isRowHidden(row)]
+        if len(visible) == 1:
+            afm = self.client_table.item(visible[0], _C_CHK).data(Qt.ItemDataRole.UserRole)
+            self.quick_search.clear()
+            self.client_search.clear()
+            self.open_client_detail(afm)
+        else:
+            self.client_search.setFocus()
+
     def _open_selected_client(self) -> None:
         row = self.client_table.currentRow()
         if row < 0:
@@ -463,7 +513,7 @@ class MainWindow(QMainWindow):
         try:
             res = import_excel.parse_file(Path(path).name, Path(path).read_bytes())
         except Exception as exc:
-            QMessageBox.warning(self, "Εισαγωγή", f"Δεν ήταν δυνατή η ανάγνωση του αρχείου: {exc}")
+            toast(self, f"Δεν ήταν δυνατή η ανάγνωση του αρχείου: {exc}", "danger")
             return
         msg = (f"Βρέθηκαν {len(res.rows)} πελάτες" + (f", {res.credential_count} με κωδικούς TAXISnet" if res.credential_count else "")
               + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ". Εισαγωγή;")
@@ -472,7 +522,7 @@ class MainWindow(QMainWindow):
         out = clients.import_result(self.conn, res)
         engine.rematch(self.conn)
         self._start_lookup([r.afm for r in res.rows if r.has_credentials] or [r.afm for r in res.rows])
-        QMessageBox.information(self, "Εισαγωγή", f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}.")
+        toast(self, f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}.", "ok")
         self.reload_clients()
         self._refresh_status_bar()
 
@@ -487,7 +537,7 @@ class MainWindow(QMainWindow):
             w.writerow(["ΑΦΜ", "Επωνυμία", "Νομική μορφή", "ΔΟΥ", "Κύριος ΚΑΔ", "Βιβλία", "Κατάσταση"])
             for r in rows:
                 w.writerow([r["afm"], r["name"], r["legal_form"], r["doy"], r["kad_main_code"], r["books_category"], r["activity_state"]])
-        QMessageBox.information(self, "Εξαγωγή", "Η λίστα πελατών εξήχθη (χωρίς κωδικούς).")
+        toast(self, "Η λίστα πελατών εξήχθη (χωρίς κωδικούς).", "ok")
 
     def _start_lookup(self, afms: list[str]) -> None:
         afms = [a for a in afms if a]
@@ -524,7 +574,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ Ημερολόγιο
     def _calendar_page(self) -> QWidget:
         page = QWidget()
-        root = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        self.cal_stack = QStackedWidget()
+        outer.addWidget(self.cal_stack, 1)
+
+        # ---- μηνιαία προβολή: μία γραμμή ανά ημέρα με υποχρεώσεις ----
+        month_page = QWidget()
+        root = QVBoxLayout(month_page)
         top = QHBoxLayout()
         prev_btn = QPushButton("‹")
         prev_btn.setFixedWidth(34)
@@ -557,10 +613,31 @@ class MainWindow(QMainWindow):
         toggles.addStretch()
         root.addLayout(toggles)
 
+        self.cal_days_list = QListWidget()
+        self.cal_days_list.itemActivated.connect(self._open_cal_day)
+        root.addWidget(self.cal_days_list, 1)
+        self.cal_stack.addWidget(month_page)
+
+        # ---- ημερήσια προβολή: υποχρεώσεις μίας μέρας, με κουμπί επιστροφής ----
+        day_page = QWidget()
+        droot = QVBoxLayout(day_page)
+        dtop = QHBoxLayout()
+        back_btn = QPushButton("‹ Πίσω στον μήνα")
+        back_btn.clicked.connect(self._close_cal_day)
+        dtop.addWidget(back_btn)
+        self.cal_day_label = QLabel("")
+        self.cal_day_label.setObjectName("h1")
+        dtop.addWidget(self.cal_day_label)
+        dtop.addStretch()
+        droot.addLayout(dtop)
         self.cal_list = QListWidget()
         self.cal_list.itemActivated.connect(self._open_cal_event)
-        root.addWidget(self.cal_list, 1)
+        droot.addWidget(self.cal_list, 1)
+        self.cal_stack.addWidget(day_page)
+
         self._cal_month = date.today().replace(day=1)
+        self._cal_view_day: Optional[date] = None
+        self._cal_events: list[dict] = []
         return page
 
     def _shift_month(self, delta: int) -> None:
@@ -580,19 +657,59 @@ class MainWindow(QMainWindow):
             taxheaven_calendar.ensure_month_synced(self.conn, None, first.year, first.month)
         except Exception:
             log.exception("ensure_month_synced απέτυχε")
-        self.cal_label.setText(f"{first.strftime('%B %Y')}")
+        self.cal_label.setText(i18n.month_year(first))
         last_day = pycal.monthrange(first.year, first.month)[1]
         afm = self.cal_client.currentData() or None
-        events = deadlines.events_between(self.conn, first, date(first.year, first.month, last_day), afm=afm,
-                                          include_news=self.cal_news.isChecked(), include_rules=self.cal_rules.isChecked(),
-                                          include_conditional=self.cal_cond.isChecked())
+        self._cal_events = deadlines.events_between(
+            self.conn, first, date(first.year, first.month, last_day), afm=afm,
+            include_news=self.cal_news.isChecked(), include_rules=self.cal_rules.isChecked(),
+            include_conditional=self.cal_cond.isChecked())
+        self._fill_client_combo()
+        if self._cal_view_day is not None:
+            self._render_cal_day()
+        else:
+            self._render_cal_month()
+
+    def _render_cal_month(self) -> None:
+        self.cal_stack.setCurrentIndex(0)
+        by_day: dict[str, list[dict]] = {}
+        for ev in self._cal_events:
+            by_day.setdefault(ev["date"], []).append(ev)
+        self.cal_days_list.clear()
+        for day_str in sorted(by_day):
+            evs = by_day[day_str]
+            n = len(evs)
+            label = f"{i18n.short_day(date.fromisoformat(day_str))}  ·  {n} υποχρέωσ{'η' if n == 1 else 'εις'}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, day_str)
+            self.cal_days_list.addItem(item)
+        if not by_day:
+            self.cal_days_list.addItem(QListWidgetItem("Καμία υποχρέωση αυτόν τον μήνα με τα τρέχοντα φίλτρα."))
+
+    def _open_cal_day(self, item: QListWidgetItem) -> None:
+        day_str = item.data(Qt.ItemDataRole.UserRole)
+        if not day_str:
+            return
+        self._cal_view_day = date.fromisoformat(day_str)
+        self._render_cal_day()
+
+    def _close_cal_day(self) -> None:
+        self._cal_view_day = None
+        self._render_cal_month()
+
+    def _render_cal_day(self) -> None:
+        self.cal_stack.setCurrentIndex(1)
+        d = self._cal_view_day
+        self.cal_day_label.setText(i18n.long_date(d))
         self.cal_list.clear()
-        for ev in events:
+        day_str = d.isoformat()
+        for ev in self._cal_events:
+            if ev["date"] != day_str:
+                continue
             kind_label = {"news": "νέα", "rule": "κανόνας", "general": "ΑΑΔΕ/taxheaven"}.get(ev["kind"], ev["kind"])
-            item = QListWidgetItem(f"{ev['date']}  ·  {ev['title']}  ·  [{kind_label}]")
+            item = QListWidgetItem(f"{ev['title']}  ·  [{kind_label}]")
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.cal_list.addItem(item)
-        self._fill_client_combo()
 
     def _fill_client_combo(self) -> None:
         current = self.cal_client.currentData()
@@ -634,6 +751,7 @@ class MainWindow(QMainWindow):
         self.news_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.news_table.setSortingEnabled(True)
         self.news_table.doubleClicked.connect(self._open_selected_news)
+        self._news_col_filter = TableColumnFilter(self.news_table, (0, 3))  # Πηγή, Κατάσταση
         setup_columns(self.news_table, _NEWS_COLS, self._prefs, "news")
         root.addWidget(self.news_table, 1)
         return page
@@ -794,7 +912,7 @@ class MainWindow(QMainWindow):
             if value:
                 settings_store.set_value(self.conn, key, value)
                 field.clear()
-        QMessageBox.information(self, "Ρυθμίσεις", "Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).")
+        toast(self, "Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).", "ok")
 
     def _save_llm_settings(self) -> None:
         settings_store.set_value(self.conn, "llm_provider", self.llm_provider.currentData())
@@ -802,25 +920,25 @@ class MainWindow(QMainWindow):
             settings_store.set_value(self.conn, "llm_model_groq", self.llm_model_groq.text().strip())
         if self.llm_model_openrouter.text().strip():
             settings_store.set_value(self.conn, "llm_model_openrouter", self.llm_model_openrouter.text().strip())
-        QMessageBox.information(self, "Ρυθμίσεις", "Οι ρυθμίσεις ανάλυσης αποθηκεύτηκαν.")
+        toast(self, "Οι ρυθμίσεις ανάλυσης αποθηκεύτηκαν.", "ok")
 
     def _save_sources(self) -> None:
         for sid, chk in self._source_checks.items():
             settings_store.set_source_enabled(self.conn, sid, chk.isChecked())
-        QMessageBox.information(self, "Ρυθμίσεις", "Οι πηγές ενημερώθηκαν.")
+        toast(self, "Οι πηγές ενημερώθηκαν.", "ok")
 
     def _install_schedule(self) -> None:
         try:
             ok, msg = scheduler_win.install(self.sched_time.text().strip() or "08:00")
         except ValueError as exc:
             ok, msg = False, str(exc)
-        (QMessageBox.information if ok else QMessageBox.warning)(self, "Χρονοπρογραμματισμός", msg)
+        toast(self, msg, "ok" if ok else "warn")
         if ok:
             settings_store.set_value(self.conn, "daily_time", self.sched_time.text().strip())
 
     def _remove_schedule(self) -> None:
         ok, msg = scheduler_win.remove()
-        (QMessageBox.information if ok else QMessageBox.warning)(self, "Χρονοπρογραμματισμός", msg)
+        toast(self, msg, "ok" if ok else "warn")
 
     def _test_llm(self) -> None:
         def work(_progress):
@@ -835,13 +953,13 @@ class MainWindow(QMainWindow):
                 client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
                 return f"Το μοντέλο «{old}» δεν ήταν διαθέσιμο — αυτόματη αλλαγή σε «{client.model}». Η σύνδεση λειτουργεί."
             return f"Η σύνδεση με {client.provider} ({client.model}) λειτουργεί."
-        self._tasks.append(run_task(self, work, on_done=lambda msg: QMessageBox.information(self, "Δοκιμή LLM", msg),
-                                    on_error=lambda msg: QMessageBox.warning(self, "Δοκιμή LLM", msg)))
+        self._tasks.append(run_task(self, work, on_done=lambda msg: toast(self, msg, "ok"),
+                                    on_error=lambda msg: toast(self, msg, "danger", ms=0)))
 
     def _test_aade(self) -> None:
         user, pwd = settings_store.get(self.conn, "aade_user"), settings_store.get(self.conn, "aade_pass")
         if not (user and pwd):
-            QMessageBox.warning(self, "Δοκιμή ΑΑΔΕ", "Δεν έχουν οριστεί credentials TAXISnet γραφείου.")
+            toast(self, "Δεν έχουν οριστεί credentials TAXISnet γραφείου.", "warn")
             return
 
         def work(_progress):
@@ -849,10 +967,10 @@ class MainWindow(QMainWindow):
 
         def done(res):
             if res.get("ok"):
-                QMessageBox.information(self, "Δοκιμή ΑΑΔΕ", "Η σύνδεση στη ΑΑΔΕ (TAXISnet) πέτυχε.")
+                toast(self, "Η σύνδεση στη ΑΑΔΕ (TAXISnet) πέτυχε.", "ok")
             else:
-                QMessageBox.warning(self, "Δοκιμή ΑΑΔΕ", lookup_aade.REASONS_EL.get(res.get("reason") or "", str(res.get("reason"))))
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: QMessageBox.warning(self, "Δοκιμή ΑΑΔΕ", m)))
+                toast(self, lookup_aade.REASONS_EL.get(res.get("reason") or "", str(res.get("reason"))), "danger", ms=0)
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
 
     # ------------------------------------------------------------------ Έλεγχος τώρα
     def _run_check(self) -> None:
@@ -914,7 +1032,7 @@ class MainWindow(QMainWindow):
         try:
             path = ensure_manual(config.data_dir())
         except Exception as exc:
-            QMessageBox.warning(self, "Εγχειρίδιο", f"Το εγχειρίδιο δεν μπόρεσε να ανοίξει.\n\n{exc}")
+            toast(self, f"Το εγχειρίδιο δεν μπόρεσε να ανοίξει: {exc}", "danger", ms=0)
             return
         _reveal(path)
 
@@ -929,7 +1047,8 @@ class MainWindow(QMainWindow):
             Step("2. Οι πελάτες σας", "Κάθε στήλη έχει φίλτρο τύπου Excel (περάστε το ποντίκι πάνω από την επικεφαλίδα). "
                 "Τσεκάρετε πελάτες για μαζικές ενέργειες.", lambda: self.client_table, lambda: self._show_page("clients")),
             Step("3. Ημερολόγιο", "Συνδυάζει το γενικό ημερολόγιο taxheaven, τους κανονικούς κανόνες (ΦΠΑ/VIES/Intrastat…) "
-                "και τις προθεσμίες που εντοπίστηκαν σε άρθρα.", lambda: self.cal_list, lambda: self._show_page("calendar")),
+                "και τις προθεσμίες που εντοπίστηκαν σε άρθρα. Κλικ σε μια ημέρα δείχνει τις υποχρεώσεις της.",
+                lambda: self.cal_days_list, lambda: (self._show_page("calendar"), self._close_cal_day())),
             Step("4. Νέα & Matches", "Κάθε άρθρο δείχνει ποιους πελάτες αφορά και γιατί. Διπλό κλικ ανοίγει προεπισκόπηση "
                 "πριν τον σύνδεσμο — ποτέ απευθείας browser.", lambda: self.news_table, lambda: self._show_page("news")),
             Step("5. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν, με αυτόματη εναλλαγή), πηγές ειδήσεων, "

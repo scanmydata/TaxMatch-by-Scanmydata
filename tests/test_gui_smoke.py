@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")     # πριν από ΚΑ
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from taxmatch import db, settings_store  # noqa: E402
@@ -86,7 +87,16 @@ def test_calendar_page_lists_rule_based_deadlines(window, conn):
     window._cal_month = date(2026, 7, 1)          # μήνας χωρίς εγγραφές feed -> μόνο κανόνες (βλ. taxheaven_calendar)
     window.cal_news.setChecked(False)              # χωρίς δίκτυο σε αυτό το test: μόνο rules/general ήδη στη βάση
     window.reload_calendar()
+    assert window.cal_stack.currentIndex() == 0    # προεπιλογή: μηνιαία λίστα ανά ημέρα
+    assert window.cal_days_list.count() >= 1
+    day_str = window.cal_days_list.item(0).data(Qt.ItemDataRole.UserRole)
+    window._open_cal_day(window.cal_days_list.item(0))
+    assert window.cal_stack.currentIndex() == 1    # κλικ σε ημέρα -> ημερήσια προβολή
     assert window.cal_list.count() >= 1
+    assert all(ev["date"] == day_str for ev in
+              (window.cal_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(window.cal_list.count())))
+    window._close_cal_day()
+    assert window.cal_stack.currentIndex() == 0    # «Πίσω στον μήνα» -> ξαναγυρνά στη μηνιαία λίστα
 
 
 def test_news_page_lists_articles(window, conn):
@@ -98,6 +108,53 @@ def test_news_page_lists_articles(window, conn):
     window.news_only.setCurrentIndex(window.news_only.findData("all"))
     assert window.news_table.rowCount() == 1
     assert window.news_table.item(0, 2).text() == "Τίτλος"
+
+
+def test_quick_client_search_opens_single_match_detail(window, conn, monkeypatch):
+    service.add(conn, AFM, "ΚΑΦΕΤΕΡΙΑ")
+    service.add(conn, "123456783", "ΒΙΒΛΙΟΠΩΛΕΙΟ")
+    window.reload_clients()
+    opened = []
+    monkeypatch.setattr(window, "open_client_detail", lambda afm: opened.append(afm))
+    window.quick_search.setText("καφε")
+    window._quick_client_search()
+    assert opened == [AFM]
+    assert window.stack.currentWidget() is window._pages["clients"]
+
+
+def test_toast_shows_side_flash_message_and_can_be_dismissed(window):
+    from taxmatch.gui.toast import toast
+
+    toast(window, "Δοκιμαστικό μήνυμα", "ok", ms=0)
+    host = window._toast_host
+    assert not host.isHidden()                     # host.show() κλήθηκε (isVisible() θέλει και ορατό MainWindow)
+    assert host._box.count() == 1
+    host._box.itemAt(0).widget().close_btn.click()
+    assert host._box.count() == 0
+    assert host.isHidden()
+
+
+def test_dashboard_shows_last_run_label(window, conn):
+    conn.execute("INSERT INTO runs(trigger, started_at, finished_at, status) VALUES ('manual', ?, ?, 'ok')",
+                (db.utcnow(), db.utcnow()))
+    window.reload_dashboard()
+    assert "Τελευταία ενημέρωση" in window.last_update_label.text()
+
+
+def test_tour_steps_all_target_existing_visible_widgets(window):
+    """Κάθε βήμα της ξενάγησης πρέπει να καταλήγει σε widget που ΥΠΑΡΧΕΙ — αν είναι κρυμμένο (π.χ. πίσω από άλλη
+    σελίδα ή QStackedWidget), το Tour απλώς δεν φωτίζει τίποτα (βλ. `tour._target_rect`), οπότε ένα λάθος target
+    δεν σκάει ποτέ μόνο του· πρέπει να ελεγχθεί ρητά, όπως εδώ."""
+    window.show()  # isVisible() στο Tour χρειάζεται ολόκληρη την αλυσίδα γονέων ορατή
+    try:
+        for step in window._tour_steps():
+            if step.before:
+                step.before()
+            widget = step.target()
+            assert widget is not None, step.title
+            assert widget.isVisible(), f"{step.title}: το target δεν είναι ορατό μετά το before()"
+    finally:
+        window.hide()
 
 
 def test_run_task_executes_in_background_and_delivers_result(qapp):

@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 210 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 214 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -37,9 +37,14 @@ taxmatch/
     client_dialog.py            «Νέος πελάτης»: ΑΦΜ + live VIES lookup (background) + προαιρετικοί κωδικοί TAXISnet
     client_detail_dialog.py     καρτέλα πελάτη: προφίλ/κωδικοί/προθεσμίες/matches, tabs
     news_dialog.py              προεπισκόπηση άρθρου/υποχρέωσης ΠΡΙΝ τον εξωτερικό σύνδεσμο (QDesktopServices.openUrl μόνο με ρητό κλικ)
+    toast.py                    `toast(window, msg, level, ms)` — «side flash message» κάτω-δεξιά (ίδια ιδέα με το toast() του παλιού
+                               web UI)· ΓΙ' ΑΥΤΟ αντί για `QMessageBox.information/warning` σε κάθε νέο κώδικα (βλ. §Κανόνες)
     theme.py, icons.py, widgets.py, table_filter.py, tour.py, unlock.py, busy.py, tray.py, i18n.py, side_menu.py, manual.py
                                ΑΝΤΙΓΡΑΦΗ+προσαρμογή από `mydata-etimologio-bridge/desktop/src/timologio/gui/` — ίδιο θέμα/εικονίδια/
-                               φίλτρα στηλών (χωνί, στυλ Excel)/page tour/εγχειρίδιο PDF (QTextDocument+QPdfWriter, όχι εξωτερική βιβλιοθήκη)
+                               φίλτρα στηλών (χωνί, στυλ Excel)/page tour/εγχειρίδιο PDF (QTextDocument+QPdfWriter, όχι εξωτερική βιβλιοθήκη)·
+                               `i18n.install(app)` καλείται στο `app.py` (Qt Yes/No/OK ελληνικά + QLocale)· ΠΡΟΣΟΧΗ: το δικό μας
+                               `datetime.strftime('%B'/'%A')` ΔΕΝ ακολουθεί το QLocale (άλλο μηχανισμό, της C runtime) — χρησιμοποίησε
+                               `i18n.month_year()/long_date()/short_day()` για ελληνικά μηνών/ημερών, όχι strftime απευθείας
   web/, desktop.py             Flask — ΟΧΙ η εμφάνιση της εφαρμογής πλέον. Μένει ΜΟΝΟ ως: (α) επιφάνεια για τα tests του business-logic
                               layer (test_web.py κ.ά. ασκούν service/matching/deadlines μέσω HTTP, φθηνό να τα κρατήσουμε)·
                               (β) `taxmatch --serve` (εσωτερικό εργαλείο ανάπτυξης). Μην προσθέτεις νέα features ΜΟΝΟ εκεί — το gui/
@@ -85,6 +90,11 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 - Ό,τι αγγίζει δίκτυο/LLM/ΑΑΔΕ στο `gui/` τρέχει σε background thread (`gui/workers.py: run_task`) — ΠΟΤΕ στο UI thread (παγώνει το παράθυρο).
 - **Κανένα native μήνυμα browser στο web/** (νεκρό πλέον, αλλά αν αγγιχτεί): όχι `alert/confirm`, όχι φυσαλίδες επικύρωσης. Στο `gui/`: κανένα
   `QMessageBox`/απευθείας σύνδεσμος για νέα/προθεσμίες — πάντα `news_dialog.NewsDialog` πρώτα (προεπισκόπηση), ο σύνδεσμος ανοίγει μόνο με ρητό κλικ «Άνοιγμα συνδέσμου».
+- **Ειδοποιήσεις στο `gui/` = `toast.toast()` (side flash message), ΟΧΙ `QMessageBox.information/warning`.** Εξαίρεση: `QMessageBox.question`
+  παραμένει για επιβεβαιώσεις Ναι/Όχι πριν από κάτι μη αναστρέψιμο (διαγραφή πελάτη, εισαγωγή Excel) — αυτό ΔΕΝ είναι ειδοποίηση, είναι
+  απόφαση που πρέπει σκόπιμα να μπλοκάρει. Επίσης εξαίρεση: `unlock.py`'s προειδοποιήσεις για κύριο κωδικό (ενεργοποίηση/αφαίρεση) μένουν
+  blocking `QMessageBox` επίτηδες — το παράθυρο κλείνει αμέσως μετά (`super().accept()`), άρα ένα toast θα εξαφανιζόταν μαζί του πριν
+  προλάβει να το διαβάσει κανείς για ένα μήνυμα ασφαλείας χωρίς επαναφορά.
 - UI και μηνύματα στα **ελληνικά**. Ελληνικά κεφαλαία: το `str.upper()` ΚΡΑΤΑ τους τόνους (`'ί'.upper() == 'Ί'`)· χρησιμοποίησε `textutil.strip_accents()` πριν από συγκρίσεις.
 - Τα ΚΑΔ συγκρίνονται ως ψηφία (`identifiers.kad_matches`), όχι ως string με τελείες.
 - Δεν εφευρίσκουμε δεδομένα: άγνωστο κριτήριο ⇒ match με confidence 0.5 «να επιβεβαιωθεί», όχι σιωπηλή εξαίρεση ή ψευδές match.
@@ -107,6 +117,12 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    (δ) **το Μητρώο δείχνει ΜΟΝΟ το ΑΦΜ του λογαριασμού που συνδέθηκε** — ξένο ΑΦΜ επιστρέφει `NoRegistry`. Άρα ο λογαριασμός γραφείου των Ρυθμίσεων ΔΕΝ φέρνει στοιχεία πελατών· χρειάζονται οι δικοί
    τους κωδικοί (ή ΓΕΜΗ). Δεν έχει δοκιμαστεί ο ρόλος «λογιστής με εξουσιοδοτήσεις». Νομικά πρόσωπα: το Μητρώο δεν έχει δοκιμαστεί (μόνο ατομικές)· η νομική μορφή (ΙΚΕ/ΑΕ) έρχεται από ΓΕΜΗ ή, αν λείπει, από την κατάληξη της επωνυμίας (`legal_form.py`). Δεν αποθηκεύονται προσωπικά πεδία (ταυτότητα, ημ. γέννησης) στο `lookup_raw`.
 5. **LLM:** δωρεάν-πρώτα με αυτόματη εναλλαγή (§Κανόνες) — **δεν έχει δοκιμαστεί με ζωντανό key** (μόνο με fake HTTP στα tests) και δεν έχει μετρηθεί ακρίβεια εξαγωγής — δείγμα με 👍/👎.
+   **«HTTP 403: άκυρο ή χωρίς δικαιώματα API key» ΜΟΝΙΜΑ (2026-09-22, πραγματικό key του χρήστη, Groq+dist):** ελέγχθηκε ο κώδικας
+   (`llm_extract.py`: headers/Bearer/strip() σωστά, ίδιο σφάλμα σε dev python ΚΑΙ στο packaged dist — άρα ΔΕΝ είναι θέμα packaging, ο
+   403 σημαίνει ότι το request έφτασε κανονικά στον πάροχο και απορρίφθηκε εκεί). Πιθανότερη αιτία: το ίδιο το κλειδί είναι
+   άκυρο/ανακλήθηκε/έληξε ή λείπουν δικαιώματα στον λογαριασμό — όχι bug εδώ. Το μήνυμα σφάλματος τώρα δίνει οδηγίες (κενά,
+   ανάκληση, «Αποθήκευση κλειδιών»). Αν επανέλθει: ζήτα να δοκιμάσει νέο key από https://console.groq.com (ή openrouter.ai/keys) και
+   «Δοκιμή LLM» στις Ρυθμίσεις — αν ΞΑΝΑδώσει 403 με σίγουρα σωστό/φρέσκο key, τότε αξίζει βαθύτερη διερεύνηση.
 6. **Πηγές:** ενεργές: taxheaven ×3 (νέα/αποφάσεις + πλήρες ημερολόγιο μέσω `taxheaven_calendar.py`), e-forologia ×6 (incl. Εργατικά), ot.gr Φορολογία, forologikanea.gr, naftemporiki (tag `forologia`), capital.gr (γενικό), eforiakoi.org (κυρίως συνδικαλιστικά).
    Τα γενικά (forologikanea/naftemporiki/capital/eforiakoi) περνούν από prefilter λέξεων-κλειδιών (`ingestion/filters.py`, ΚΑΙ φορολογικά ΚΑΙ εργατικά/μισθοδοσίας: εργασιακ, εργατικ, απολυσ, προσληψ, συλλογικ, κατωτατος μισθ, αδειας, ικα, ενσημ…) — αν χάνονται σχετικά άρθρα, διεύρυνε τα `KEYWORD_STEMS`.
    **forin.gr: ΜΗ ΔΙΑΘΕΣΙΜΗ** — Cloudflare challenge σε κάθε URL· δεν το παρακάμπτουμε (`Source.available=False`). Το ίδιο θέμα από δύο πηγές ενώνεται (Jaccard ≥ 0.8 στον τίτλο, 14 ημέρες).
@@ -117,7 +133,23 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 8. `data/kad_catalog.csv` (στατικός πίνακας ΚΑΔ 2008) δεν υπάρχει — τα ΚΑΔ εμφανίζονται με την περιγραφή που δίνει η ΑΑΔΕ/ΓΕΜΗ.
 8b. **Excel με κωδικούς:** οι επικεφαλίδες TAXISnet του πλατιού πίνακα «Κωδικοί Υπόχρεων» δεν έχουν επιβεβαιωθεί με πραγματικό αρχείο (whole-string ταίριασμα ονομάτων). Αν ένα πραγματικό αρχείο δεν αναγνωριστεί, πρόσθεσε το alias στο `FIELD_ALIASES` + test.
 9. **Ενσωμάτωση στη σουίτα ScanMyData:** σημεία επαφής σήμερα: `TAXMATCH_DATA_DIR`, CLI (`--daily`), το `taxmatch.business_profiles.service` (πελάτες) και `taxmatch.matching.engine.digest*`. Δεν υπάρχει ακόμη σταθερό public API/SSO — να σχεδιαστεί όταν οριστεί ο τρόπος ενσωμάτωσης.
-10. Ο installer δεν έχει δοκιμαστεί σε καθαρό μηχάνημα (μόνο silent install/uninstall εδώ) και δεν είναι code-signed (θα εμφανιστεί SmartScreen). Τα ελληνικά του οδηγού είναι δικά μας `[Messages]` (δεν υπάρχει επίσημο Greek.isl).
-11. **Native GUI (2026-09-22, πρώτη έκδοση):** επαληθεύτηκε οπτικά σε πραγματικό παράθυρο Windows (dashboard, sidebar, tour, notices, πίνακας πελατών, ημερολόγιο με πραγματικά δεδομένα, διάλογος «Νέος πελάτης») και με 8 headless (offscreen) tests
-   (`test_gui_smoke.py`). **Δεν έχει δοκιμαστεί:** ο πλήρης κύκλος «Εισαγωγή από Excel» και «Δοκιμή LLM/ΑΑΔΕ» μέσα από το native UI (μόνο μέσω του business-logic layer, που είναι το ίδιο με του web/), tray/minimize-to-tray, page tour μέχρι το τέλος, εγχειρίδιο PDF (η υποδομή `build_manual`/`ensure_manual` δεν τρέχει ακόμη σε CI/tests — μόνο compile-check).
-   Η σελίδα Ημερολόγιο στο gui/ δείχνει λίστα ανά μήνα (agenda), όχι grid μήνα όπως το web/calendar.html — απλούστερη επιλογή σκόπιμα, για να προλάβει η πρώτη έκδοση.
+10. Ο installer δεν έχει δοκιμαστεί σε καθαρό μηχάνημα (μόνο silent install/uninstall εδώ) και δεν είναι code-signed (θα εμφανιστεί SmartScreen).
+   Τα ελληνικά του οδηγού είναι δικά μας `[Messages]` (δεν υπάρχει επίσημο Greek.isl).
+   **Antivirus χτυπάει το exe ως malware (2026-09-22, setup 0.1, πραγματικό μηχάνημα χρήστη):** το `packaging/taxmatch.spec` ΗΔΗ έχει τους
+   συνηθισμένους μετριασμούς (`upx=False` σε EXE ΚΑΙ COLLECT, πλήρες `version_info.txt` με CompanyName/FileDescription/ProductName) — ο
+   πιο πιθανός λόγος είναι η γενική heuristic ανίχνευση «unsigned PyInstaller exe» που χτυπά ΣΧΕΔΟΝ ΚΑΘΕ ανυπόγραφο PyInstaller πρόγραμμα,
+   ανεξαρτήτως περιεχομένου — δεν διορθώνεται με αλλαγές στο spec. Δύο πραγματικές λύσεις: (α) **code signing certificate** (πληρωμένο,
+   μόνιμη λύση)· (β) υποβολή false-positive στον συγκεκριμένο πάροχο (π.χ. Microsoft Defender: https://www.microsoft.com/wdsi/filesubmission)
+   ανά έκδοση exe — δωρεάν αλλά χρειάζεται επανάληψη σε κάθε νέο build hash. Μην προτείνεις άλλες αλλαγές στο spec χωρίς νέα στοιχεία.
+11. **Native GUI (2026-09-22, πρώτη έκδοση + διορθώσεις):** επαληθεύτηκε οπτικά σε πραγματικό παράθυρο Windows (dashboard, sidebar, tour,
+   notices, πίνακας πελατών, ημερολόγιο με πραγματικά δεδομένα, διάλογος «Νέος πελάτης») και με 12 headless (offscreen) tests
+   (`test_gui_smoke.py`). Το **εγχειρίδιο PDF επαληθεύτηκε ΟΠΤΙΚΑ (rendered→PNG) με το πραγματικό "windows" Qt platform** — σωστά ελληνικά,
+   στοιχειοθεσία, λογότυπο (βρέθηκε και διορθώθηκε leftover τίτλος/creator "Λήψη Παραστατικών myDATA" από το timologio). ΠΡΟΣΟΧΗ: το ίδιο
+   rendering με `QT_QPA_PLATFORM=offscreen` (όπως τρέχουν τα tests) βγάζει το κείμενο ως συμπαγή μαύρα τετράγωνα (tofu — απουσία
+   γραμματοσειράς στο headless font backend, ΟΧΙ bug της εφαρμογής)· ΜΗΝ κρίνεις την ποιότητα του PDF από offscreen render, μόνο από
+   πραγματικό "windows" platform. Το page tour βρέθηκε να δείχνει σε αόρατο widget μετά το calendar day-drill-down (§παρακάτω) — διορθώθηκε
+   και τώρα καλύπτεται από `test_tour_steps_all_target_existing_visible_widgets`. Επίσης διορθώθηκε: `gui/tray.py` είχε tooltip "Timologio
+   Downloader" leftover (τώρα `APP_TITLE`). **Δεν έχει δοκιμαστεί:** ο πλήρης κύκλος «Εισαγωγή από Excel» μέσα από το native UI (μόνο μέσω
+   του business-logic layer), tray/minimize-to-tray διαδραστικά.
+   Η σελίδα Ημερολόγιο έχει πλέον ΔΥΟ επίπεδα (2026-09-22): μηνιαία λίστα ανά ημέρα (`cal_days_list`) → κλικ σε ημέρα → ημερήσια λίστα
+   (`cal_list`, με κουμπί «‹ Πίσω στον μήνα»)· `self._cal_view_day` (None = μηνιαία προβολή). Ίδια απλή αρχιτεκτονική (agenda, όχι grid μήνα).

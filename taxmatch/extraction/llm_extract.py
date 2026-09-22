@@ -108,7 +108,10 @@ class LLMClient:
             raise LLMError("model", f"Το μοντέλο «{self.model}» δεν είναι διαθέσιμο για αυτό το API key "
                                     f"(HTTP {resp.status_code}).")
         if resp.status_code in (401, 403):
-            raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key")
+            raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key. Ελέγξτε στις "
+                                    f"Ρυθμίσεις ότι το κλειδί {self.provider} είναι σωστά αντιγραμμένο (χωρίς κενά "
+                                    f"στην αρχή/τέλος), ότι δεν έχει ανακληθεί/λήξει στον λογαριασμό σας, και ότι "
+                                    f"πατήσατε «Αποθήκευση κλειδιών».")
         if resp.status_code == 429:
             raise LLMError("rate_limit", "HTTP 429: όριο αιτημάτων", _retry_after(resp))
         if resp.status_code >= 400:
@@ -152,7 +155,8 @@ def list_models(client: "LLMClient", timeout: int = 30) -> list[str]:
     except requests.RequestException as exc:
         raise LLMError("network", str(exc)) from exc
     if resp.status_code in (401, 403):
-        raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key")
+        raise LLMError("auth", f"HTTP {resp.status_code}: άκυρο ή χωρίς δικαιώματα API key. Ελέγξτε στις Ρυθμίσεις "
+                               f"ότι το κλειδί {client.provider} είναι σωστά αντιγραμμένο και δεν έχει ανακληθεί/λήξει.")
     if resp.status_code >= 400:
         raise LLMError("bad_response", f"HTTP {resp.status_code} στη λίστα μοντέλων")
     try:

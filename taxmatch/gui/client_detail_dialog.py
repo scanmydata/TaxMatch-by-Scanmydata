@@ -15,6 +15,7 @@ from ..business_profiles import credentials as client_creds, service as clients
 from ..matching import engine
 from .news_dialog import NewsDialog
 from .theme import CURRENT
+from .toast import toast
 from .workers import run_task
 
 if TYPE_CHECKING:
@@ -56,7 +57,11 @@ class ClientDetailDialog(QDialog):
         tabs.addTab(self._profile_tab(), "Προφίλ")
         tabs.addTab(self._credentials_tab(), "Κωδικοί TAXISnet")
         tabs.addTab(self._deadlines_tab(), "Προσεχείς προθεσμίες")
-        tabs.addTab(self._matches_tab(), "Νέα που τον αφορούν")
+        news_index = tabs.addTab(self._matches_tab(), "Νέα που τον αφορούν")
+        if b["lookup_status"] == "ok":
+            # Τα στοιχεία του πελάτη είναι ήδη πλήρη· αυτό που θα κοιτάξει πρώτα ο λογιστής είναι τι νέο τον αφορά,
+            # όχι το προφίλ που δεν έχει αλλάξει.
+            tabs.setCurrentIndex(news_index)
 
         close_row = QHBoxLayout()
         close_row.addStretch()
@@ -120,7 +125,7 @@ class ClientDetailDialog(QDialog):
             kads.append({"code": code.strip(" -–:"), "descr": descr.strip(" -–:"), "is_main": not kads})
         clients.set_kads(self.conn, self.afm, kads)
         engine.rematch(self.conn)
-        QMessageBox.information(self, "Προφίλ", "Τα στοιχεία αποθηκεύτηκαν.")
+        toast(self, "Τα στοιχεία αποθηκεύτηκαν.", "ok")
         self._reload()
 
     # ------------------------------------------------------------ Κωδικοί TAXISnet
@@ -158,15 +163,15 @@ class ClientDetailDialog(QDialog):
     def _save_credentials(self) -> None:
         user, pwd = self.c_user.text().strip(), self.c_pass.text()
         if not client_creds.set_(self.conn, self.afm, user, pwd):
-            QMessageBox.warning(self, "Κωδικοί TAXISnet", "Δεν δόθηκαν κωδικοί.")
+            toast(self, "Δεν δόθηκαν κωδικοί.", "warn")
             return
         self.c_pass.clear()
-        QMessageBox.information(self, "Κωδικοί TAXISnet", "Οι κωδικοί αποθηκεύτηκαν (κρυπτογραφημένοι). Τα στοιχεία ανακτώνται αυτόματα.")
+        toast(self, "Οι κωδικοί αποθηκεύτηκαν (κρυπτογραφημένοι). Τα στοιχεία ανακτώνται αυτόματα.", "ok")
         self._start_lookup()
 
     def _test_credentials(self) -> None:
         if not client_creds.get(self.conn, self.afm):
-            QMessageBox.warning(self, "Δοκιμή σύνδεσης", "Δεν έχουν οριστεί κωδικοί TAXISnet για τον πελάτη.")
+            toast(self, "Δεν έχουν οριστεί κωδικοί TAXISnet για τον πελάτη.", "warn")
             return
 
         def work(_progress):
@@ -174,13 +179,13 @@ class ClientDetailDialog(QDialog):
 
         def done(result):
             ok, msg = result
-            (QMessageBox.information if ok else QMessageBox.warning)(self, "Δοκιμή σύνδεσης", msg)
+            toast(self, msg, "ok" if ok else "danger", ms=None if ok else 0)
             self._reload()
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: QMessageBox.warning(self, "Δοκιμή σύνδεσης", m)))
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
 
     def _clear_credentials(self) -> None:
         client_creds.clear(self.conn, self.afm)
-        QMessageBox.information(self, "Κωδικοί TAXISnet", "Οι κωδικοί TAXISnet του πελάτη διαγράφηκαν.")
+        toast(self, "Οι κωδικοί TAXISnet του πελάτη διαγράφηκαν.", "ok")
         self._reload()
 
     # ------------------------------------------------------------ Προθεσμίες / Νέα
@@ -224,7 +229,7 @@ class ClientDetailDialog(QDialog):
 
         def done(_out):
             self._reload()
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: QMessageBox.warning(self, "Ανάκτηση", m)))
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
 
     def _delete_client(self) -> None:
         if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;") != QMessageBox.StandardButton.Yes:

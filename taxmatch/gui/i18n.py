@@ -16,6 +16,8 @@ QTranslator: το Qt ρωτά από εκεί κάθε δικό του κείμ�
 
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtCore import QLocale, QTranslator
 
 #: Τα contexts του Qt που μας αφορούν. Περιορίζουμε τη μετάφραση σε αυτά ώστε
@@ -116,3 +118,29 @@ def install(app) -> GreekTranslator:
     translator = GreekTranslator()
     app.installTranslator(translator)
     return translator
+
+
+#: Το `datetime.strftime('%B'/'%A')` της Python διαβάζει το locale του λειτουργικού (μέσω `locale`/C runtime),
+#: ΟΧΙ το `QLocale.setDefault()` παραπάνω (αυτό αφορά μόνο τα δικά του widgets, π.χ. QDateEdit). Σε ένα Windows
+#: χωρίς ρητά εγκατεστημένο ελληνικό locale για την C runtime, θα έβγαζε αγγλικά μηνύματα μέσα σε μια κατά τα
+#: άλλα ελληνική εφαρμογή — δικοί μας πίνακες αντί για `locale.setlocale` (φορητό, χωρίς εξάρτηση από το OS).
+_MONTHS = ["Ιανουαρίου", "Φεβρουαρίου", "Μαρτίου", "Απριλίου", "Μαΐου", "Ιουνίου", "Ιουλίου", "Αυγούστου",
+          "Σεπτεμβρίου", "Οκτωβρίου", "Νοεμβρίου", "Δεκεμβρίου"]
+_MONTHS_NOM = ["Ιανουάριος", "Φεβρουάριος", "Μάρτιος", "Απρίλιος", "Μάιος", "Ιούνιος", "Ιούλιος", "Αύγουστος",
+              "Σεπτέμβριος", "Οκτώβριος", "Νοέμβριος", "Δεκέμβριος"]
+_WEEKDAYS = ["Δευτέρα", "Τρίτη", "Τετάρτη", "Πέμπτη", "Παρασκευή", "Σάββατο", "Κυριακή"]
+
+
+def month_year(d: date) -> str:
+    """«Ιούλιος 2026» (ονομαστική, για τίτλο μήνα)."""
+    return f"{_MONTHS_NOM[d.month - 1]} {d.year}"
+
+
+def long_date(d: date) -> str:
+    """«Τρίτη, 15 Ιουλίου 2026»."""
+    return f"{_WEEKDAYS[d.weekday()]}, {d.day} {_MONTHS[d.month - 1]} {d.year}"
+
+
+def short_day(d: date) -> str:
+    """«Τρίτη 15/07» (για συνοπτικές γραμμές ημέρας στο ημερολόγιο)."""
+    return f"{_WEEKDAYS[d.weekday()]} {d.day:02d}/{d.month:02d}"

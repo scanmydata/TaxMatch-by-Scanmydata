@@ -187,8 +187,8 @@ def build_manual(target: Path) -> Path:
     writer = QPdfWriter(str(target))
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
     writer.setPageMargins(QMarginsF(16, 14, 16, 14), QPageLayout.Unit.Millimeter)
-    writer.setTitle("Εγχειρίδιο χρήσης — Λήψη Παραστατικών myDATA")
-    writer.setCreator("Λήψη Παραστατικών myDATA")
+    writer.setTitle("Εγχειρίδιο χρήσης — TaxMatch by ScanMyData")
+    writer.setCreator("TaxMatch by ScanMyData")
     writer.setResolution(96)
 
     doc = QTextDocument()
