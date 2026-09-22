@@ -82,21 +82,71 @@ def test_settings_page_loads_values_from_store(window, conn):
     assert window.sched_time.text() == "09:30"
 
 
-def test_calendar_page_lists_rule_based_deadlines(window, conn):
+def test_settings_page_shows_saved_status_for_credential_fields_without_revealing_them(window, conn):
+    settings_store.set_value(conn, "groq_api_key", "gsk_dummy_value_not_real")
+    window.reload_settings()
+    assert "Αποθηκευμένο" in window._settings_status["groq_api_key"].text()
+    assert "δεν έχει οριστεί" in window._settings_status["openrouter_api_key"].text()
+    # ΠΟΤΕ δεν ξαναγεμίζει το ίδιο το πεδίο με το μυστικό — μόνο η ετικέτα κατάστασης το δείχνει.
+    assert window._settings_fields["groq_api_key"].text() == ""
+
+
+def test_llm_model_refresh_populates_combo_and_keeps_current_selection(window, conn, monkeypatch):
+    settings_store.set_value(conn, "llm_provider", "groq")
+    settings_store.set_value(conn, "groq_api_key", "gsk_dummy_value_not_real")
+    settings_store.set_value(conn, "llm_model_groq", "llama-3.3-70b-versatile")
+    window.reload_settings()
+
+    from taxmatch.extraction import llm_extract as llm_extract_mod
+    monkeypatch.setattr(llm_extract_mod, "list_models",
+                        lambda client, timeout=30: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+
+    window._refresh_llm_models()
+    # Το run_task τρέχει σε πραγματικό QThread: περιμένουμε το event loop να προλάβει το αποτέλεσμα.
+    import time
+    for _ in range(50):
+        QApplication.processEvents()
+        if window.llm_model_groq.count() > 0:
+            break
+        time.sleep(0.05)
+    assert window.llm_model_groq.count() == 2
+    assert window._combo_model_value(window.llm_model_groq) == "llama-3.3-70b-versatile"
+
+
+def test_calendar_page_shows_month_grid_with_day_drilldown(window, conn):
     from datetime import date
     window._cal_month = date(2026, 7, 1)          # μήνας χωρίς εγγραφές feed -> μόνο κανόνες (βλ. taxheaven_calendar)
     window.cal_news.setChecked(False)              # χωρίς δίκτυο σε αυτό το test: μόνο rules/general ήδη στη βάση
     window.reload_calendar()
-    assert window.cal_stack.currentIndex() == 0    # προεπιλογή: μηνιαία λίστα ανά ημέρα
-    assert window.cal_days_list.count() >= 1
-    day_str = window.cal_days_list.item(0).data(Qt.ItemDataRole.UserRole)
-    window._open_cal_day(window.cal_days_list.item(0))
+    assert window.cal_stack.currentIndex() == 0    # προεπιλογή: μηνιαίο grid
+    assert window.cal_grid.count() in (35, 42)      # 5 ή 6 εβδομάδες x 7 ημέρες, πάντα πλήρες grid
+
+    by_day: dict = {}
+    for ev in window._cal_events:
+        by_day.setdefault(ev["date"], []).append(ev)
+    assert by_day, "το test προϋποθέτει τουλάχιστον μία υποχρέωση τον Ιούλιο 2026 (κανόνες ΦΠΑ/ΑΠΔ κ.λπ.)"
+    day_str = sorted(by_day)[0]
+
+    window._open_cal_day_date(date.fromisoformat(day_str))
     assert window.cal_stack.currentIndex() == 1    # κλικ σε ημέρα -> ημερήσια προβολή
     assert window.cal_list.count() >= 1
     assert all(ev["date"] == day_str for ev in
               (window.cal_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(window.cal_list.count())))
     window._close_cal_day()
-    assert window.cal_stack.currentIndex() == 0    # «Πίσω στον μήνα» -> ξαναγυρνά στη μηνιαία λίστα
+    assert window.cal_stack.currentIndex() == 0    # «Πίσω στον μήνα» -> ξαναγυρνά στο grid
+
+
+def test_calendar_day_cell_click_opens_that_day(window, conn):
+    from datetime import date
+    window._cal_month = date(2026, 7, 1)
+    window.cal_news.setChecked(False)
+    window.reload_calendar()
+    from taxmatch.gui.main_window import _DayCell
+    cells = [window.cal_grid.itemAt(i).widget() for i in range(window.cal_grid.count())]
+    clickable = [c for c in cells if isinstance(c, _DayCell) and c.isEnabled() and "\n" in c.text()]
+    assert clickable, "πρέπει να υπάρχει τουλάχιστον μία ημέρα με υποχρέωση, με ενεργό κελί"
+    clickable[0].click()
+    assert window.cal_stack.currentIndex() == 1
 
 
 def test_news_page_lists_articles(window, conn):

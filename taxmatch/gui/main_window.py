@@ -15,7 +15,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from .. import APP_TITLE, __version__, config, crypto, deadlines, logs, notices as notices_mod, pipeline, scheduler_win, settings_store
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
+from ..http import make_session
 from ..identifiers import is_valid_afm, kad_digits, normalize_afm
 from ..ingestion import sources, taxheaven_calendar
 from ..matching import engine
@@ -56,6 +57,36 @@ _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτ�
              ("Κατάσταση", 110, ""), ("Πελάτες", 60, "")]
 
 TOUR_VERSION = 1
+
+_WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
+
+
+class _DayCell(QPushButton):
+    """Ένα κελί ημέρας στο grid του μηνιαίου ημερολογίου — αριθμός + πλήθος υποχρεώσεων αν υπάρχουν."""
+
+    def __init__(self, day: int, count: int, *, in_month: bool, is_today: bool) -> None:
+        label = str(day)
+        if count:
+            noun = "υποχρέωση" if count == 1 else "υποχρεώσεις"
+            label += f"\n{count} {noun}" if count <= 3 else f"\n{count} υπ/σεις"
+        super().__init__(label)
+        self.setMinimumSize(0, 60)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setEnabled(in_month)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if in_month else Qt.CursorShape.ArrowCursor)
+        if not in_month:
+            bg, border, colour = "transparent", "transparent", CURRENT.muted
+        elif count:
+            bg, border, colour = CURRENT.chip, CURRENT.accent, CURRENT.txt
+        else:
+            bg, border, colour = "transparent", CURRENT.line, CURRENT.txt
+        ring = f"3px solid {CURRENT.accent_deep}" if is_today else f"1px solid {border}"
+        self.setStyleSheet(
+            f"QPushButton {{ background:{bg}; border:{ring}; border-radius:8px; color:{colour}; "
+            f"font-weight:{700 if count else 400}; padding:4px; text-align:center; }}"
+            f"QPushButton:hover {{ border-color:{CURRENT.accent}; }}"
+            f"QPushButton:disabled {{ color:{CURRENT.muted}; }}"
+        )
 
 
 def _reveal(path: Path) -> None:
@@ -613,9 +644,28 @@ class MainWindow(QMainWindow):
         toggles.addStretch()
         root.addLayout(toggles)
 
-        self.cal_days_list = QListWidget()
-        self.cal_days_list.itemActivated.connect(self._open_cal_day)
-        root.addWidget(self.cal_days_list, 1)
+        self.cal_grid_box = grid_box = QWidget()
+        grid_root = QVBoxLayout(grid_box)
+        grid_root.setContentsMargins(0, 0, 0, 0)
+        grid_root.setSpacing(4)
+        heads = QHBoxLayout()
+        heads.setSpacing(6)
+        for name in _WEEKDAY_HEADS:
+            lbl = QLabel(name)
+            lbl.setObjectName("muted")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            heads.addWidget(lbl)
+        grid_root.addLayout(heads)
+        self.cal_grid = QGridLayout()
+        self.cal_grid.setSpacing(6)
+        for col in range(7):
+            self.cal_grid.setColumnStretch(col, 1)
+        grid_root.addLayout(self.cal_grid, 1)
+        self.cal_empty_label = QLabel("Καμία υποχρέωση αυτόν τον μήνα με τα τρέχοντα φίλτρα.")
+        self.cal_empty_label.setObjectName("muted")
+        self.cal_empty_label.setVisible(False)
+        grid_root.addWidget(self.cal_empty_label)
+        root.addWidget(grid_box, 1)
         self.cal_stack.addWidget(month_page)
 
         # ---- ημερήσια προβολή: υποχρεώσεις μίας μέρας, με κουμπί επιστροφής ----
@@ -675,22 +725,29 @@ class MainWindow(QMainWindow):
         by_day: dict[str, list[dict]] = {}
         for ev in self._cal_events:
             by_day.setdefault(ev["date"], []).append(ev)
-        self.cal_days_list.clear()
-        for day_str in sorted(by_day):
-            evs = by_day[day_str]
-            n = len(evs)
-            label = f"{i18n.short_day(date.fromisoformat(day_str))}  ·  {n} υποχρέωσ{'η' if n == 1 else 'εις'}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, day_str)
-            self.cal_days_list.addItem(item)
-        if not by_day:
-            self.cal_days_list.addItem(QListWidgetItem("Καμία υποχρέωση αυτόν τον μήνα με τα τρέχοντα φίλτρα."))
+        self.cal_empty_label.setVisible(not by_day)
 
-    def _open_cal_day(self, item: QListWidgetItem) -> None:
-        day_str = item.data(Qt.ItemDataRole.UserRole)
-        if not day_str:
-            return
-        self._cal_view_day = date.fromisoformat(day_str)
+        while self.cal_grid.count():
+            item = self.cal_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        first = self._cal_month
+        today = date.today()
+        # Ελληνικό ημερολόγιο: η εβδομάδα ξεκινά Δευτέρα (firstweekday=0), όχι Κυριακή.
+        weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(first.year, first.month)
+        for row, week in enumerate(weeks):
+            for col, day_date in enumerate(week):
+                in_month = day_date.month == first.month
+                count = len(by_day.get(day_date.isoformat(), []))
+                cell = _DayCell(day_date.day, count, in_month=in_month, is_today=day_date == today)
+                if in_month:
+                    cell.clicked.connect(lambda _=False, d=day_date: self._open_cal_day_date(d))
+                self.cal_grid.addWidget(cell, row, col)
+
+    def _open_cal_day_date(self, d: date) -> None:
+        self._cal_view_day = d
         self._render_cal_day()
 
     def _close_cal_day(self) -> None:
@@ -710,6 +767,10 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{ev['title']}  ·  [{kind_label}]")
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.cal_list.addItem(item)
+        if self.cal_list.count() == 0:
+            placeholder = QListWidgetItem("Καμία υποχρέωση αυτή την ημέρα.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.cal_list.addItem(placeholder)
 
     def _fill_client_combo(self) -> None:
         current = self.cal_client.currentData()
@@ -812,6 +873,7 @@ class MainWindow(QMainWindow):
         keys_box = QGroupBox("Κλειδιά & credentials")
         kf = QFormLayout(keys_box)
         self._settings_fields: dict[str, QLineEdit] = {}
+        self._settings_status: dict[str, QLabel] = {}
         for key, label, echo in (("groq_api_key", "Groq API key", True), ("openrouter_api_key", "OpenRouter API key", True),
                                  ("business_portal_key", "Business Portal (ΓΕΜΗ) API key", True),
                                  ("aade_user", "TAXISnet χρήστης γραφείου", False), ("aade_pass", "TAXISnet κωδικός γραφείου", True)):
@@ -819,7 +881,15 @@ class MainWindow(QMainWindow):
             if echo:
                 field.setEchoMode(QLineEdit.EchoMode.Password)
             self._settings_fields[key] = field
-            kf.addRow(label, field)
+            # Το πεδίο ΠΟΤΕ δεν δείχνει την αποθηκευμένη τιμή (ασφάλεια) — χωρίς αυτή την ετικέτα ο χρήστης δεν έχει
+            # τρόπο να ξέρει αν έχει ήδη αποθηκεύσει κάτι εδώ, βλέπει μόνο ένα άδειο πεδίο κάθε φορά.
+            status = QLabel("")
+            status.setObjectName("muted")
+            self._settings_status[key] = status
+            row = QHBoxLayout()
+            row.addWidget(field, 1)
+            row.addWidget(status)
+            kf.addRow(label, row)
         save_keys = QPushButton("Αποθήκευση κλειδιών")
         save_keys.setObjectName("primary")
         save_keys.clicked.connect(self._save_secret_keys)
@@ -841,10 +911,15 @@ class MainWindow(QMainWindow):
         self.llm_provider.addItem("Groq", "groq")
         self.llm_provider.addItem("OpenRouter", "openrouter")
         lf.addRow("Πάροχος", self.llm_provider)
-        self.llm_model_groq = QLineEdit()
+        self.llm_model_groq = QComboBox()
+        self.llm_model_groq.setEditable(True)
         lf.addRow("Μοντέλο Groq", self.llm_model_groq)
-        self.llm_model_openrouter = QLineEdit()
+        self.llm_model_openrouter = QComboBox()
+        self.llm_model_openrouter.setEditable(True)
         lf.addRow("Μοντέλο OpenRouter", self.llm_model_openrouter)
+        refresh_models = QPushButton("⟳  Ανανέωση λίστας μοντέλων (τρέχων πάροχος, χρειάζεται αποθηκευμένο κλειδί)")
+        refresh_models.clicked.connect(self._refresh_llm_models)
+        lf.addRow("", refresh_models)
         note = QLabel("Αν το μοντέλο απορριφθεί (π.χ. δεν υπάρχει πια), η εφαρμογή δοκιμάζει αυτόματα δωρεάν εναλλακτικές· "
                      "αν καμία δεν δουλέψει, θα σας προτείνει ρητά μετάβαση σε πληρωμένο μοντέλο — ποτέ αυτόματα.")
         note.setWordWrap(True)
@@ -899,12 +974,19 @@ class MainWindow(QMainWindow):
 
     def reload_settings(self) -> None:
         self.llm_provider.setCurrentIndex(self.llm_provider.findData(settings_store.get(self.conn, "llm_provider") or "groq"))
-        self.llm_model_groq.setText(settings_store.get(self.conn, "llm_model_groq"))
-        self.llm_model_openrouter.setText(settings_store.get(self.conn, "llm_model_openrouter"))
+        self.llm_model_groq.setCurrentText(settings_store.get(self.conn, "llm_model_groq"))
+        self.llm_model_openrouter.setCurrentText(settings_store.get(self.conn, "llm_model_openrouter"))
         for sid, chk in self._source_checks.items():
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
+        for key, status in self._settings_status.items():
+            if settings_store.is_set(self.conn, key):
+                status.setText("✓ Αποθηκευμένο")
+                status.setStyleSheet(f"color:{CURRENT.ok};")
+            else:
+                status.setText("— δεν έχει οριστεί")
+                status.setStyleSheet(f"color:{CURRENT.muted};")
 
     def _save_secret_keys(self) -> None:
         for key, field in self._settings_fields.items():
@@ -913,14 +995,52 @@ class MainWindow(QMainWindow):
                 settings_store.set_value(self.conn, key, value)
                 field.clear()
         toast(self, "Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).", "ok")
+        self.reload_settings()
+
+    def _combo_model_value(self, combo: QComboBox) -> str:
+        """Το μοντέλο χωρίς το «(δωρεάν)» της λίστας: αν ο χρήστης διάλεξε μια καταχώρηση της λίστας, το πραγματικό
+        id είναι στο itemData· αν έγραψε κάτι ο ίδιος, παίρνουμε ακριβώς αυτό που έγραψε."""
+        idx = combo.currentIndex()
+        if idx >= 0 and combo.itemText(idx) == combo.currentText():
+            data = combo.itemData(idx)
+            if data:
+                return data
+        return combo.currentText().strip()
 
     def _save_llm_settings(self) -> None:
         settings_store.set_value(self.conn, "llm_provider", self.llm_provider.currentData())
-        if self.llm_model_groq.text().strip():
-            settings_store.set_value(self.conn, "llm_model_groq", self.llm_model_groq.text().strip())
-        if self.llm_model_openrouter.text().strip():
-            settings_store.set_value(self.conn, "llm_model_openrouter", self.llm_model_openrouter.text().strip())
+        groq_model = self._combo_model_value(self.llm_model_groq)
+        if groq_model:
+            settings_store.set_value(self.conn, "llm_model_groq", groq_model)
+        or_model = self._combo_model_value(self.llm_model_openrouter)
+        if or_model:
+            settings_store.set_value(self.conn, "llm_model_openrouter", or_model)
         toast(self, "Οι ρυθμίσεις ανάλυσης αποθηκεύτηκαν.", "ok")
+
+    def _refresh_llm_models(self) -> None:
+        provider = self.llm_provider.currentData() or "groq"
+        combo = self.llm_model_groq if provider == "groq" else self.llm_model_openrouter
+        cfg = llm_extract.PROVIDERS[provider]
+        key = settings_store.get(self.conn, cfg["key"])
+        if not key:
+            toast(self, f"Δεν έχει αποθηκευτεί API key για {provider} — αποθηκεύστε το πρώτα.", "warn")
+            return
+
+        def work(_progress):
+            client = llm_extract.LLMClient(provider, key, "", cfg["url"], make_session(retries=1))
+            return llm_extract.list_models(client)
+
+        def done(models: list[str]) -> None:
+            current = self._combo_model_value(combo)
+            combo.blockSignals(True)
+            combo.clear()
+            for m in sorted(models):
+                combo.addItem(m + ("  (δωρεάν)" if llm_extract.is_free_model(provider, m) else ""), m)
+            combo.setCurrentText(current)
+            combo.blockSignals(False)
+            toast(self, f"Βρέθηκαν {len(models)} διαθέσιμα μοντέλα για {provider}.", "ok")
+
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
 
     def _save_sources(self) -> None:
         for sid, chk in self._source_checks.items():
@@ -1048,7 +1168,7 @@ class MainWindow(QMainWindow):
                 "Τσεκάρετε πελάτες για μαζικές ενέργειες.", lambda: self.client_table, lambda: self._show_page("clients")),
             Step("3. Ημερολόγιο", "Συνδυάζει το γενικό ημερολόγιο taxheaven, τους κανονικούς κανόνες (ΦΠΑ/VIES/Intrastat…) "
                 "και τις προθεσμίες που εντοπίστηκαν σε άρθρα. Κλικ σε μια ημέρα δείχνει τις υποχρεώσεις της.",
-                lambda: self.cal_days_list, lambda: (self._show_page("calendar"), self._close_cal_day())),
+                lambda: self.cal_grid_box, lambda: (self._show_page("calendar"), self._close_cal_day())),
             Step("4. Νέα & Matches", "Κάθε άρθρο δείχνει ποιους πελάτες αφορά και γιατί. Διπλό κλικ ανοίγει προεπισκόπηση "
                 "πριν τον σύνδεσμο — ποτέ απευθείας browser.", lambda: self.news_table, lambda: self._show_page("news")),
             Step("5. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν, με αυτόματη εναλλαγή), πηγές ειδήσεων, "
