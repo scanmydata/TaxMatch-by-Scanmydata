@@ -1208,7 +1208,10 @@ class MainWindow(QMainWindow):
                 try:
                     client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
                 except llm_extract.LLMError as exc:
-                    if exc.kind != "model":
+                    # "model": το μοντέλο δεν υπάρχει πια/δεν επιτρέπεται. "credits": συνήθως στιγμιαίος
+                    # συνωστισμός στον upstream provider ΑΥΤΟΥ του δωρεάν μοντέλου, όχι όριο λογαριασμού — σε
+                    # κάθε περίπτωση, μία αυτόματη αλλαγή δωρεάν μοντέλου αξίζει πριν πούμε ότι η δοκιμή απέτυχε.
+                    if exc.kind not in ("model", "credits"):
                         raise
                     old = client.model
                     client.model = llm_extract.recover_model(conn, client)

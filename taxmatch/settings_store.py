@@ -26,7 +26,10 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     # είναι απαραίτητο για να δουλέψει η ανάλυση άρθρων — ο χρήστης μπορεί να αλλάξει πάροχο ελεύθερα στις Ρυθμίσεις.
     SettingDef("llm_provider", "Πάροχος LLM", default="openrouter"),
     SettingDef("llm_model_groq", "Μοντέλο Groq", default="llama-3.3-70b-versatile"),
-    SettingDef("llm_model_openrouter", "Μοντέλο OpenRouter", default="meta-llama/llama-3.3-70b-instruct:free"),
+    # 2026-09-23: το παλιό default (meta-llama/llama-3.3-70b-instruct:free) επαληθεύτηκε ζωντανά ότι είναι πλέον
+    # 404 «unavailable for free» — ο κατάλογος δωρεάν μοντέλων του OpenRouter αλλάζει συχνά (βλ. llm_extract.py:
+    # PREFERRED_MODELS). Αυτό δούλεψε σε ζωντανή δοκιμή JSON-mode την ίδια μέρα.
+    SettingDef("llm_model_openrouter", "Μοντέλο OpenRouter", default="liquid/lfm-2.5-2.6b:free"),
     SettingDef("groq_api_key", "Groq API key", secret=True, env="GROQ_API_KEY"),
     SettingDef("openrouter_api_key", "OpenRouter API key", secret=True, env="OPENROUTER_API_KEY"),
     SettingDef("business_portal_key", "Business Portal (ΓΕΜΗ) API key", secret=True, env="BUSINESS_PORTAL_KEY"),

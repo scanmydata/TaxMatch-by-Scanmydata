@@ -329,40 +329,51 @@ def test_429_without_quota_wording_stays_a_transient_rate_limit():
     assert exc_info.value.kind == "rate_limit"
 
 
-def test_exhausted_credits_switches_model_on_groq_but_not_openrouter(conn):
-    """Groq: ένα μοντέλο μπορεί να έχει δικό του ξεχωριστό όριο — δοκιμάζουμε ΑΛΛΟ δωρεάν μοντέλο πριν σταματήσουμε
-    (ίδια λογική με το «μοντέλο δεν υπάρχει»). OpenRouter: το όριο των δωρεάν (':free') μοντέλων είναι ΑΝΑ
-    ΛΟΓΑΡΙΑΣΜΟ, όχι ανά μοντέλο — αλλαγή μοντέλου θα χτυπήσει το ίδιο όριο αμέσως, άρα ΔΕΝ τη δοκιμάζουμε καν."""
-    ok = llm_reply({"relevant": True, "summary": "Σ", "scope": {"type": "all"}})
+def test_upstream_congestion_429_is_credits_kind_with_real_openrouter_wording():
+    """Πραγματικό response body από ζωντανό OpenRouter key (2026-09-23) όταν ο upstream supplier ενός
+    συγκεκριμένου δωρεάν μοντέλου είναι στιγμιαία γεμάτος — ΔΕΝ είναι όριο του λογαριασμού."""
+    body = (b'{"error":{"message":"Provider returned error","code":429,"metadata":{"raw":'
+           b'"qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly, or add your '
+           b'own key to accumulate your rate limits: https://openrouter.ai/settings/integrations",'
+           b'"provider_name":"ModelRun","is_byok":false,"provider_error_code":"429",'
+           b'"limit_source":"upstream_provider_shared_pool"}},"user_id":"user_x"}')
+    s = FakeSession().route("chat/completions", FakeResponse(body, 429))
+    client = LLMClient("openrouter", "k", "qwen/qwen3.8-27b:free", "https://openrouter.ai/api/v1/chat/completions", s)
+    with pytest.raises(LLMError) as exc_info:
+        client.complete_json("s", "u")
+    assert exc_info.value.kind == "credits" and "upstream" in str(exc_info.value).lower()
 
-    def chat_groq(url, **kw):
-        if kw["json"]["model"] == "llama-3.3-70b-versatile":
-            return FakeResponse(b'{"error":"quota exceeded"}', 429)
-        return ok
+
+def test_credits_kind_switches_model_on_openrouter_too(conn):
+    """Ξεχάσαμε αρχικά ότι τα περισσότερα 429 σε δωρεάν μοντέλα OpenRouter είναι συνωστισμός στον upstream ΑΥΤΟΥ
+    του μοντέλου, όχι όριο λογαριασμού (βλ. παραπάνω) — άρα η αυτόματη εναλλαγή σε άλλο δωρεάν μοντέλο πρέπει να
+    δοκιμάζεται σε ΚΑΘΕ πάροχο, όχι μόνο στο Groq."""
+    ok = llm_reply({"relevant": True, "summary": "Σ", "scope": {"type": "all"}})
+    congested = FakeResponse(
+        b'{"error":{"message":"Provider returned error","code":429,"metadata":{"raw":'
+        b'"meta-llama/llama-3.3-70b-instruct:free is temporarily rate-limited upstream.",'
+        b'"limit_source":"upstream_provider_shared_pool"}}}', 429)
+
+    def chat(url, **kw):
+        return congested if kw["json"]["model"] == "meta-llama/llama-3.3-70b-instruct:free" else ok
 
     add_article(conn)
-    s_groq = (FakeSession().route("/models", FakeResponse(json_data={"data": [
-                {"id": "llama-3.3-70b-versatile"}, {"id": "openai/gpt-oss-120b"}]}))
-             .route("chat/completions", chat_groq))
-    client_groq = LLMClient("groq", "k", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/chat/completions", s_groq)
-    out = llm_extract.extract_pending(conn, client_groq, 10, 30, sleep=lambda _s: None)
-    assert out["stopped"] == "" and out["done"] == 1 and out["model"] == "openai/gpt-oss-120b"
-    assert settings_store.get(conn, "llm_model_groq") == "openai/gpt-oss-120b"
+    s = (FakeSession().route("/models", FakeResponse(json_data={"data": [
+            {"id": "meta-llama/llama-3.3-70b-instruct:free"}, {"id": "liquid/lfm-2.5-2.6b:free"}]}))
+         .route("chat/completions", chat))
+    client = LLMClient("openrouter", "k", "meta-llama/llama-3.3-70b-instruct:free", "https://openrouter.ai/api/v1/chat/completions", s)
+    out = llm_extract.extract_pending(conn, client, 10, 30, sleep=lambda _s: None)
+    assert out["stopped"] == "" and out["done"] == 1 and out["model"] == "liquid/lfm-2.5-2.6b:free"
+    assert settings_store.get(conn, "llm_model_openrouter") == "liquid/lfm-2.5-2.6b:free"
 
-    conn.execute("DELETE FROM articles")
-    add_article(conn, url="https://x.gr/2")
 
-    def chat_or(url, **kw):
-        return FakeResponse(b'{"error":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock."}', 429)
-
-    s_or = (FakeSession().route("/models", FakeResponse(json_data={"data": [
-              {"id": "meta-llama/llama-3.3-70b-instruct:free"}, {"id": "deepseek/deepseek-chat-v3.1:free"}]}))
-           .route("chat/completions", chat_or))
-    client_or = LLMClient("openrouter", "k", "meta-llama/llama-3.3-70b-instruct:free", "https://openrouter.ai/api/v1/chat/completions", s_or)
-    out = llm_extract.extract_pending(conn, client_or, 10, 30, sleep=lambda _s: None)
-    assert out["model"] == "meta-llama/llama-3.3-70b-instruct:free"  # ΔΕΝ άλλαξε
-    assert "ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ" in out["stopped"]
-    assert settings_store.get(conn, "llm_model_openrouter") != "deepseek/deepseek-chat-v3.1:free"
+def test_model_error_detects_the_real_unavailable_for_free_wording():
+    """Πραγματικό response body (2026-09-23): όταν ΜΟΝΟ η δωρεάν εκδοχή ενός μοντέλου αποσύρεται (η πληρωμένη
+    μένει), το OpenRouter απαντά HTTP 404 με αυτή ακριβώς τη διατύπωση — διαφορετική από τις ήδη γνωστές
+    (model_not_found/does not exist/…). Χωρίς αυτήν, ΔΕΝ πυροδοτούνταν ποτέ το recover_model."""
+    body = ('{"error":{"message":"This model is unavailable for free. The paid version is available now - '
+           'use this slug instead: meta-llama/llama-3.3-70b-instruct","code":404},"user_id":"user_x"}')
+    assert llm_extract._is_model_error(404, body)
 
 
 def test_json_mode_rejected_falls_back_to_plain_completion(conn):

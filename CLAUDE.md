@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 236 tests, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 238 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -150,17 +150,29 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    τους κωδικοί (ή ΓΕΜΗ). Δεν έχει δοκιμαστεί ο ρόλος «λογιστής με εξουσιοδοτήσεις». Νομικά πρόσωπα: το Μητρώο δεν έχει δοκιμαστεί (μόνο ατομικές)· η νομική μορφή (ΙΚΕ/ΑΕ) έρχεται από ΓΕΜΗ ή, αν λείπει, από την κατάληξη της επωνυμίας (`legal_form.py`). Δεν αποθηκεύονται προσωπικά πεδία (ταυτότητα, ημ. γέννησης) στο `lookup_raw`.
 5. **LLM:** δωρεάν-πρώτα με αυτόματη εναλλαγή (§Κανόνες) — **επαληθεύτηκε ζωντανά με πραγματικό OpenRouter key (2026-09-23)**, η σύνδεση δουλεύει· δεν έχει ακόμη μετρηθεί ακρίβεια εξαγωγής — δείγμα με 👍/👎.
    **Προεπιλεγμένος πάροχος πλέον OpenRouter, όχι Groq** (2026-09-22, ρητό αίτημα χρήστη — το Groq δεν πρέπει να είναι «βασικό»/υποχρεωτικό,
-   βλ. και το μόνιμο 403 παρακάτω): `settings_store.DEFINITIONS["llm_provider"].default`. Προτεινόμενο μοντέλο άλλαξε σε πραγματικά δωρεάν
-   (`meta-llama/llama-3.3-70b-instruct:free`, με κατάληξη `:free` — όχι το παλιό χωρίς κατάληξη, που χρεώνεται). Το dropdown μοντέλων
-   (`gui/main_window.py: _sync_model_combo`) δείχνει πάντα το τρέχον/αυτόματα επιλεγμένο μοντέλο σαν κανονική καταχώρηση, ταξινομημένο
-   δωρεάν-πρώτα. Νέο: HTTP 402 και 429 με λέξεις quota/credit (`llm_extract._is_quota_error`) ταξινομούνται ως `LLMError(kind="credits")`
-   ξεχωριστά από απλό `rate_limit` (προσωρινή καθυστέρηση) — μήνυμα εξηγεί ότι δεν αρκεί απλή αναμονή· το `extract_pending` δοκιμάζει
-   αυτόματα άλλο δωρεάν μοντέλο πριν σταματήσει, **ΕΚΤΟΣ από OpenRouter** (2026-09-23, επαληθεύτηκε ζωντανά — 429 σχεδόν αμέσως, χωρίς
-   πολλά αιτήματα): το όριο των `:free` μοντέλων στο OpenRouter είναι **ανά λογαριασμό** (requests/day + requests/minute), ΟΧΙ ανά
-   μοντέλο — αλλαγή σε άλλο δωρεάν μοντέλο του OpenRouter χτυπάει αμέσως το ίδιο όριο, άρα δεν το δοκιμάζουμε καν εκεί (μόνο σε Groq/
-   άλλους παρόχους όπου τα όρια ΜΠΟΡΕΙ να είναι ανά μοντέλο). Το μήνυμα το εξηγεί ρητά και προτείνει είτε αναμονή (ανανεώνεται ανά
-   ημέρα) είτε προσθήκη credits στο openrouter.ai (ξεκλειδώνει πολύ μεγαλύτερο όριο). `_is_quota_error` αναγνωρίζει και τη συγκεκριμένη
-   διατύπωση του OpenRouter («free-models-per-day», «try again tomorrow», «add ... credits»).
+   βλ. και το μόνιμο 403 παρακάτω): `settings_store.DEFINITIONS["llm_provider"].default`.
+   **Ο κατάλογος δωρεάν (`:free`) μοντέλων του OpenRouter αλλάζει ΣΥΧΝΑ — μην εμπιστεύεσαι κρυφά συγκεκριμένα ids.** Επαληθεύτηκε
+   ζωντανά (2026-09-23, πραγματικό key): το πρώτο default που είχαμε βάλει (`meta-llama/llama-3.3-70b-instruct:free`) και ολόκληρη η
+   τότε λίστα `PREFERRED_MODELS["openrouter"]` είναι ΠΛΕΟΝ HTTP 404 («This model is unavailable for free. The paid version is available
+   now — use this slug instead: …» — η δωρεάν εκδοχή καταργήθηκε, η πληρωμένη μένει). Αντικαταστάθηκαν με μοντέλα που δοκιμάστηκαν
+   ζωντανά την ίδια μέρα (`liquid/lfm-2.5-2.6b:free`, `nvidia/nemotron-3-super-120b-a12b:free`, …· δες τα σχόλια στο ίδιο το
+   `PREFERRED_MODELS`) — αλλά ΚΙ ΑΥΤΑ θα ξεπεραστούν κάποια στιγμή. Το πραγματικό safety net είναι το live `GET /models` μέσα στο
+   `pick_model`/`recover_model`, ΟΧΙ η στατική λίστα· αν ξαναδεις 404 «unavailable for free» σε νέο μοντέλο, αυτό ΕΙΝΑΙ αναμενόμενο, όχι
+   bug — απλώς ξαναβρές ζωντανά μοντέλα (`GET https://openrouter.ai/api/v1/models` με το key) και ενημέρωσε τη λίστα/το default.
+   Το `_is_model_error` τώρα αναγνωρίζει και αυτή τη ΝΕΑ διατύπωση («unavailable for free», «use this slug instead») — πριν δεν την
+   αναγνώριζε (μόνο τις παλιότερες: model_not_found/does not exist/decommissioned/…), άρα ΔΕΝ πυροδοτούσε ποτέ το `recover_model` για
+   αυτό το σενάριο και έδειχνε γενικό `bad_response` αντί για αυτόματη διόρθωση.
+   Το dropdown μοντέλων (`gui/main_window.py: _sync_model_combo`) δείχνει πάντα το τρέχον/αυτόματα επιλεγμένο μοντέλο σαν κανονική
+   καταχώρηση, ταξινομημένο δωρεάν-πρώτα.
+   **HTTP 402 και 429 με λέξεις quota/credit** (`llm_extract._is_quota_error`) ταξινομούνται ως `LLMError(kind="credits")` ξεχωριστά
+   από απλό `rate_limit` (προσωρινή καθυστέρηση). **Ξεχωριστή κατηγορία, βρέθηκε ζωντανά την ίδια μέρα**
+   (`llm_extract._is_upstream_congestion`): η ΠΛΕΙΟΨΗΦΙΑ των 429 σε δωρεάν OpenRouter μοντέλα ΔΕΝ είναι όριο λογαριασμού, είναι
+   στιγμιαίος συνωστισμός στον **upstream supplier ΑΥΤΟΥ του συγκεκριμένου μοντέλου** — πραγματικό body:
+   `{"error":{"code":429,"metadata":{"raw":"X is temporarily rate-limited upstream…","provider_name":"ModelRun",
+   "limit_source":"upstream_provider_shared_pool"}}}`. Ένα PREFERRED αρχικό συμπέρασμα (ότι το όριο είναι πάντα ανά λογαριασμό στο
+   OpenRouter, άρα αλλαγή μοντέλου δεν βοηθά) αποδείχτηκε ΛΑΘΟΣ σε ζωντανή δοκιμή — άλλο δωρεάν μοντέλο (άλλος upstream) συνήθως
+   δουλεύει κανονικά. Το `extract_pending`/`gui/_test_llm` δοκιμάζουν πλέον αυτόματα άλλο δωρεάν μοντέλο σε ΚΑΘΕ πάροχο σε «credits»
+   σφάλμα (Groq ΚΑΙ OpenRouter) — ακόμη κι αν σπάνια είναι πραγματικά ανά λογαριασμό, η εναλλαγή κοστίζει μόνο ένα παραπάνω αίτημα.
    **Το `gui/` δεν καθάριζε ποτέ το `llm_last_error`** (2026-09-23, βρέθηκε ζωντανά): το `web/` το έκανε ήδη σε επιτυχημένη «Δοκιμή
    LLM»/αποθήκευση κλειδιού (`web/views.py`), αλλά το αντίστοιχο `gui/main_window.py: _test_llm/_save_secret_keys` όχι — αποτέλεσμα, το
    κόκκινο banner «Η ανάλυση άρθρων με LLM δεν δουλεύει» έμενε μόνιμα ορατό ακόμη κι όταν το «Δοκιμή LLM» μόλις είχε επιβεβαιώσει ότι η

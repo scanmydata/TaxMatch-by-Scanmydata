@@ -32,11 +32,18 @@ PROVIDERS = {
 # Στο Groq όλος ο κατάλογος είναι στη δωρεάν βαθμίδα (ανοιχτό μοντέλα τιμολόγησης ανά χρήση, όχι ξεχωριστά «δωρεάν»
 # μοντέλα)· στο OpenRouter όμως υπάρχουν ΠΡΑΓΜΑΤΙΚΑ δωρεάν μοντέλα (κατάληξη ':free' στο id) — προτιμώνται πάντα
 # πρώτα. Το «paid» εδώ είναι απλώς το ίδιο μοντέλο χωρίς την κατάληξη, ως έσχατη πρόταση (όχι αυτόματη επιλογή).
+# ΠΡΟΣΟΧΗ: ο κατάλογος δωρεάν μοντέλων του OpenRouter αλλάζει συχνά — μοντέλα «σβήνονται» (γίνονται 404 «unavailable
+# for free») ή δημιουργούνται νέα. Αυτή η λίστα είναι απλώς η ΠΡΩΤΗ προσπάθεια· το πραγματικό safety net είναι το
+# live GET /models μέσα στο `pick_model`/`recover_model`, ΟΧΙ αυτή η λίστα. Επαληθεύτηκε ζωντανά (2026-09-23, με
+# πραγματικό key) ότι τα `meta-llama/llama-3.3-70b-instruct:free`/`deepseek/deepseek-chat-v3.1:free`/
+# `qwen/qwen3-235b-a22b:free` (παλιά προεπιλογή) είναι ΠΛΕΟΝ 404 — αντικαταστάθηκαν με μοντέλα που όντως δούλεψαν σε
+# ζωντανή δοκιμή JSON-mode ερώτησης αυτή τη μέρα.
 PREFERRED_MODELS = {
     "groq": ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
              "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
-    "openrouter": ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat-v3.1:free",
-                   "qwen/qwen3-235b-a22b:free", "meta-llama/llama-3.3-70b-instruct", "openai/gpt-oss-120b"],
+    "openrouter": ["liquid/lfm-2.5-2.6b:free", "nvidia/nemotron-3-super-120b-a12b:free",
+                   "google/gemma-4-31b-it:free", "z-ai/glm-5.2:free",
+                   "meta-llama/llama-3.3-70b-instruct", "openai/gpt-oss-120b"],
 }
 # Μοντέλα που δεν είναι για κείμενο→JSON (ομιλία, moderation, agentic)
 _NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "embed", "safeguard", "compound", "distil-whisper", "playai")
@@ -117,16 +124,19 @@ class LLMClient:
             raise LLMError("credits", f"Ανεπαρκές υπόλοιπο/πιστωτικά στον λογαριασμό {self.provider} (HTTP 402). "
                                       f"Προσθέστε credits στον πάροχο, ή επιλέξτε δωρεάν μοντέλο στις Ρυθμίσεις.")
         if resp.status_code == 429:
+            if _is_upstream_congestion(resp.text):
+                # Επαληθεύτηκε ζωντανά (2026-09-23, OpenRouter, πραγματικό key): «{model} is temporarily
+                # rate-limited upstream» — ΔΕΝ είναι όριο του λογαριασμού, είναι στιγμιαίος συνωστισμός στον
+                # SUPPLIER που τροφοδοτεί ΑΥΤΟ το δωρεάν μοντέλο (π.χ. "ModelRun", "upstream_provider_shared_pool").
+                # Άλλο δωρεάν μοντέλο (άλλος upstream provider) συνήθως δουλεύει κανονικά — άρα αξίζει να δοκιμαστεί.
+                raise LLMError("credits", f"Το μοντέλο «{self.model}» είναι στιγμιαία υπερφορτωμένο στον πάροχό "
+                                          f"του (upstream), όχι όριο του λογαριασμού σας — δοκιμάζεται αυτόματα "
+                                          f"άλλο δωρεάν μοντέλο.")
             if _is_quota_error(resp.text):
-                if self.provider == "openrouter" and is_free_model(self.provider, self.model):
-                    raise LLMError("credits", f"Ξεπεράσατε το ημερήσιο/ανά λεπτό όριο αιτημάτων των δωρεάν "
-                                              f"μοντέλων στο OpenRouter — αυτό το όριο είναι ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ, όχι "
-                                              f"ανά μοντέλο (αλλαγή μοντέλου δεν βοηθά). Είτε περιμένετε να "
-                                              f"ανανεωθεί (ανά ημέρα), είτε προσθέστε credits στο openrouter.ai "
-                                              f"για πολύ μεγαλύτερο όριο δωρεάν αιτημάτων.")
                 raise LLMError("credits", f"Ξεπεράσατε το όριο χρήσης (quota) του λογαριασμού {self.provider} — "
                                           f"δεν είναι απλή καθυστέρηση, το όριο ανανεώνεται αργότερα (π.χ. ανά "
-                                          f"ημέρα/μήνα). Δείτε το πρόγραμμα/υπόλοιπό σας στον πάροχο.")
+                                          f"ημέρα/μήνα). Δείτε το πρόγραμμα/υπόλοιπό σας στον πάροχο· δοκιμάζεται "
+                                          f"αυτόματα άλλο δωρεάν μοντέλο πρώτα, μήπως δεν είναι όριο ανά λογαριασμό.")
             raise LLMError("rate_limit", "HTTP 429: όριο αιτημάτων — προσωρινό, θα ξαναδοκιμαστεί.", _retry_after(resp))
         if resp.status_code >= 400:
             raise LLMError("bad_response", f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -137,11 +147,26 @@ class LLMClient:
 
 
 def _is_model_error(status: int, text: str) -> bool:
+    """Επαληθεύτηκε ζωντανά (2026-09-23, OpenRouter): όταν αποσύρεται ΜΟΝΟ η δωρεάν εκδοχή ενός μοντέλου (η
+    πληρωμένη μένει), η απάντηση είναι HTTP 404 με «This model is unavailable for free…», ΟΧΙ κάποια από τις
+    παλιότερες γνωστές διατυπώσεις (model_not_found/does not exist/…) — χωρίς το `unavailable for free` εδώ, αυτό
+    ταξινομούνταν σιωπηλά ως γενικό `bad_response` και δεν πυροδοτούσε ποτέ το αυτόματο `recover_model`."""
     t = (text or "").lower()
     if status not in (400, 403, 404) or "model" not in t:
         return False
     return any(k in t for k in ("model_not_found", "does not exist", "not found", "decommissioned", "deprecated",
-                                "blocked at the organization", "no access", "not supported", "model_permission"))
+                                "blocked at the organization", "no access", "not supported", "model_permission",
+                                "unavailable for free", "no longer available", "use this slug instead"))
+
+
+def _is_upstream_congestion(text: str) -> bool:
+    """HTTP 429 όπου ο ΙΔΙΟΣ ο πάροχος (π.χ. OpenRouter) λέει ρητά ότι φταίει ο upstream supplier αυτού του
+    συγκεκριμένου δωρεάν μοντέλου, όχι το όριο του λογαριασμού — επαληθεύτηκε ζωντανά (2026-09-23): body
+    `{"error":{"code":429,"metadata":{"raw":"X is temporarily rate-limited upstream...","limit_source":
+    "upstream_provider_shared_pool", ...}}}`. Άλλο δωρεάν μοντέλο (άλλος upstream) αξίζει να δοκιμαστεί."""
+    t = (text or "").lower()
+    return any(k in t for k in ("rate-limited upstream", "upstream_provider", "provider returned error",
+                                "provider_error_code"))
 
 
 def _is_quota_error(text: str) -> bool:
@@ -350,11 +375,13 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                     stats["stopped"] = str(exc)
                     return _finish(conn, stats, cutoff)
                 if exc.kind == "credits":
-                    # Στο OpenRouter το όριο των δωρεάν (':free') μοντέλων είναι ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ (requests/day και
-                    # requests/minute), ΟΧΙ ανά μοντέλο — αλλαγή σε άλλο δωρεάν μοντέλο θα χτυπήσει το ίδιο όριο
-                    # αμέσως, άρα δεν έχει νόημα να δοκιμάσουμε. Σε άλλους παρόχους (π.χ. Groq) το όριο ΜΠΟΡΕΙ να
-                    # είναι ανά μοντέλο, οπότε μία απόπειρα αυτόματης εναλλαγής αξίζει πριν σταματήσουμε εντελώς.
-                    if not recovered and client.provider != "openrouter":
+                    # Επαληθεύτηκε ζωντανά (2026-09-23, OpenRouter, πραγματικό key): η ΠΛΕΙΟΨΗΦΙΑ των 429 σε δωρεάν
+                    # μοντέλα είναι στιγμιαίος συνωστισμός στον upstream supplier ΑΥΤΟΥ του μοντέλου (`{"raw":"X is
+                    # temporarily rate-limited upstream…"}`), όχι όριο ανά λογαριασμό — άλλο δωρεάν μοντέλο (άλλος
+                    # upstream) συνήθως δουλεύει κανονικά. Μία απόπειρα αυτόματης εναλλαγής αξίζει πάντα, σε κάθε
+                    # πάροχο· ακόμη κι αν στο σπάνιο σενάριο ενός πραγματικά ανά-λογαριασμό ορίου η εναλλαγή δεν
+                    # βοηθήσει, κοστίζει μόνο ένα παραπάνω αίτημα πριν σταματήσουμε με ξεκάθαρο μήνυμα.
+                    if not recovered:
                         recovered = True
                         try:
                             new = pick_model(client.provider, list_models(client), avoid=client.model, free_only=True)
