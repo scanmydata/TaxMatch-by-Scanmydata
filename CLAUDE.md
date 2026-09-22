@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 214 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 216 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -135,12 +135,16 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 9. **Ενσωμάτωση στη σουίτα ScanMyData:** σημεία επαφής σήμερα: `TAXMATCH_DATA_DIR`, CLI (`--daily`), το `taxmatch.business_profiles.service` (πελάτες) και `taxmatch.matching.engine.digest*`. Δεν υπάρχει ακόμη σταθερό public API/SSO — να σχεδιαστεί όταν οριστεί ο τρόπος ενσωμάτωσης.
 10. Ο installer δεν έχει δοκιμαστεί σε καθαρό μηχάνημα (μόνο silent install/uninstall εδώ) και δεν είναι code-signed (θα εμφανιστεί SmartScreen).
    Τα ελληνικά του οδηγού είναι δικά μας `[Messages]` (δεν υπάρχει επίσημο Greek.isl).
-   **Antivirus χτυπάει το exe ως malware (2026-09-22, setup 0.1, πραγματικό μηχάνημα χρήστη):** το `packaging/taxmatch.spec` ΗΔΗ έχει τους
-   συνηθισμένους μετριασμούς (`upx=False` σε EXE ΚΑΙ COLLECT, πλήρες `version_info.txt` με CompanyName/FileDescription/ProductName) — ο
-   πιο πιθανός λόγος είναι η γενική heuristic ανίχνευση «unsigned PyInstaller exe» που χτυπά ΣΧΕΔΟΝ ΚΑΘΕ ανυπόγραφο PyInstaller πρόγραμμα,
-   ανεξαρτήτως περιεχομένου — δεν διορθώνεται με αλλαγές στο spec. Δύο πραγματικές λύσεις: (α) **code signing certificate** (πληρωμένο,
-   μόνιμη λύση)· (β) υποβολή false-positive στον συγκεκριμένο πάροχο (π.χ. Microsoft Defender: https://www.microsoft.com/wdsi/filesubmission)
-   ανά έκδοση exe — δωρεάν αλλά χρειάζεται επανάληψη σε κάθε νέο build hash. Μην προτείνεις άλλες αλλαγές στο spec χωρίς νέα στοιχεία.
+   **Antivirus χτυπάει το exe ως malware — ΤΑΥΤΟΠΟΙΗΘΗΚΕ (2026-09-22): είναι το Acronis Cyber Protect, ΟΧΙ το Windows Defender.**
+   Το μηχάνημα του χρήστη έχει και τα δύο εγκατεστημένα (`Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct`).
+   Επιβεβαιώθηκε ζωντανά: το φρεσκοχτισμένο/εγκατεστημένο `TaxMatch.exe` εξαφανίστηκε από το `%LOCALAPPDATA%\Programs\TaxMatch\` λίγα
+   δευτερόλεπτα μετά την εκκίνηση/αλληλεπίδραση — ΧΩΡΙΣ crash.log και ΧΩΡΙΣ καμία εγγραφή στο δικό του Defender log/`Get-MpThreat`, άρα
+   είναι το «Active Protection» heuristic του Acronis (τυπικό ψευδο-θετικό: ανυπόγραφο exe που μόλις εγκαταστάθηκε γράφει αρχεία στο δικό
+   του φάκελο data — μοιάζει heuristically με ransomware). Το `packaging/taxmatch.spec` ΗΔΗ έχει τους συνηθισμένους μετριασμούς
+   (`upx=False` σε EXE ΚΑΙ COLLECT, πλήρες `version_info.txt`) — αυτοί δεν βοηθούν έναντι του Acronis. Η λύση είναι ΣΤΟ Acronis Cyber
+   Protect (όχι στον κώδικα): επαναφορά από το quarantine του + εξαίρεση (exclusion) για το `%LOCALAPPDATA%\Programs\TaxMatch\` (και το
+   dev `dist\TaxMatch\` για build/test). Δύο εναλλακτικές μόνιμες λύσεις παραμένουν: (α) **code signing certificate** (πληρωμένο)·
+   (β) υποβολή false-positive στον πάροχο. Μην ξαναπροτείνεις αλλαγές στο spec γι' αυτό — έχει ήδη διερευνηθεί.
 11. **Native GUI (2026-09-22, πρώτη έκδοση + διορθώσεις):** επαληθεύτηκε οπτικά σε πραγματικό παράθυρο Windows (dashboard, sidebar, tour,
    notices, πίνακας πελατών, ημερολόγιο με πραγματικά δεδομένα, διάλογος «Νέος πελάτης») και με 12 headless (offscreen) tests
    (`test_gui_smoke.py`). Το **εγχειρίδιο PDF επαληθεύτηκε ΟΠΤΙΚΑ (rendered→PNG) με το πραγματικό "windows" Qt platform** — σωστά ελληνικά,
