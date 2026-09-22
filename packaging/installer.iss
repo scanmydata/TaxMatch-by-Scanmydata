@@ -108,7 +108,8 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:RunApp}"; Flags: nowait postinsta
 Filename: "{app}\{#AppExe}"; Parameters: "--remove-task"; RunOnceId: "RemoveTaxMatchTask"; Flags: runhidden waituntilterminated
 
 [Code]
-; Δεν χρειάζεται πλέον έλεγχος WebView2 Runtime — η εφαρμογή είναι native (PySide6/Qt), όχι webview.
+// Δεν χρειάζεται πλέον έλεγχος WebView2 Runtime — η εφαρμογή είναι native (PySide6/Qt), όχι webview.
+// (Το [Code] είναι Pascal Script: τα σχόλια είναι «//», όχι «;» όπως στα άλλα sections του .iss.)
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
