@@ -25,7 +25,7 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     # ---- LLM (η ανάλυση άρθρων είναι ό,τι παράγει τα matches)
-    provider = settings_store.get(conn, "llm_provider") or "groq"
+    provider = settings_store.get(conn, "llm_provider")
     key = "openrouter_api_key" if provider == "openrouter" else "groq_api_key"
     if not settings_store.is_set(conn, key):
         out.append({"level": "warn", "endpoint": "main.settings", "label": "Ρυθμίσεις",

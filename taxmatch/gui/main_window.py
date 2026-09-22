@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, logs, notices as notices_mod, pipeline, scheduler_win, settings_store
+from .. import backup as backup_mod
+from .. import db as dbmod
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
 from ..http import make_session
@@ -107,6 +109,7 @@ class _DayCell(QFrame):
         if extra > 0:
             more = QLabel(f"+{extra} ακόμη")
             more.setStyleSheet(f"background:transparent; border:none; color:{CURRENT.muted}; font-size:10px;")
+            more.setToolTip("\n".join(ev["title"] for ev in events[_CELL_CHIPS:]))
             box.addWidget(more)
         box.addStretch()
 
@@ -156,7 +159,6 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1340, 840)
 
-        from .. import db as dbmod
         self.conn = dbmod.connect()
         self._prefs = QSettings("scanmydata", "TaxMatch")
         self._tasks: list[Any] = []                        # κρατά ζωντανά τα background tasks (βλ. workers.run_task)
@@ -462,7 +464,8 @@ class MainWindow(QMainWindow):
         # κάθε ξαναγέμισμα/ταξινόμηση του πίνακα (βλ. docstring της κλάσης) — χωρίς αυτό θα καλούσε το δικό του
         # `apply()` που δεν ξέρει τίποτα για το πεδίο αναζήτησης και θα έσβηνε ό,τι είχε κρύψει αυτή.
         # _apply_client_filter() συνδυάζει και τα δύο κριτήρια και είναι η ΜΟΝΗ συνάρτηση που αγγίζει setRowHidden.
-        self._client_col_filter = TableColumnFilter(self.client_table, (_C_KIND, _C_STATE, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS),
+        self._client_col_filter = TableColumnFilter(self.client_table,
+                                                    (_C_NAME, _C_KIND, _C_STATE, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS),
                                                     apply_fn=lambda: self._apply_client_filter())
         self._client_col_filter.filtersChanged.connect(self._apply_client_filter)
         setup_columns(self.client_table, _CLIENT_COLS, self._prefs, "clients")
@@ -563,7 +566,12 @@ class MainWindow(QMainWindow):
 
     def on_add_client(self) -> None:
         dlg = ClientDialog(self.conn, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_afm:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dlg.excel_path:                                     # «Εισαγωγή από Excel…» μέσα στον ίδιο διάλογο
+            self._import_excel_from_path(Path(dlg.excel_path))
+            return
+        if dlg.result_afm:
             self._start_lookup([dlg.result_afm])
             self.reload_clients()
             self._refresh_status_bar()
@@ -585,10 +593,12 @@ class MainWindow(QMainWindow):
 
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Εισαγωγή από Excel", "", "Excel/CSV (*.xlsx *.xlsm *.csv *.txt)")
-        if not path:
-            return
+        if path:
+            self._import_excel_from_path(Path(path))
+
+    def _import_excel_from_path(self, path: Path) -> None:
         try:
-            res = import_excel.parse_file(Path(path).name, Path(path).read_bytes())
+            res = import_excel.parse_file(path.name, path.read_bytes())
         except Exception as exc:
             toast(self, f"Δεν ήταν δυνατή η ανάγνωση του αρχείου: {exc}", "danger")
             return
@@ -596,6 +606,7 @@ class MainWindow(QMainWindow):
               + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ". Εισαγωγή;")
         if QMessageBox.question(self, "Επιβεβαίωση εισαγωγής", msg) != QMessageBox.StandardButton.Yes:
             return
+        backup_mod.create_backup(config.db_path(), reason="import")
         out = clients.import_result(self.conn, res)
         engine.rematch(self.conn)
         self._start_lookup([r.afm for r in res.rows if r.has_credentials] or [r.afm for r in res.rows])
@@ -623,14 +634,20 @@ class MainWindow(QMainWindow):
         self.run_status.setText(f"Ανάκτηση στοιχείων για {len(afms)} πελάτες…")
 
         def work(progress):
-            for i, afm in enumerate(afms, 1):
-                progress(f"Ανάκτηση στοιχείων {i}/{len(afms)}")
-                try:
-                    clients.lookup_and_store(self.conn, afm)
-                except KeyError:
-                    pass
-            engine.rematch(self.conn)
-            return len(afms)
+            # Νέα σύνδεση εδώ, ΠΟΤΕ self.conn — δημιουργήθηκε στο UI thread, το sqlite3 απαγορεύει χρήση από
+            # άλλο thread («SQLite objects created in a thread can only be used in that same thread»).
+            conn = dbmod.connect()
+            try:
+                for i, afm in enumerate(afms, 1):
+                    progress(f"Ανάκτηση στοιχείων {i}/{len(afms)}")
+                    try:
+                        clients.lookup_and_store(conn, afm)
+                    except KeyError:
+                        pass
+                engine.rematch(conn)
+                return len(afms)
+            finally:
+                conn.close()
 
         def done(_n):
             self.run_status.setText("Η ανάκτηση στοιχείων ολοκληρώθηκε.")
@@ -694,13 +711,17 @@ class MainWindow(QMainWindow):
         grid_root = QVBoxLayout(grid_box)
         grid_root.setContentsMargins(0, 0, 0, 0)
         grid_root.setSpacing(4)
+        # ΠΡΟΣΟΧΗ: η κεφαλίδα ημερών ΠΡΕΠΕΙ να έχει το ΙΔΙΟ stretch ανά στήλη με το grid των ημερών από κάτω
+        # (setColumnStretch(col, 1) παρακάτω) — χωρίς `, 1` εδώ, τα labels έμεναν στο φυσικό τους πλάτος
+        # (πακεταρισμένα αριστερά) ενώ οι στήλες του grid απλώνονταν ίσες σε όλο το πλάτος, άρα οι επικεφαλίδες
+        # «Δε Τρ Τε …» δεν ευθυγραμμίζονταν με τις αντίστοιχες στήλες ημερών (λάθος στοίχιση, ειδικά σε πλατύ παράθυρο).
         heads = QHBoxLayout()
         heads.setSpacing(6)
         for name in _WEEKDAY_HEADS:
             lbl = QLabel(name)
             lbl.setObjectName("muted")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            heads.addWidget(lbl)
+            heads.addWidget(lbl, 1)
         grid_root.addLayout(heads)
         self.cal_grid = QGridLayout()
         self.cal_grid.setSpacing(6)
@@ -756,7 +777,11 @@ class MainWindow(QMainWindow):
         first = self._cal_month
 
         def work(_progress):
-            taxheaven_calendar.ensure_month_synced(self.conn, None, first.year, first.month)
+            conn = dbmod.connect()  # δικό του thread — δες σχόλιο στο _start_lookup
+            try:
+                taxheaven_calendar.ensure_month_synced(conn, None, first.year, first.month)
+            finally:
+                conn.close()
 
         def done(_result) -> None:
             if self._cal_month != first:          # ο χρήστης μπορεί να άλλαξε μήνα όσο περιμέναμε το δίκτυο
@@ -929,6 +954,10 @@ class MainWindow(QMainWindow):
             summary, action = ex.get("summary", ""), ex.get("action_required") or ""
         except ValueError:
             pass
+        if not summary:
+            # Δεν έχει αναλυθεί ακόμη με LLM (σε αναμονή/φιλτραρίστηκε/απέτυχε) — δείξε ό,τι κείμενο έχουμε ήδη
+            # ανακτήσει αντί για άδειο διάλογο: το πλήρες κείμενο του άρθρου, αλλιώς την περίληψη του RSS feed.
+            summary = (a["full_text"] or a["raw_summary"] or "")[:2000]
         NewsDialog(a["title"], a["url"], meta=f"{a['source']} · {(a['published_at'] or '')[:10]}",
                   summary=summary, action=action, parent=self).exec()
 
@@ -1039,15 +1068,27 @@ class MainWindow(QMainWindow):
         manage_btn.clicked.connect(lambda: unlock.manage(crypto.keyfile_path(), self))
         pf.addWidget(manage_btn)
         root.addWidget(pass_box)
+
+        backup_box = QGroupBox("Αντίγραφο ασφαλείας βάσης")
+        bf = QHBoxLayout(backup_box)
+        bf.addWidget(QLabel("Η βάση αντιγράφεται αυτόματα πριν από κάθε εισαγωγή Excel και κάθε έλεγχο."))
+        bf.addStretch()
+        backup_now_btn = QPushButton(icon("backup", CURRENT.txt, 16), "  Αντίγραφο τώρα")
+        backup_now_btn.clicked.connect(self._backup_now)
+        bf.addWidget(backup_now_btn)
+        restore_btn = QPushButton(icon("restore", CURRENT.warn, 16), "  Επαναφορά…")
+        restore_btn.clicked.connect(self._restore_backup)
+        bf.addWidget(restore_btn)
+        root.addWidget(backup_box)
         root.addStretch()
 
         outer.setWidget(page)
         return outer
 
     def reload_settings(self) -> None:
-        self.llm_provider.setCurrentIndex(self.llm_provider.findData(settings_store.get(self.conn, "llm_provider") or "groq"))
-        self.llm_model_groq.setCurrentText(settings_store.get(self.conn, "llm_model_groq"))
-        self.llm_model_openrouter.setCurrentText(settings_store.get(self.conn, "llm_model_openrouter"))
+        self.llm_provider.setCurrentIndex(self.llm_provider.findData(settings_store.get(self.conn, "llm_provider")))
+        self._sync_model_combo(self.llm_model_groq, "groq", settings_store.get(self.conn, "llm_model_groq"))
+        self._sync_model_combo(self.llm_model_openrouter, "openrouter", settings_store.get(self.conn, "llm_model_openrouter"))
         for sid, chk in self._source_checks.items():
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
@@ -1063,11 +1104,37 @@ class MainWindow(QMainWindow):
     def _save_secret_keys(self) -> None:
         for key, field in self._settings_fields.items():
             value = field.text().strip()
-            if value:
-                settings_store.set_value(self.conn, key, value)
-                field.clear()
+            if not value:
+                continue
+            settings_store.set_value(self.conn, key, value)
+            field.clear()
+            if key in ("groq_api_key", "openrouter_api_key"):
+                settings_store.set_value(self.conn, "llm_last_error", "")  # νέο κλειδί: σβήνει το παλιό μόνιμο banner
+            if key in ("aade_user", "aade_pass"):
+                settings_store.set_value(self.conn, "aade_office_status", "")  # νέοι κωδικοί: ξεκινά από την αρχή
+                settings_store.set_value(self.conn, "aade_office_message", "")
         toast(self, "Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).", "ok")
         self.reload_settings()
+        self._reload_notices()
+
+    def _sync_model_combo(self, combo: QComboBox, provider: str, current: str, models: Optional[list[str]] = None) -> None:
+        """Γεμίζει/ξαναταξινομεί το dropdown μοντέλων: πρώτα τα δωρεάν, μετά τα πληρωμένα (αλφαβητικά μέσα σε κάθε
+        ομάδα). Το `current` (π.χ. ό,τι έχει αποθηκευτεί στις Ρυθμίσεις, ακόμη κι αν προέκυψε αυτόματα από
+        `recover_model`) εμφανίζεται ΠΑΝΤΑ ως κανονική επιλογή της λίστας — όχι απλώς ελεύθερο κείμενο στο πεδίο."""
+        combo.blockSignals(True)
+        if models is not None:
+            combo.clear()
+            for m in models:
+                combo.addItem(m, m)
+        if current and combo.findData(current) < 0:
+            combo.addItem(current, current)
+        ids = [combo.itemData(i) for i in range(combo.count())]
+        ids.sort(key=lambda m: (not llm_extract.is_free_model(provider, m), m.lower()))
+        combo.clear()
+        for m in ids:
+            combo.addItem(m + ("  (δωρεάν)" if llm_extract.is_free_model(provider, m) else ""), m)
+        combo.setCurrentIndex(combo.findData(current) if current else -1)
+        combo.blockSignals(False)
 
     def _combo_model_value(self, combo: QComboBox) -> str:
         """Το μοντέλο χωρίς το «(δωρεάν)» της λίστας: αν ο χρήστης διάλεξε μια καταχώρηση της λίστας, το πραγματικό
@@ -1103,16 +1170,17 @@ class MainWindow(QMainWindow):
             return llm_extract.list_models(client)
 
         def done(models: list[str]) -> None:
+            self.busy.stop()
             current = self._combo_model_value(combo)
-            combo.blockSignals(True)
-            combo.clear()
-            for m in sorted(models):
-                combo.addItem(m + ("  (δωρεάν)" if llm_extract.is_free_model(provider, m) else ""), m)
-            combo.setCurrentText(current)
-            combo.blockSignals(False)
+            self._sync_model_combo(combo, provider, current, models=models)
             toast(self, f"Βρέθηκαν {len(models)} διαθέσιμα μοντέλα για {provider}.", "ok")
 
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        self.busy.start("Ανανέωση λίστας μοντέλων…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _save_sources(self) -> None:
         for sid, chk in self._source_checks.items():
@@ -1134,19 +1202,36 @@ class MainWindow(QMainWindow):
 
     def _test_llm(self) -> None:
         def work(_progress):
-            client = llm_extract.LLMClient.from_settings(self.conn)
+            conn = dbmod.connect()  # δικό του thread — δες σχόλιο στο _start_lookup
             try:
-                client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
-            except llm_extract.LLMError as exc:
-                if exc.kind != "model":
-                    raise
-                old = client.model
-                client.model = llm_extract.recover_model(self.conn, client)
-                client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
-                return f"Το μοντέλο «{old}» δεν ήταν διαθέσιμο — αυτόματη αλλαγή σε «{client.model}». Η σύνδεση λειτουργεί."
-            return f"Η σύνδεση με {client.provider} ({client.model}) λειτουργεί."
-        self._tasks.append(run_task(self, work, on_done=lambda msg: toast(self, msg, "ok"),
-                                    on_error=lambda msg: toast(self, msg, "danger", ms=0)))
+                client = llm_extract.LLMClient.from_settings(conn)
+                try:
+                    client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
+                except llm_extract.LLMError as exc:
+                    if exc.kind != "model":
+                        raise
+                    old = client.model
+                    client.model = llm_extract.recover_model(conn, client)
+                    client.complete_json("Απάντησε μόνο με JSON.", 'Επίστρεψε {"ok": true}', timeout=30)
+                    settings_store.set_value(conn, "llm_last_error", "")
+                    return f"Το μοντέλο «{old}» δεν ήταν διαθέσιμο — αυτόματη αλλαγή σε «{client.model}». Η σύνδεση λειτουργεί."
+                settings_store.set_value(conn, "llm_last_error", "")  # επιτυχής δοκιμή: σβήνει το παλιό μόνιμο banner
+                return f"Η σύνδεση με {client.provider} ({client.model}) λειτουργεί."
+            finally:
+                conn.close()
+
+        def done(msg: str) -> None:
+            self.busy.stop()
+            toast(self, msg, "ok")
+            self.reload_settings()  # μπορεί να άλλαξε το μοντέλο αυτόματα (recover_model) — δείξ' το στο dropdown
+            self._reload_notices()  # το μόνιμο banner σφάλματος πρέπει να εξαφανιστεί αμέσως, όχι στο επόμενο reload
+
+        def failed(msg):
+            self.busy.stop()
+            toast(self, msg, "danger")
+
+        self.busy.start("Δοκιμή σύνδεσης LLM…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _test_aade(self) -> None:
         user, pwd = settings_store.get(self.conn, "aade_user"), settings_store.get(self.conn, "aade_pass")
@@ -1158,11 +1243,100 @@ class MainWindow(QMainWindow):
             return lookup_aade.aade_login(user, pwd)
 
         def done(res):
+            self.busy.stop()
             if res.get("ok"):
                 toast(self, "Η σύνδεση στη ΑΑΔΕ (TAXISnet) πέτυχε.", "ok")
             else:
-                toast(self, lookup_aade.REASONS_EL.get(res.get("reason") or "", str(res.get("reason"))), "danger", ms=0)
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
+                toast(self, lookup_aade.REASONS_EL.get(res.get("reason") or "", str(res.get("reason"))), "danger")
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        self.busy.start("Δοκιμή σύνδεσης ΑΑΔΕ…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
+
+    # ------------------------------------------------------------------ Αντίγραφο ασφαλείας / Επαναφορά
+    def _backup_now(self) -> None:
+        def work(_progress):
+            return backup_mod.create_backup(config.db_path(), reason="manual")
+
+        def done(path) -> None:
+            self.busy.stop()
+            if path:
+                toast(self, f"Αντίγραφο ασφαλείας: {path.name}", "ok")
+            else:
+                toast(self, "Δεν βρέθηκε βάση δεδομένων για αντίγραφο.", "warn")
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        self.busy.start("Δημιουργία αντιγράφου ασφαλείας…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
+
+    def _restore_backup(self) -> None:
+        backups = backup_mod.list_backups(config.data_dir())
+        if not backups:
+            if QMessageBox.question(
+                self, "Επαναφορά", "Δεν βρέθηκαν αντίγραφα ασφαλείας στον φάκελο δεδομένων.\n\n"
+                "Θέλετε να επιλέξετε εσείς ένα αρχείο βάσης (.db) για επαναφορά;",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            ) == QMessageBox.StandardButton.Yes:
+                self._restore_from_chosen_file()
+            return
+        newest, when, size = backups[0]
+        answer = QMessageBox.question(
+            self, "Επαναφορά βάσης",
+            f"Επαναφορά από το πιο πρόσφατο αντίγραφο;\n\n{newest.name}\n"
+            f"{when:%d/%m/%Y %H:%M} · {size / 1024:.0f} KB\n\n"
+            "Η τρέχουσα βάση θα κρατηθεί ως αντίγραφο «pre-restore», οπότε η ενέργεια είναι αναστρέψιμη.\n\n"
+            "«Άνοιγμα» για να επιλέξετε δικό σας αρχείο βάσης.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Open,
+        )
+        if answer == QMessageBox.StandardButton.Open:
+            self._restore_from_chosen_file()
+            return
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._do_restore(newest)
+
+    def _restore_from_chosen_file(self) -> None:
+        start_dir = str(backup_mod.backup_dir(config.data_dir()))
+        path, _ = QFileDialog.getOpenFileName(self, "Επιλέξτε αρχείο βάσης για επαναφορά", start_dir,
+                                              "Βάση SQLite (*.db);;Όλα τα αρχεία (*.*)")
+        if not path:
+            return
+        chosen = Path(path)
+        if chosen.resolve() == config.db_path().resolve():
+            QMessageBox.warning(self, "Επαναφορά", "Επιλέξατε την τρέχουσα βάση — δεν έχει νόημα η επαναφορά από "
+                                                    "τον εαυτό της.")
+            return
+        if QMessageBox.question(
+            self, "Επαναφορά βάσης", f"Επαναφορά από:\n{chosen.name}\n\n"
+            "Η τρέχουσα βάση θα κρατηθεί ως αντίγραφο «pre-restore», οπότε η ενέργεια είναι αναστρέψιμη. Συνέχεια;",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._do_restore(chosen)
+
+    def _do_restore(self, source: Path) -> None:
+        """Συγχρονισμένα (όχι background thread): πρέπει να κλείσει/ξανανοίξει το `self.conn`, και το sqlite3
+        απαγορεύει να το κάνει αυτό άλλο thread από αυτό που το δημιούργησε (δες σχόλιο στο _start_lookup)."""
+        self.busy.start("Επαναφορά βάσης…")
+        try:
+            self.conn.close()
+            backup_mod.restore(source, config.db_path())
+            self.conn = dbmod.connect()
+        except Exception as exc:
+            self.conn = dbmod.connect()  # η εφαρμογή δεν πρέπει να μείνει χωρίς σύνδεση
+            self.busy.stop()
+            QMessageBox.critical(self, "Απέτυχε η επαναφορά", f"Η επαναφορά δεν ολοκληρώθηκε:\n\n{exc}")
+            return
+        self.busy.stop()
+        self.reload_all()
+        QMessageBox.information(self, "Επαναφορά", f"Έγινε επαναφορά από:\n{source.name}")
 
     # ------------------------------------------------------------------ Έλεγχος τώρα
     def _run_check(self) -> None:
@@ -1171,13 +1345,21 @@ class MainWindow(QMainWindow):
         self.run_status.setText("Έναρξη…")
 
         def work(progress):
-            return pipeline.run_pipeline("manual", on_progress=progress, conn=self.conn)
+            # ΧΩΡΙΣ conn=self.conn: αφήνουμε το pipeline να ανοίξει τη δική του σύνδεση σε αυτό το thread — το
+            # self.conn δημιουργήθηκε στο UI thread (δες σχόλιο στο _start_lookup). Το backup γίνεται μέσα στο
+            # ίδιο το pipeline (πριν από κάθε έλεγχο, χειροκίνητο ή προγραμματισμένο).
+            return pipeline.run_pipeline("manual", on_progress=progress)
 
         def done(stats):
             for b in self._run_buttons:
                 b.setEnabled(True)
             errs = stats.get("errors") or []
-            self.run_status.setText("Ολοκληρώθηκε ✓" if not errs else "Ολοκληρώθηκε με σημειώσεις: " + "· ".join(errs)[:200])
+            match = stats.get("match") or {}
+            added = match.get("added", 0)
+            summary = (f"{added} νέα matches" if added else "καμία νέα αντιστοίχιση") + \
+                (f" · {match['updated']} ενημερώθηκαν" if match.get("updated") else "")
+            base = f"Ολοκληρώθηκε ✓ — {summary}." if not errs else f"Ολοκληρώθηκε με σημειώσεις ({summary}): " + "· ".join(errs)[:200]
+            self.run_status.setText(base)
             self.reload_all()
 
         def failed(msg):
@@ -1224,7 +1406,7 @@ class MainWindow(QMainWindow):
         try:
             path = ensure_manual(config.data_dir())
         except Exception as exc:
-            toast(self, f"Το εγχειρίδιο δεν μπόρεσε να ανοίξει: {exc}", "danger", ms=0)
+            toast(self, f"Το εγχειρίδιο δεν μπόρεσε να ανοίξει: {exc}", "danger")
             return
         _reveal(path)
 
@@ -1243,8 +1425,9 @@ class MainWindow(QMainWindow):
                 lambda: self.cal_grid_box, lambda: (self._show_page("calendar"), self._close_cal_day())),
             Step("4. Νέα & Matches", "Κάθε άρθρο δείχνει ποιους πελάτες αφορά και γιατί. Διπλό κλικ ανοίγει προεπισκόπηση "
                 "πριν τον σύνδεσμο — ποτέ απευθείας browser.", lambda: self.news_table, lambda: self._show_page("news")),
-            Step("5. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν, με αυτόματη εναλλαγή), πηγές ειδήσεων, "
-                "προγραμματισμός και κύριος κωδικός.", lambda: self.menu.button("settings"), lambda: self._show_page("settings")),
+            Step("5. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν — φαίνονται πρώτα στη λίστα — με αυτόματη "
+                "εναλλαγή αν κάποιο σταματήσει να δουλεύει), πηγές ειδήσεων, προγραμματισμός, κύριος κωδικός και αντίγραφο "
+                "ασφαλείας/επαναφορά της βάσης.", lambda: self.menu.button("settings"), lambda: self._show_page("settings")),
         ]
 
     def start_tour(self) -> None:

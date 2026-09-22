@@ -10,12 +10,14 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
 from ..business_profiles import credentials as client_creds, service as clients, vies
 from ..identifiers import is_valid_afm, normalize_afm
+from .icons import icon
 from .theme import CURRENT
 from .workers import run_task
 
@@ -27,6 +29,7 @@ class ClientDialog(QDialog):
         super().__init__(parent)
         self._conn = conn
         self.result_afm = ""
+        self.excel_path = ""  # ο καλών ελέγχει αυτό ΠΡΩΤΑ μετά το exec() — βλ. _pick_excel
         self._last_looked = ""
         self._vies_task = None
         self.setWindowTitle("Νέος πελάτης")
@@ -66,6 +69,22 @@ class ClientDialog(QDialog):
         form.addRow("", hint)
         root.addLayout(form)
 
+        line = QFrame()
+        line.setObjectName("line")
+        line.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(line)
+
+        bulk = QHBoxLayout()
+        note = QLabel("Έχετε πολλούς πελάτες;")
+        note.setObjectName("muted")
+        bulk.addWidget(note)
+        excel_btn = QPushButton(icon("excel", CURRENT.muted, 16), "  Εισαγωγή από Excel…")
+        excel_btn.setToolTip("Μαζική εισαγωγή πελατών (και προαιρετικά κωδικών TAXISnet) από αρχείο Excel/CSV")
+        excel_btn.clicked.connect(self._pick_excel)
+        bulk.addWidget(excel_btn)
+        bulk.addStretch()
+        root.addLayout(bulk)
+
         buttons = QDialogButtonBox()
         buttons.addButton("Προσθήκη", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton("Άκυρο", QDialogButtonBox.ButtonRole.RejectRole)
@@ -73,6 +92,13 @@ class ClientDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         self.afm.setFocus()
+
+    def _pick_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Εισαγωγή από Excel", "", "Excel/CSV (*.xlsx *.xlsm *.csv *.txt)")
+        if not path:
+            return
+        self.excel_path = path
+        self.accept()  # ο καλών (MainWindow.on_add_client) βλέπει το excel_path και τρέχει την εισαγωγή
 
     def _say(self, text: str, bad: bool = False) -> None:
         self.status_line.setText(text)

@@ -22,9 +22,11 @@ class SettingDef:
 
 
 DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
-    SettingDef("llm_provider", "Πάροχος LLM", default="groq"),
+    # OpenRouter προεπιλογή (όχι Groq): έχει πραγματικά δωρεάν μοντέλα (':free') χωρίς να χρειάζεται το Groq να
+    # είναι απαραίτητο για να δουλέψει η ανάλυση άρθρων — ο χρήστης μπορεί να αλλάξει πάροχο ελεύθερα στις Ρυθμίσεις.
+    SettingDef("llm_provider", "Πάροχος LLM", default="openrouter"),
     SettingDef("llm_model_groq", "Μοντέλο Groq", default="llama-3.3-70b-versatile"),
-    SettingDef("llm_model_openrouter", "Μοντέλο OpenRouter", default="meta-llama/llama-3.3-70b-instruct"),
+    SettingDef("llm_model_openrouter", "Μοντέλο OpenRouter", default="meta-llama/llama-3.3-70b-instruct:free"),
     SettingDef("groq_api_key", "Groq API key", secret=True, env="GROQ_API_KEY"),
     SettingDef("openrouter_api_key", "OpenRouter API key", secret=True, env="OPENROUTER_API_KEY"),
     SettingDef("business_portal_key", "Business Portal (ΓΕΜΗ) API key", secret=True, env="BUSINESS_PORTAL_KEY"),

@@ -39,7 +39,7 @@ def test_setting_priority_db_over_env(conn, monkeypatch):
     assert settings_store.get(conn, "groq_api_key") == "from-env"
     settings_store.set_value(conn, "groq_api_key", "from-db")
     assert settings_store.get(conn, "groq_api_key") == "from-db"
-    assert settings_store.get(conn, "llm_provider") == "groq"      # default
+    assert settings_store.get(conn, "llm_provider") == "openrouter"      # default (όχι Groq — βλ. settings_store.py)
 
 
 def test_unprotected_keyfile_roundtrip(tmp_path, monkeypatch):

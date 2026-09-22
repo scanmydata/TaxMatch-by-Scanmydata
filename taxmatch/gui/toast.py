@@ -1,7 +1,8 @@
-"""Ειδοποιήσεις σαν «side flash message» (πλευρικό μήνυμα κάτω-δεξιά), αντί για native QMessageBox.
+"""Ειδοποιήσεις σαν «side flash message» (πλευρικό μήνυμα πάνω-δεξιά), αντί για native QMessageBox.
 
-Ίδια ιδέα με το `toast()`/`.toasts-host` του παλιού web UI (`web/static/js/app.js`): στοίβα μηνυμάτων κάτω-δεξιά,
-έγχρωμο περίγραμμα ανά επίπεδο (ok/warn/danger), αυτόματο κλείσιμο, ή με «×». Ζει ως παιδί ΤΟΥ ΠΑΡΑΘΥΡΟΥ όπου
+Παρόμοια ιδέα με το `toast()`/`.toasts-host` του παλιού web UI (`web/static/js/app.js`, εκεί κάτω-δεξιά) — εδώ
+πάνω-δεξιά, πιο κοντά στα κουμπιά ενεργειών (ρητό αίτημα χρήστη, 2026-09-22): στοίβα μηνυμάτων, έγχρωμο περίγραμμα
+ανά επίπεδο (ok/warn/danger), αυτόματο κλείσιμο, ή με «×». Ζει ως παιδί ΤΟΥ ΠΑΡΑΘΥΡΟΥ όπου
 συνέβη η ενέργεια (`MainWindow` ή οποιοδήποτε `QDialog`) — όχι ξεχωριστό top-level παράθυρο, ώστε να μένει πάντα
 πάνω από το σωστό περιεχόμενο και να κλείνει μαζί του.
 
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLay
 
 from .theme import CURRENT
 
-_DEFAULT_MS = {"ok": 4200, "warn": 6000, "danger": 8000}
+_DEFAULT_MS = {"ok": 4200, "warn": 6000, "danger": 5000}
 
 
 class _ToastItem(QFrame):
@@ -42,7 +43,8 @@ class _ToastItem(QFrame):
 
 
 class ToastHost(QWidget):
-    """Μία στοίβα toasts, κάτω-δεξιά μέσα στο παράθυρο-γονέα."""
+    """Μία στοίβα toasts, πάνω-δεξιά μέσα στο παράθυρο-γονέα (ρητό αίτημα χρήστη, 2026-09-22 — πιο κοντά στο
+    πάνω μενού/κουμπιά όπου γίνεται η ενέργεια, όχι κάτω-δεξιά όπως το παλιό web UI)."""
 
     _MARGIN = 18
     _WIDTH = 340
@@ -66,8 +68,8 @@ class ToastHost(QWidget):
         self.adjustSize()
         h = max(self.sizeHint().height(), 1)
         x = self._host.width() - self._WIDTH - self._MARGIN
-        y = self._host.height() - h - self._MARGIN
-        self.setGeometry(max(0, x), max(0, y), self._WIDTH, h)
+        y = self._MARGIN
+        self.setGeometry(max(0, x), y, self._WIDTH, h)
         self.raise_()
 
     def add(self, message: str, level: str, ms: int) -> None:
@@ -97,8 +99,9 @@ class ToastHost(QWidget):
 def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = None) -> None:
     """Δείχνει ένα πλευρικό μήνυμα πάνω στο `window` (`MainWindow` ή οποιοδήποτε `QDialog`).
 
-    `level`: "ok" (πράσινο) | "warn" (πορτοκαλί) | "danger" (κόκκινο). `ms=0` το αφήνει μέχρι να κλείσει
-    χειροκίνητα με το «×» — χρήσιμο για σφάλματα που θέλουμε σίγουρα να προσέξει ο χρήστης.
+    `level`: "ok" (πράσινο) | "warn" (πορτοκαλί) | "danger" (κόκκινο, εξαφανίζεται μόνο του μετά από 5"). Πάντα
+    κλείνει και χειροκίνητα με το «×». `ms=0` το αφήνει μέχρι να κλείσει μόνο χειροκίνητα — δεν το χρησιμοποιούμε
+    πια για σφάλματα (ο χρήστης θέλει να εξαφανίζονται μόνα τους), κρατιέται μόνο ως δυνατότητα.
     """
     host = getattr(window, "_toast_host", None)
     if host is None:

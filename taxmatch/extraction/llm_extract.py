@@ -52,8 +52,9 @@ MIN_SECONDS_BETWEEN_CALLS = 2.0
 
 
 class LLMError(Exception):
-    """kind: auth | model | rate_limit | network | bad_response
-    (`model`: το μοντέλο δεν υπάρχει ή δεν επιτρέπεται για αυτό το API key — ρύθμιση, όχι σφάλμα του άρθρου)"""
+    """kind: auth | model | rate_limit | credits | network | bad_response
+    (`model`: το μοντέλο δεν υπάρχει ή δεν επιτρέπεται για αυτό το API key — ρύθμιση, όχι σφάλμα του άρθρου.
+    `credits`: εξαντλήθηκε το υπόλοιπο/όριο χρήσης του λογαριασμού — ούτε αυτό είναι σφάλμα του άρθρου.)"""
 
     def __init__(self, kind: str, message: str, retry_after: float = 0.0):
         super().__init__(message)
@@ -75,7 +76,7 @@ class LLMClient:
 
     @classmethod
     def from_settings(cls, conn: sqlite3.Connection, session: Optional[requests.Session] = None) -> "LLMClient":
-        provider = settings_store.get(conn, "llm_provider") or "groq"
+        provider = settings_store.get(conn, "llm_provider")
         cfg = PROVIDERS.get(provider)
         if not cfg:
             raise NotConfigured(f"Άγνωστος πάροχος LLM: {provider}")
@@ -112,8 +113,21 @@ class LLMClient:
                                     f"Ρυθμίσεις ότι το κλειδί {self.provider} είναι σωστά αντιγραμμένο (χωρίς κενά "
                                     f"στην αρχή/τέλος), ότι δεν έχει ανακληθεί/λήξει στον λογαριασμό σας, και ότι "
                                     f"πατήσατε «Αποθήκευση κλειδιών».")
+        if resp.status_code == 402:
+            raise LLMError("credits", f"Ανεπαρκές υπόλοιπο/πιστωτικά στον λογαριασμό {self.provider} (HTTP 402). "
+                                      f"Προσθέστε credits στον πάροχο, ή επιλέξτε δωρεάν μοντέλο στις Ρυθμίσεις.")
         if resp.status_code == 429:
-            raise LLMError("rate_limit", "HTTP 429: όριο αιτημάτων", _retry_after(resp))
+            if _is_quota_error(resp.text):
+                if self.provider == "openrouter" and is_free_model(self.provider, self.model):
+                    raise LLMError("credits", f"Ξεπεράσατε το ημερήσιο/ανά λεπτό όριο αιτημάτων των δωρεάν "
+                                              f"μοντέλων στο OpenRouter — αυτό το όριο είναι ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ, όχι "
+                                              f"ανά μοντέλο (αλλαγή μοντέλου δεν βοηθά). Είτε περιμένετε να "
+                                              f"ανανεωθεί (ανά ημέρα), είτε προσθέστε credits στο openrouter.ai "
+                                              f"για πολύ μεγαλύτερο όριο δωρεάν αιτημάτων.")
+                raise LLMError("credits", f"Ξεπεράσατε το όριο χρήσης (quota) του λογαριασμού {self.provider} — "
+                                          f"δεν είναι απλή καθυστέρηση, το όριο ανανεώνεται αργότερα (π.χ. ανά "
+                                          f"ημέρα/μήνα). Δείτε το πρόγραμμα/υπόλοιπό σας στον πάροχο.")
+            raise LLMError("rate_limit", "HTTP 429: όριο αιτημάτων — προσωρινό, θα ξαναδοκιμαστεί.", _retry_after(resp))
         if resp.status_code >= 400:
             raise LLMError("bad_response", f"HTTP {resp.status_code}: {resp.text[:200]}")
         try:
@@ -128,6 +142,17 @@ def _is_model_error(status: int, text: str) -> bool:
         return False
     return any(k in t for k in ("model_not_found", "does not exist", "not found", "decommissioned", "deprecated",
                                 "blocked at the organization", "no access", "not supported", "model_permission"))
+
+
+def _is_quota_error(text: str) -> bool:
+    """HTTP 429 που ΔΕΝ είναι απλή προσωρινή καθυστέρηση, αλλά εξάντληση ορίου χρήσης (ημερήσιο/μηνιαίο quota,
+    tokens-per-day) — ο χρήστης πρέπει να το ξέρει, γιατί το «περίμενε λίγο και ξαναδοκίμασε» δεν αρκεί.
+    Περιλαμβάνει και τη διατύπωση του OpenRouter για το όριο των δωρεάν (':free') μοντέλων, π.χ.
+    «Rate limit exceeded: free-models-per-day» / «add 10 credits to unlock» / «try again tomorrow»."""
+    t = (text or "").lower()
+    return any(k in t for k in ("quota", "insufficient_quota", "tokens per day", "tpd", "requests per day", "rpd",
+                                "daily limit", "monthly limit", "credit", "free-models-per-day",
+                                "requests per minute", "rpm", "try again tomorrow", "requests today"))
 
 
 def _models_url(chat_url: str) -> str:
@@ -322,6 +347,27 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                             on_progress(f"Αλλαγή μοντέλου σε {new}")
                         attempts = 0
                         continue
+                    stats["stopped"] = str(exc)
+                    return _finish(conn, stats, cutoff)
+                if exc.kind == "credits":
+                    # Στο OpenRouter το όριο των δωρεάν (':free') μοντέλων είναι ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ (requests/day και
+                    # requests/minute), ΟΧΙ ανά μοντέλο — αλλαγή σε άλλο δωρεάν μοντέλο θα χτυπήσει το ίδιο όριο
+                    # αμέσως, άρα δεν έχει νόημα να δοκιμάσουμε. Σε άλλους παρόχους (π.χ. Groq) το όριο ΜΠΟΡΕΙ να
+                    # είναι ανά μοντέλο, οπότε μία απόπειρα αυτόματης εναλλαγής αξίζει πριν σταματήσουμε εντελώς.
+                    if not recovered and client.provider != "openrouter":
+                        recovered = True
+                        try:
+                            new = pick_model(client.provider, list_models(client), avoid=client.model, free_only=True)
+                        except LLMError:
+                            new = ""
+                        if new:
+                            client.model = new
+                            settings_store.set_value(conn, PROVIDERS[client.provider]["model"], new)
+                            stats["model"] = new
+                            if on_progress:
+                                on_progress(f"Εξαντλήθηκε το όριο χρήσης — αυτόματη αλλαγή σε {new}")
+                            attempts = 0
+                            continue
                     stats["stopped"] = str(exc)
                     return _finish(conn, stats, cutoff)
                 if exc.kind == "auth":

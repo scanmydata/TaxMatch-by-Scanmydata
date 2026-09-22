@@ -2,6 +2,7 @@
 βάση και ελέγχει ότι δεν σκάει και ότι δείχνει σωστά δεδομένα. ΔΕΝ προσομοιώνει κλικ χρήστη (αυτό επαληθεύτηκε
 οπτικά, χειροκίνητα, σε πραγματικό παράθυρο Windows) — εδώ ελέγχεται η κατασκευή/φόρτωση των widgets."""
 import os
+from pathlib import Path
 
 import pytest
 
@@ -100,26 +101,83 @@ def test_settings_page_shows_saved_status_for_credential_fields_without_revealin
     assert window._settings_fields["groq_api_key"].text() == ""
 
 
+def _pump_until(condition, tries=50, step=0.05):
+    import time
+    for _ in range(tries):
+        QApplication.processEvents()
+        if condition():
+            return True
+        time.sleep(step)
+    return False
+
+
 def test_llm_model_refresh_populates_combo_and_keeps_current_selection(window, conn, monkeypatch):
     settings_store.set_value(conn, "llm_provider", "groq")
     settings_store.set_value(conn, "groq_api_key", "gsk_dummy_value_not_real")
     settings_store.set_value(conn, "llm_model_groq", "llama-3.3-70b-versatile")
     window.reload_settings()
+    assert window.llm_model_groq.count() == 1  # μόνο το αποθηκευμένο μοντέλο, πριν από οποιοδήποτε refresh
 
     from taxmatch.extraction import llm_extract as llm_extract_mod
     monkeypatch.setattr(llm_extract_mod, "list_models",
                         lambda client, timeout=30: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
 
     window._refresh_llm_models()
-    # Το run_task τρέχει σε πραγματικό QThread: περιμένουμε το event loop να προλάβει το αποτέλεσμα.
-    import time
-    for _ in range(50):
-        QApplication.processEvents()
-        if window.llm_model_groq.count() > 0:
-            break
-        time.sleep(0.05)
-    assert window.llm_model_groq.count() == 2
+    # Το run_task τρέχει σε πραγματικό QThread: περιμένουμε το event loop να προλάβει το αποτέλεσμα. Το combo
+    # ξεκινά ήδη με 1 στοιχείο (το αποθηκευμένο μοντέλο) — περιμένουμε συγκεκριμένα τα 2 του refresh, όχι απλώς
+    # "μη άδειο".
+    assert _pump_until(lambda: window.llm_model_groq.count() == 2)
     assert window._combo_model_value(window.llm_model_groq) == "llama-3.3-70b-versatile"
+
+
+def test_start_lookup_uses_its_own_db_connection_not_the_uis(window, conn):
+    """`_start_lookup`'s `work()` χρησιμοποιούσε το `self.conn` (φτιαγμένο στο UI thread) μέσα σε πραγματικό
+    background QThread· το sqlite3 απαγορεύει χρήση μιας σύνδεσης από ΑΛΛΟ thread από αυτό που τη δημιούργησε
+    («SQLite objects created in a thread can only be used in that same thread») — αυτό το test τρέχει το
+    πραγματικό background thread (όχι mock) και επιβεβαιώνει ότι ΔΕΝ σκάει."""
+    service.add(conn, AFM, "ΔΟΚΙΜΗ")
+    window._start_lookup([AFM])
+
+    def finished() -> bool:
+        text = window.run_status.text()
+        return text == "Η ανάκτηση στοιχείων ολοκληρώθηκε." or text.startswith("Σφάλμα")
+
+    assert _pump_until(finished)
+    assert window.run_status.text() == "Η ανάκτηση στοιχείων ολοκληρώθηκε."
+
+
+def test_test_llm_uses_its_own_db_connection_not_the_uis(window, conn):
+    """Ίδιο πρόβλημα με το `_start_lookup` παραπάνω: το `_test_llm`'s `work()` διάβαζε ρυθμίσεις μέσω του
+    `self.conn` (UI thread) μέσα σε background QThread. Χωρίς κλειδί API, το σωστό αποτέλεσμα είναι ένα σαφές
+    μήνυμα «δεν έχει οριστεί API key» — ΟΧΙ το τεχνικό σφάλμα cross-thread sqlite3."""
+    settings_store.set_value(conn, "openrouter_api_key", "")
+    settings_store.set_value(conn, "groq_api_key", "")
+    window._toast_host = None  # νέο host ώστε να μετρήσουμε καθαρά τα toasts αυτού του test
+    window._test_llm()
+    assert _pump_until(lambda: window._toast_host is not None and window._toast_host._box.count() > 0)
+    # Το toast δεν εκθέτει το κείμενό του ως attribute δημόσια· το πρώτο widget της γραμμής του είναι το QLabel.
+    label = window._toast_host._box.itemAt(0).widget().layout().itemAt(0).widget()
+    assert "thread" not in label.text().lower() and "sqlite" not in label.text().lower()
+    assert "API key" in label.text() or "δεν έχει οριστεί" in label.text()
+
+
+def test_test_llm_success_clears_the_stale_error_banner(window, conn, monkeypatch):
+    """Το πάνω banner («Η ανάλυση άρθρων με LLM δεν δουλεύει: …») διαβάζει το `llm_last_error` — έμενε μόνιμα ορατό
+    ακόμη και μετά από ΕΠΙΤΥΧΗΜΕΝΗ «Δοκιμή LLM», γιατί το gui/ (σε αντίθεση με το web/) δεν το καθάριζε ποτέ σε
+    επιτυχία. Πρέπει να εξαφανίζεται αμέσως, χωρίς να χρειαστεί να ξανανοίξει η εφαρμογή."""
+    settings_store.set_value(conn, "openrouter_api_key", "sk-or-dummy")
+    settings_store.set_value(conn, "llm_last_error", "παλιό σφάλμα πιστοποίησης")
+    window._reload_notices()
+    assert window.notices_box.count() >= 1
+
+    from taxmatch.extraction.llm_extract import LLMClient
+    monkeypatch.setattr(LLMClient, "complete_json", lambda self, *a, **k: '{"ok": true}')
+
+    window._test_llm()
+    # Περιμένουμε το ΠΑΡΑΤΗΡΗΣΙΜΟ αποτέλεσμα στο UI (όχι απλώς τη γραφή στη βάση από το background thread — αυτή
+    # γίνεται ορατή σε ΑΛΛΕΣ συνδέσεις πριν προλάβει να τρέξει το on_done/_reload_notices() στο UI thread).
+    assert _pump_until(lambda: window.notices_box.count() == 0)
+    assert settings_store.get(conn, "llm_last_error") == ""
 
 
 def test_reload_calendar_does_not_block_on_slow_network(window, conn, monkeypatch):
@@ -312,3 +370,41 @@ def test_run_task_callbacks_run_on_the_ui_thread_not_the_worker_thread(qapp):
     assert seen["callback_thread"] == main_thread
     assert seen["worker_thread"] != main_thread
     del task
+
+
+def test_client_dialog_excel_button_sets_path_and_accepts(qapp, conn, monkeypatch):
+    """«Νέος πελάτης» -> «Εισαγωγή από Excel…» (ίδιο pattern με το etimologio bridge): δεν κάνει μόνο του την
+    εισαγωγή — απλώς κλείνει τον διάλογο σαν Accepted με `excel_path` ορισμένο, ώστε ο καλών
+    (MainWindow.on_add_client) να ξέρει να τρέξει την εισαγωγή Excel αντί να δημιουργήσει έναν πελάτη."""
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    from taxmatch.gui.client_dialog import ClientDialog
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("C:/fake/clients.xlsx", "")))
+    dlg = ClientDialog(conn)
+    dlg._pick_excel()
+    assert dlg.excel_path == "C:/fake/clients.xlsx"
+    assert dlg.result() == QDialog.DialogCode.Accepted
+
+
+def test_add_client_dialog_with_excel_path_routes_to_excel_import(window, conn, monkeypatch):
+    """Το `on_add_client` πρέπει να ελέγχει ΠΡΩΤΑ το `excel_path` του διαλόγου — αν είναι ορισμένο, τρέχει την
+    εισαγωγή Excel αντί να ψάξει `result_afm` (που θα ήταν κενό σε αυτό το μονοπάτι)."""
+    from taxmatch.gui import main_window as mw_mod
+
+    calls = []
+
+    class FakeDialog:
+        def __init__(self, conn, parent):
+            self.excel_path = "C:/fake/clients.xlsx"
+            self.result_afm = ""
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(mw_mod, "ClientDialog", FakeDialog)
+    monkeypatch.setattr(window, "_import_excel_from_path", lambda path: calls.append(path))
+
+    window.on_add_client()
+    assert len(calls) == 1 and calls[0] == Path("C:/fake/clients.xlsx")

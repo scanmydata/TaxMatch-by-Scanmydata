@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 import requests
 
+from . import backup as backup_mod
 from . import config, db, settings_store
 from .business_profiles import service as clients
 from .extraction import llm_extract
@@ -72,6 +73,7 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
     progress = on_progress or (lambda _m: None)
     try:
         with run_lock():
+            backup_mod.create_backup(config.db_path(), reason=trigger)  # πριν αγγίξουμε οτιδήποτε γράφει
             run_id = conn.execute("INSERT INTO runs(trigger, started_at) VALUES (?,?)", (trigger, db.utcnow())).lastrowid
             stats: dict = {}
             errors: list[str] = []

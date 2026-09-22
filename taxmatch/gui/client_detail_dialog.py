@@ -11,9 +11,11 @@ from PySide6.QtWidgets import (
     QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from .. import db as dbmod
 from .. import deadlines
 from ..business_profiles import credentials as client_creds, service as clients
 from ..matching import engine
+from .busy import BusyOverlay
 from .icons import dot_icon, icon
 from .news_dialog import NewsDialog
 from .theme import CURRENT
@@ -35,6 +37,7 @@ class ClientDetailDialog(QDialog):
         self.setWindowTitle(b["name"] or afm)
         self.resize(720, 640)
         self._tasks: list = []
+        self.busy = BusyOverlay(self)
 
         root = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -179,13 +182,24 @@ class ClientDetailDialog(QDialog):
             return
 
         def work(_progress):
-            return client_creds.test(self.conn, self.afm)
+            conn = dbmod.connect()  # δικό του thread — το self.conn δημιουργήθηκε στο UI thread
+            try:
+                return client_creds.test(conn, self.afm)
+            finally:
+                conn.close()
 
         def done(result):
+            self.busy.stop()
             ok, msg = result
-            toast(self, msg, "ok" if ok else "danger", ms=None if ok else 0)
+            toast(self, msg, "ok" if ok else "danger")
             self._reload()
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        self.busy.start("Δοκιμή σύνδεσης…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _clear_credentials(self) -> None:
         client_creds.clear(self.conn, self.afm)
@@ -224,16 +238,27 @@ class ClientDetailDialog(QDialog):
 
     def _start_lookup(self) -> None:
         def work(_progress):
+            conn = dbmod.connect()  # δικό του thread — το self.conn δημιουργήθηκε στο UI thread
             try:
-                out = clients.lookup_and_store(self.conn, self.afm)
-            except KeyError:
-                return None
-            engine.rematch(self.conn)
-            return out
+                try:
+                    out = clients.lookup_and_store(conn, self.afm)
+                except KeyError:
+                    return None
+                engine.rematch(conn)
+                return out
+            finally:
+                conn.close()
 
         def done(_out):
+            self.busy.stop()
             self._reload()
-        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger", ms=0)))
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        self.busy.start("Ανάκτηση στοιχείων…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _delete_client(self) -> None:
         if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;") != QMessageBox.StandardButton.Yes:

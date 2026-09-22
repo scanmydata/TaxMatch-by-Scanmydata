@@ -195,7 +195,7 @@ def test_legal_form_from_name():
 
 def test_notices_show_and_clear_themselves(conn):
     assert [n["level"] for n in notices.collect(conn)] == ["warn"]            # δεν υπάρχει LLM key
-    settings_store.set_value(conn, "groq_api_key", "k")
+    settings_store.set_value(conn, "openrouter_api_key", "k")                 # openrouter είναι ο προεπιλεγμένος πάροχος
     assert notices.collect(conn) == []
     settings_store.set_value(conn, "llm_last_error", "Το μοντέλο «x» δεν είναι διαθέσιμο")
     n = notices.collect(conn)
@@ -303,6 +303,68 @@ def test_no_usable_model_stops_with_clear_message_without_burning_tries(conn):
     assert conn.execute("SELECT extraction_status, extraction_tries FROM articles").fetchone()[:] == ("pending", 0)
 
 
+# ---------------------------------------------------------------- LLM: εξαντλημένο υπόλοιπο/όριο χρήσης
+
+def test_402_raises_credits_error_not_generic_bad_response():
+    s = FakeSession().route("chat/completions", FakeResponse(b'{"error":"insufficient balance"}', 402))
+    client = LLMClient("openrouter", "k", "m", "https://openrouter.ai/api/v1/chat/completions", s)
+    with pytest.raises(LLMError) as exc_info:
+        client.complete_json("s", "u")
+    assert exc_info.value.kind == "credits" and "402" in str(exc_info.value)
+
+
+def test_429_with_quota_wording_is_credits_not_a_transient_rate_limit():
+    s = FakeSession().route("chat/completions", FakeResponse(b'{"error":"insufficient_quota: daily limit reached"}', 429))
+    client = LLMClient("openrouter", "k", "m", "https://openrouter.ai/api/v1/chat/completions", s)
+    with pytest.raises(LLMError) as exc_info:
+        client.complete_json("s", "u")
+    assert exc_info.value.kind == "credits"
+
+
+def test_429_without_quota_wording_stays_a_transient_rate_limit():
+    s = FakeSession().route("chat/completions", FakeResponse(b"", 429, {"retry-after": "3"}))
+    client = LLMClient("groq", "k", "m", "https://api.groq.com/openai/v1/chat/completions", s)
+    with pytest.raises(LLMError) as exc_info:
+        client.complete_json("s", "u")
+    assert exc_info.value.kind == "rate_limit"
+
+
+def test_exhausted_credits_switches_model_on_groq_but_not_openrouter(conn):
+    """Groq: ένα μοντέλο μπορεί να έχει δικό του ξεχωριστό όριο — δοκιμάζουμε ΑΛΛΟ δωρεάν μοντέλο πριν σταματήσουμε
+    (ίδια λογική με το «μοντέλο δεν υπάρχει»). OpenRouter: το όριο των δωρεάν (':free') μοντέλων είναι ΑΝΑ
+    ΛΟΓΑΡΙΑΣΜΟ, όχι ανά μοντέλο — αλλαγή μοντέλου θα χτυπήσει το ίδιο όριο αμέσως, άρα ΔΕΝ τη δοκιμάζουμε καν."""
+    ok = llm_reply({"relevant": True, "summary": "Σ", "scope": {"type": "all"}})
+
+    def chat_groq(url, **kw):
+        if kw["json"]["model"] == "llama-3.3-70b-versatile":
+            return FakeResponse(b'{"error":"quota exceeded"}', 429)
+        return ok
+
+    add_article(conn)
+    s_groq = (FakeSession().route("/models", FakeResponse(json_data={"data": [
+                {"id": "llama-3.3-70b-versatile"}, {"id": "openai/gpt-oss-120b"}]}))
+             .route("chat/completions", chat_groq))
+    client_groq = LLMClient("groq", "k", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/chat/completions", s_groq)
+    out = llm_extract.extract_pending(conn, client_groq, 10, 30, sleep=lambda _s: None)
+    assert out["stopped"] == "" and out["done"] == 1 and out["model"] == "openai/gpt-oss-120b"
+    assert settings_store.get(conn, "llm_model_groq") == "openai/gpt-oss-120b"
+
+    conn.execute("DELETE FROM articles")
+    add_article(conn, url="https://x.gr/2")
+
+    def chat_or(url, **kw):
+        return FakeResponse(b'{"error":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock."}', 429)
+
+    s_or = (FakeSession().route("/models", FakeResponse(json_data={"data": [
+              {"id": "meta-llama/llama-3.3-70b-instruct:free"}, {"id": "deepseek/deepseek-chat-v3.1:free"}]}))
+           .route("chat/completions", chat_or))
+    client_or = LLMClient("openrouter", "k", "meta-llama/llama-3.3-70b-instruct:free", "https://openrouter.ai/api/v1/chat/completions", s_or)
+    out = llm_extract.extract_pending(conn, client_or, 10, 30, sleep=lambda _s: None)
+    assert out["model"] == "meta-llama/llama-3.3-70b-instruct:free"  # ΔΕΝ άλλαξε
+    assert "ΑΝΑ ΛΟΓΑΡΙΑΣΜΟ" in out["stopped"]
+    assert settings_store.get(conn, "llm_model_openrouter") != "deepseek/deepseek-chat-v3.1:free"
+
+
 def test_json_mode_rejected_falls_back_to_plain_completion(conn):
     calls = []
 
@@ -393,6 +455,7 @@ def test_client_pages_show_activity_state_and_filters(conn):
 
 def test_llm_test_button_switches_model_and_reports_it(conn, monkeypatch):
     _, c = make_web()
+    settings_store.set_value(conn, "llm_provider", "groq")  # το default άλλαξε σε openrouter
     settings_store.set_value(conn, "groq_api_key", "k")
     settings_store.set_value(conn, "llm_last_error", "παλιό σφάλμα")
     ok = llm_reply({"ok": True})

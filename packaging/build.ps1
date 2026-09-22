@@ -26,6 +26,29 @@ if (-not $SkipTests) { & $py -m pytest; if ($LASTEXITCODE -ne 0) { throw "Τα t
 # 3. εικονίδια από το λογότυπο
 & $py packaging\make_icons.py
 
+# 3b. version_info.txt (Windows FileVersion/ProductVersion) από το ίδιο __version__ — ΠΟΤΕ στο χέρι: ξέμεινε
+# hardcoded στο 0.3.1.0 ενώ το __version__ ήταν ήδη 0.3.2 (2026-09-23), το installer.exe έδειχνε λάθος αριθμό.
+$parts = ($version -split '\.') + @('0', '0', '0', '0') | Select-Object -First 4
+$verTuple = $parts -join ', '
+$verDots = $parts -join '.'
+@"
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=($verTuple), prodvers=($verTuple), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040804b0', [
+      StringStruct('CompanyName', 'ScanMyData'),
+      StringStruct('FileDescription', 'TaxMatch by ScanMyData'),
+      StringStruct('FileVersion', '$verDots'),
+      StringStruct('InternalName', 'TaxMatch'),
+      StringStruct('OriginalFilename', 'TaxMatch.exe'),
+      StringStruct('ProductName', 'TaxMatch by ScanMyData'),
+      StringStruct('ProductVersion', '$verDots')])]),
+    VarFileInfo([VarStruct('Translation', [0x0408, 1200])])
+  ]
+)
+"@ | Set-Content -LiteralPath "packaging\version_info.txt" -Encoding utf8
+
 # 4. PyInstaller
 if (Test-Path dist) { Remove-Item -LiteralPath dist -Recurse -Force }
 if (Test-Path build) { Remove-Item -LiteralPath build -Recurse -Force }

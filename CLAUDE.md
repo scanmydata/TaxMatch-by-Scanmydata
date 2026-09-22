@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 220 tests, ~20s, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 236 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -37,8 +37,9 @@ taxmatch/
     client_dialog.py            «Νέος πελάτης»: ΑΦΜ + live VIES lookup (background) + προαιρετικοί κωδικοί TAXISnet
     client_detail_dialog.py     καρτέλα πελάτη: προφίλ/κωδικοί/προθεσμίες/matches, tabs
     news_dialog.py              προεπισκόπηση άρθρου/υποχρέωσης ΠΡΙΝ τον εξωτερικό σύνδεσμο (QDesktopServices.openUrl μόνο με ρητό κλικ)
-    toast.py                    `toast(window, msg, level, ms)` — «side flash message» κάτω-δεξιά (ίδια ιδέα με το toast() του παλιού
-                               web UI)· ΓΙ' ΑΥΤΟ αντί για `QMessageBox.information/warning` σε κάθε νέο κώδικα (βλ. §Κανόνες)
+    toast.py                    `toast(window, msg, level, ms)` — «side flash message» πάνω-δεξιά (2026-09-23: μετακινήθηκε εκεί από
+                               κάτω-δεξιά, ρητό αίτημα χρήστη· το παλιό web UI παραμένει κάτω-δεξιά)· ΓΙ' ΑΥΤΟ αντί για
+                               `QMessageBox.information/warning` σε κάθε νέο κώδικα (βλ. §Κανόνες)
     theme.py, icons.py, widgets.py, table_filter.py, tour.py, unlock.py, busy.py, tray.py, i18n.py, side_menu.py, manual.py
                                ΑΝΤΙΓΡΑΦΗ+προσαρμογή από `mydata-etimologio-bridge/desktop/src/timologio/gui/` — ίδιο θέμα/εικονίδια/
                                φίλτρα στηλών (χωνί, στυλ Excel)/page tour/εγχειρίδιο PDF (QTextDocument+QPdfWriter, όχι εξωτερική βιβλιοθήκη)·
@@ -62,7 +63,10 @@ taxmatch/
   obligations.py, deadlines.py  επαναλαμβανόμενες προθεσμίες από κανόνες (ΦΠΑ, VIES, Intrastat, OSS/IOSS, ΑΠΔ, Ε4, δήλωση εισοδήματος)
                               με ελληνικές αργίες· ενοποίηση με πλήρες ημερολόγιο ΑΑΔΕ/taxheaven + προθεσμίες άρθρων
   ingestion/filters.py        prefilter λέξεων-κλειδιών (φορολογικά ΚΑΙ εργατικά/μισθοδοσίας) για γενικά portals + αποδιπλασιασμός θεμάτων
-  pipeline.py                 ingest -> enrich -> extract -> match, με cross-process lock (pipeline.lock)
+  pipeline.py                 ingest -> enrich -> extract -> match, με cross-process lock (pipeline.lock)· κάνει backup πριν από κάθε run
+  backup.py                   αντίγραφα ασφαλείας βάσης (+ .enckey δίπλα) με το sqlite3 backup API (σωστό και σε WAL)· καλείται αυτόματα
+                              πριν από κάθε `pipeline.run_pipeline` και πριν από «Εισαγωγή από Excel»· gui/ έχει «Αντίγραφο τώρα»/«Επαναφορά»
+                              στις Ρυθμίσεις → Ασφάλεια (ίδια ιδέα με το backup.py του timologio downloader)
   daily.py, scheduler_win.py  headless entry + Windows Task Scheduler (StartWhenAvailable, per-user, χωρίς admin)
 packaging/                    entry.py (PyInstaller entry — μπαίνει στο taxmatch.gui.app.main), taxmatch.spec (PySide6, ΟΧΙ webview),
                               installer.iss, build.ps1, make_icons.py
@@ -102,6 +106,18 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
   συνδέονται σε bound methods ΑΥΤΟΥ του `Task` (η Qt ΜΠΟΡΕΙ να βρει thread affinity από πραγματικό QObject άρα σωστά queued), κι αυτές οι
   μέθοδοι με τη σειρά τους καλούν το callable του caller — άρα πλέον ΕΓΓΥΗΜΕΝΑ στο UI thread. Regression test:
   `test_run_task_callbacks_run_on_the_ui_thread_not_the_worker_thread` (ελέγχει ρητά `threading.get_ident()`).
+- **Το `work()` που περνάς στο `run_task` ΠΟΤΕ `self.conn`/`main.conn` — δικιά του σύνδεση.** Δεύτερο, ξεχωριστό cross-thread bug
+  (2026-09-22, ίδια μέρα με το παραπάνω αλλά διαφορετική αιτία): αρκετά σημεία (`ClientDetailDialog._test_credentials/_start_lookup`,
+  `MainWindow._start_lookup/reload_calendar/_test_llm/_run_check`) περνούσαν το **ίδιο** `sqlite3.Connection` που έχει ήδη ανοιχτεί στο UI
+  thread (`self.conn = dbmod.connect()` στο `__init__`) μέσα σε το `work()` — που εκτελείται ΠΑΝΤΑ σε background `QThread`. Το sqlite3
+  απαγορεύει χρήση μιας σύνδεσης από ΑΛΛΟ thread από αυτό που τη δημιούργησε («SQLite objects created in a thread can only be used in
+  that same thread») — ορατό στον χρήστη ως μόνιμο popup toast πάνω σε κάθε τέτοιο κουμπί (ανανέωση στοιχείων πελάτη, Δοκιμή LLM,
+  ανανέωση λίστας μοντέλων, Έλεγχος τώρα). **Διορθώθηκε:** κάθε τέτοιο `work()` ανοίγει ΔΙΚΗ του `dbmod.connect()` στην αρχή και την
+  κλείνει σε `finally` (ή, για το `_run_check`, απλά ΔΕΝ περνά `conn=self.conn` στο `pipeline.run_pipeline`, ώστε να ανοίξει τη δική
+  του). Ασφαλές: WAL + autocommit (`isolation_level=None`), οπότε γραφές από τη background σύνδεση είναι αμέσως ορατές στο `self.conn`
+  όταν το UI ξαναδιαβάσει μετά το `on_done`. Regression tests: `test_start_lookup_uses_its_own_db_connection_not_the_uis`,
+  `test_test_llm_uses_its_own_db_connection_not_the_uis` (`tests/test_gui_smoke.py`) — τρέχουν το πραγματικό background `QThread`,
+  όχι mock, και ελέγχουν ότι ΔΕΝ φτάνει μήνυμα με «thread»/«sqlite» στον χρήστη.
 - **Κανένα native μήνυμα browser στο web/** (νεκρό πλέον, αλλά αν αγγιχτεί): όχι `alert/confirm`, όχι φυσαλίδες επικύρωσης. Στο `gui/`: κανένα
   `QMessageBox`/απευθείας σύνδεσμος για νέα/προθεσμίες — πάντα `news_dialog.NewsDialog` πρώτα (προεπισκόπηση), ο σύνδεσμος ανοίγει μόνο με ρητό κλικ «Άνοιγμα συνδέσμου».
 - **Ειδοποιήσεις στο `gui/` = `toast.toast()` (side flash message), ΟΧΙ `QMessageBox.information/warning`.** Εξαίρεση: `QMessageBox.question`
@@ -109,6 +125,8 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
   απόφαση που πρέπει σκόπιμα να μπλοκάρει. Επίσης εξαίρεση: `unlock.py`'s προειδοποιήσεις για κύριο κωδικό (ενεργοποίηση/αφαίρεση) μένουν
   blocking `QMessageBox` επίτηδες — το παράθυρο κλείνει αμέσως μετά (`super().accept()`), άρα ένα toast θα εξαφανιζόταν μαζί του πριν
   προλάβει να το διαβάσει κανείς για ένα μήνυμα ασφαλείας χωρίς επαναφορά.
+- Όλα τα toasts (και τα danger/σφάλμα) εξαφανίζονται μόνα τους (`_DEFAULT_MS`, 5" για danger) — ΠΟΤΕ πια `ms=0` σε νέο κώδικα (ο χρήστης
+  το ζήτησε ρητά, 2026-09-22: πριν έμεναν κολλημένα ώσπου να πατηθεί το «×»). Το `×` παραμένει πάντα διαθέσιμο για χειροκίνητο κλείσιμο.
 - UI και μηνύματα στα **ελληνικά**. Ελληνικά κεφαλαία: το `str.upper()` ΚΡΑΤΑ τους τόνους (`'ί'.upper() == 'Ί'`)· χρησιμοποίησε `textutil.strip_accents()` πριν από συγκρίσεις.
 - Τα ΚΑΔ συγκρίνονται ως ψηφία (`identifiers.kad_matches`), όχι ως string με τελείες.
 - Δεν εφευρίσκουμε δεδομένα: άγνωστο κριτήριο ⇒ match με confidence 0.5 «να επιβεβαιωθεί», όχι σιωπηλή εξαίρεση ή ψευδές match.
@@ -130,7 +148,25 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    (β) **διακοπή = `hmdiakophs` της επιχείρησης** — το `katastashepixeirhshs` γράφει ΕΝΕΡΓΗ ΚΑΙ μετά τη διακοπή· (γ) φυσικό πρόσωπο με κλειστή ατομική = ΙΔΙΩΤΗΣ, χωρίς ΚΑΔ·
    (δ) **το Μητρώο δείχνει ΜΟΝΟ το ΑΦΜ του λογαριασμού που συνδέθηκε** — ξένο ΑΦΜ επιστρέφει `NoRegistry`. Άρα ο λογαριασμός γραφείου των Ρυθμίσεων ΔΕΝ φέρνει στοιχεία πελατών· χρειάζονται οι δικοί
    τους κωδικοί (ή ΓΕΜΗ). Δεν έχει δοκιμαστεί ο ρόλος «λογιστής με εξουσιοδοτήσεις». Νομικά πρόσωπα: το Μητρώο δεν έχει δοκιμαστεί (μόνο ατομικές)· η νομική μορφή (ΙΚΕ/ΑΕ) έρχεται από ΓΕΜΗ ή, αν λείπει, από την κατάληξη της επωνυμίας (`legal_form.py`). Δεν αποθηκεύονται προσωπικά πεδία (ταυτότητα, ημ. γέννησης) στο `lookup_raw`.
-5. **LLM:** δωρεάν-πρώτα με αυτόματη εναλλαγή (§Κανόνες) — **δεν έχει δοκιμαστεί με ζωντανό key** (μόνο με fake HTTP στα tests) και δεν έχει μετρηθεί ακρίβεια εξαγωγής — δείγμα με 👍/👎.
+5. **LLM:** δωρεάν-πρώτα με αυτόματη εναλλαγή (§Κανόνες) — **επαληθεύτηκε ζωντανά με πραγματικό OpenRouter key (2026-09-23)**, η σύνδεση δουλεύει· δεν έχει ακόμη μετρηθεί ακρίβεια εξαγωγής — δείγμα με 👍/👎.
+   **Προεπιλεγμένος πάροχος πλέον OpenRouter, όχι Groq** (2026-09-22, ρητό αίτημα χρήστη — το Groq δεν πρέπει να είναι «βασικό»/υποχρεωτικό,
+   βλ. και το μόνιμο 403 παρακάτω): `settings_store.DEFINITIONS["llm_provider"].default`. Προτεινόμενο μοντέλο άλλαξε σε πραγματικά δωρεάν
+   (`meta-llama/llama-3.3-70b-instruct:free`, με κατάληξη `:free` — όχι το παλιό χωρίς κατάληξη, που χρεώνεται). Το dropdown μοντέλων
+   (`gui/main_window.py: _sync_model_combo`) δείχνει πάντα το τρέχον/αυτόματα επιλεγμένο μοντέλο σαν κανονική καταχώρηση, ταξινομημένο
+   δωρεάν-πρώτα. Νέο: HTTP 402 και 429 με λέξεις quota/credit (`llm_extract._is_quota_error`) ταξινομούνται ως `LLMError(kind="credits")`
+   ξεχωριστά από απλό `rate_limit` (προσωρινή καθυστέρηση) — μήνυμα εξηγεί ότι δεν αρκεί απλή αναμονή· το `extract_pending` δοκιμάζει
+   αυτόματα άλλο δωρεάν μοντέλο πριν σταματήσει, **ΕΚΤΟΣ από OpenRouter** (2026-09-23, επαληθεύτηκε ζωντανά — 429 σχεδόν αμέσως, χωρίς
+   πολλά αιτήματα): το όριο των `:free` μοντέλων στο OpenRouter είναι **ανά λογαριασμό** (requests/day + requests/minute), ΟΧΙ ανά
+   μοντέλο — αλλαγή σε άλλο δωρεάν μοντέλο του OpenRouter χτυπάει αμέσως το ίδιο όριο, άρα δεν το δοκιμάζουμε καν εκεί (μόνο σε Groq/
+   άλλους παρόχους όπου τα όρια ΜΠΟΡΕΙ να είναι ανά μοντέλο). Το μήνυμα το εξηγεί ρητά και προτείνει είτε αναμονή (ανανεώνεται ανά
+   ημέρα) είτε προσθήκη credits στο openrouter.ai (ξεκλειδώνει πολύ μεγαλύτερο όριο). `_is_quota_error` αναγνωρίζει και τη συγκεκριμένη
+   διατύπωση του OpenRouter («free-models-per-day», «try again tomorrow», «add ... credits»).
+   **Το `gui/` δεν καθάριζε ποτέ το `llm_last_error`** (2026-09-23, βρέθηκε ζωντανά): το `web/` το έκανε ήδη σε επιτυχημένη «Δοκιμή
+   LLM»/αποθήκευση κλειδιού (`web/views.py`), αλλά το αντίστοιχο `gui/main_window.py: _test_llm/_save_secret_keys` όχι — αποτέλεσμα, το
+   κόκκινο banner «Η ανάλυση άρθρων με LLM δεν δουλεύει» έμενε μόνιμα ορατό ακόμη κι όταν το «Δοκιμή LLM» μόλις είχε επιβεβαιώσει ότι η
+   σύνδεση δουλεύει — ο χρήστης το περιέγραψε ως «το μήνυμα δεν εξαφανίζεται». Διορθώθηκε: και τα δύο σβήνουν το `llm_last_error` (και τα
+   `aade_office_status/message` σε νέους κωδικούς γραφείου) σε επιτυχία, και καλούν `_reload_notices()` αμέσως — όχι μόνο στο επόμενο
+   `reload_all()`. Regression test: `test_test_llm_success_clears_the_stale_error_banner`.
    **«HTTP 403: άκυρο ή χωρίς δικαιώματα API key» ΜΟΝΙΜΑ (2026-09-22, πραγματικό key του χρήστη, Groq+dist):** ελέγχθηκε ο κώδικας
    (`llm_extract.py`: headers/Bearer/strip() σωστά, ίδιο σφάλμα σε dev python ΚΑΙ στο packaged dist — άρα ΔΕΝ είναι θέμα packaging, ο
    403 σημαίνει ότι το request έφτασε κανονικά στον πάροχο και απορρίφθηκε εκεί). Πιθανότερη αιτία: το ίδιο το κλειδί είναι
@@ -183,3 +219,25 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    του business-logic layer), tray/minimize-to-tray διαδραστικά.
    Η σελίδα Ημερολόγιο έχει πλέον ΔΥΟ επίπεδα (2026-09-22): μηνιαία λίστα ανά ημέρα (`cal_days_list`) → κλικ σε ημέρα → ημερήσια λίστα
    (`cal_list`, με κουμπί «‹ Πίσω στον μήνα»)· `self._cal_view_day` (None = μηνιαία προβολή). Ίδια απλή αρχιτεκτονική (agenda, όχι grid μήνα).
+   **Μηνιαίο grid: λάθος στοίχιση κεφαλίδας ημερών (2026-09-23, βρέθηκε ζωντανά).** Οι μαθηματικές ημέρες ήταν πάντα σωστές
+   (`pycal.Calendar(firstweekday=0).monthdatescalendar` επαληθεύτηκε ξεχωριστά) — το πρόβλημα ήταν οπτικό: η γραμμή «Δε Τρ Τε Πε Πα Σα
+   Κυ» ζει σε ΔΙΑΦΟΡΕΤΙΚΟ layout (`QHBoxLayout`) από το grid των αριθμών ημερών από κάτω (`QGridLayout` με `setColumnStretch(col, 1)`
+   σε 7 ίσες στήλες) — τα labels της κεφαλίδας προστίθονταν με `heads.addWidget(lbl)` ΧΩΡΙΣ stretch factor, άρα έμεναν στο φυσικό τους
+   πλάτος (πακεταρισμένα αριστερά) αντί να απλώνονται σε 7 ίσα τμήματα σαν τις στήλες του grid — σε πλατύ παράθυρο οι επικεφαλίδες
+   ολοένα και ξέφευγαν από τις αντίστοιχες στήλες. Διορθώθηκε: `heads.addWidget(lbl, 1)` (ίδιο stretch=1 με τις στήλες του grid).
+   **«+N ακόμη» στο κελί ημέρας δεν είχε tooltip** (τα chips events είχαν ήδη, βλ. `_DayCell`) — προστέθηκε, δείχνει τους τίτλους
+   των κρυμμένων events.
+   **Εισαγωγή από Excel ενσωματώθηκε στο «Νέος πελάτης»** (2026-09-23, ίδιο pattern με το `mydata-etimologio-bridge/desktop`): ο
+   διάλογος (`client_dialog.py`) έχει τώρα κουμπί «Εισαγωγή από Excel…» που ανοίγει file picker και, αν επιλεγεί αρχείο, κλείνει τον
+   διάλογο ως Accepted με `dlg.excel_path` ορισμένο (ΧΩΡΙΣ να κάνει ο ίδιος την εισαγωγή)· το `MainWindow.on_add_client()` ελέγχει
+   ΠΡΩΤΑ το `excel_path` και τρέχει `_import_excel_from_path()` αν υπάρχει, αλλιώς συνεχίζει με το `result_afm` όπως πριν. Το
+   ξεχωριστό «Εισαγωγή από Excel» στο μενού ΔΕΔΟΜΕΝΑ παραμένει επίσης (δεν αφαιρέθηκε) — και τα δύο μονοπάτια καταλήγουν στην ίδια
+   `_import_excel_from_path()`.
+   **«Νέα & Matches»: το preview έδειχνε άδειο διάλογο για άρθρα που δεν έχουν αναλυθεί ακόμη με LLM** (status «σε αναμονή»/
+   «φιλτραρίστηκε»/«αποτυχία») — το `summary` έρχεται ΜΟΝΟ από το `extracted_json`, που δεν υπάρχει πριν την εξαγωγή. Διορθώθηκε
+   (`_open_selected_news`): αν λείπει το `summary`, δείχνει fallback `article.full_text` (αν έχει ήδη ανακτηθεί) ή `raw_summary` του
+   RSS feed, ώστε να φαίνεται ΚΑΤΙ αντί για κενό παράθυρο. Τα ήδη-matched άρθρα (dashboard/client-detail) ΔΕΝ χρειάζονται αυτό το
+   fallback — matching προϋποθέτει επιτυχή εξαγωγή, άρα έχουν πάντα `summary`.
+   **«Έλεγχος τώρα»: το τελικό μήνυμα δεν έλεγε τίποτα για την αντιστοίχιση** — μόνο «Ολοκληρώθηκε ✓», ενώ αυτό ακριβώς που νοιάζει
+   τον χρήστη (πόσα νέα matches βρέθηκαν) ήταν ήδη υπολογισμένο (`stats["match"]` από `engine.rematch()`) αλλά δεν εμφανιζόταν.
+   Διορθώθηκε: το μήνυμα λέει τώρα π.χ. «Ολοκληρώθηκε ✓ — 3 νέα matches · 1 ενημερώθηκαν.».

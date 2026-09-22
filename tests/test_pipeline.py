@@ -43,6 +43,7 @@ def llm_handler(url, **kw):
 
 @pytest.fixture
 def world(conn, monkeypatch):
+    settings_store.set_value(conn, "llm_provider", "groq")  # το default άλλαξε σε openrouter· εδώ δρομολογούμε ρητά σε groq.com
     settings_store.set_value(conn, "groq_api_key", "k")
     settings_store.set_value(conn, "fetch_full_text", "0")
     monkeypatch.setattr(pipeline, "enabled_sources",
