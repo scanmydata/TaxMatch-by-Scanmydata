@@ -282,15 +282,51 @@ def _is_public_http(url: str) -> bool:
         return True
 
 
+_TRUNCATION_MARK = "\n\n[…περικόπηκε το ενδιάμεσο τμήμα του άρθρου…]\n\n"
+
+
+def _smart_truncate(body: str, max_chars: int, head_ratio: float = 0.7) -> str:
+    """Κρατά την αρχή (σύνοψη/τι αλλάζει) ΚΑΙ το τέλος (συχνά εκεί είναι η έναρξη ισχύος/προθεσμίες σε
+    νομοσχέδια-εγκυκλίους) αντί να κόβει μόνο τα πρώτα `max_chars` — ένα πολύ μεγάλο άρθρο (π.χ. νομοσχέδιο
+    ~50.000 χαρακτήρων) έχανε πλήρως την τελευταία διάταξη/ισχύ με το απλό `body[:max_chars]`."""
+    if len(body) <= max_chars:
+        return body
+    budget = max_chars - len(_TRUNCATION_MARK)
+    if budget <= 0:
+        return body[:max_chars]
+    head_len = int(budget * head_ratio)
+    tail_len = budget - head_len
+    return body[:head_len] + _TRUNCATION_MARK + (body[-tail_len:] if tail_len > 0 else "")
+
+
+#: Μερικά taxheaven.gr/circulars/... (κυρίως νομολογία — «Αρχείο Νόμων και Αποφάσεων») είναι συνδρομητικά (100€/έτος),
+#: σε αντίθεση με τα νέα και τις διοικητικές εγκυκλίους/αποφάσεις ΑΑΔΕ που είναι ελεύθερα — επαληθεύτηκε ζωντανά
+#: (2026-09-23, π.χ. https://www.taxheaven.gr/circulars/55385/ste-203-2026): η σελίδα δείχνει μια σύντομη ελεύθερη
+#: «Περίληψη» και ΜΕΤΑ διαφημιστικό κείμενο εγγραφής/τιμής — αν το στείλουμε ολόκληρο στο LLM ρισκάρουμε να
+#: μπερδέψει το ποσό «100,00€/έτος» της συνδρομής με πραγματικό ποσό/πρόστιμο του άρθρου. Κόβουμε ΟΤΙΔΗΠΟΤΕ μετά
+#: το πρώτο τέτοιο marker, κρατώντας μόνο την ελεύθερη «Περίληψη» πριν από αυτό (αν υπάρχει).
+_PAYWALL_MARKERS = ("Συνδρομητικό περιεχόμενο", "προσβάσιμο μόνο από τους συνδρομητές")
+
+
+def _strip_paywall_upsell(text: str) -> str:
+    cut = min((i for i in (text.find(m) for m in _PAYWALL_MARKERS) if i != -1), default=-1)
+    return text[:cut].rstrip() if cut != -1 else text
+
+
 def fetch_full_text(url: str, session: requests.Session, max_chars: int = STORED_TEXT_MAX) -> str:
-    """Κείμενο της σελίδας του άρθρου· '' σε οποιαδήποτε αποτυχία (το summary του RSS μένει fallback)."""
+    """Κείμενο της σελίδας του άρθρου· '' σε οποιαδήποτε αποτυχία (το summary του RSS μένει fallback).
+    Παίρνει ΠΡΩΤΑ ολόκληρο το κείμενο (χωρίς όριο), κόβει τυχόν συνδρομητικό upsell (`_strip_paywall_upsell`) και
+    ΜΕΤΑ το περικόπτει έξυπνα (αρχή+τέλος, βλ. `_smart_truncate`) — ένα απλό `html_to_text(..., max_chars)` θα
+    πετούσε αμετάκλητα το τέλος πολύ μεγάλων άρθρων (νομοσχέδια/εγκύκλιοι ~50.000 χαρακτήρων) πριν καν αποθηκευτεί
+    στη βάση."""
     if not _is_public_http(url):
         return ""
     try:
         resp = session.get(url, timeout=20)
         if resp.status_code >= 400 or "html" not in resp.headers.get("content-type", "html").lower():
             return ""
-        return html_to_text(resp.text, max_chars=max_chars)
+        text = _strip_paywall_upsell(html_to_text(resp.text))
+        return _smart_truncate(text, max_chars)
     except requests.RequestException:
         return ""
 
@@ -302,12 +338,38 @@ def build_user_message(article: sqlite3.Row, text: str) -> str:
         f"Ημερομηνία δημοσίευσης: {(article['published_at'] or '')[:10]}\n"
         f"Κατηγορία: {article['category'] or '-'}\n"
         f"Τίτλος: {article['title']}\n\n"
-        f"Κείμενο:\n{body[:FULL_TEXT_MAX]}"
+        f"Κείμενο:\n{_smart_truncate(body, FULL_TEXT_MAX)}"
     )
 
 
+_SUMMARIZE_SYSTEM = (
+    "Συνοψίζεις φορολογικά/εργατικά άρθρα στα ελληνικά για να τα διαβάσει στη συνέχεια ένα ΔΕΥΤΕΡΟ μοντέλο που θα "
+    "αποφασίσει αν αφορούν συγκεκριμένους πελάτες λογιστικού γραφείου. ΜΗΝ παραλείπεις ΚΑΝΕΝΑ συγκεκριμένο στοιχείο: "
+    "ημερομηνίες/προθεσμίες, αριθμούς νόμων/αποφάσεων/άρθρων, ΚΑΔ, ποσά, ποσοστά, κατηγορίες επιχειρήσεων/βιβλίων. "
+    "Παράλειψε μόνο γενική εισαγωγή/κατακλείδα χωρίς συγκεκριμένη πληροφορία. Απάντησε ΜΟΝΟ με JSON: "
+    '{"summary": "..."} (έως ~700 λέξεις).'
+)
+
+
+def summarize_long_text(client: "LLMClient", article: sqlite3.Row, body: str) -> str:
+    """Περίληψη πολύ μεγάλου άρθρου ΜΕΣΩ ΤΟΥ ΙΔΙΟΥ LLM αντί για χαρακτήρα-προς-χαρακτήρα περικοπή (`_smart_truncate`
+    ήδη κρατά αρχή+τέλος, αλλά μπορεί ακόμη να χάσει σχετική πληροφορία στη μέση ενός πολύ μεγάλου νομοσχεδίου/
+    εγκυκλίου). Σφάλματα HTTP (401/403/429/δίκτυο) διαδίδονται ΚΑΝΟΝΙΚΑ ως `LLMError` — το `extract_pending` τα
+    χειρίζεται ήδη ενιαία (stop/rotate model/backoff), άρα αυτή η επιπλέον κλήση δεν χρειάζεται δικό της path.
+    Σε άκυρη/κενή απάντηση JSON επιστρέφει '' (ΟΧΙ σφάλμα) — ο καλών πέφτει πίσω σε `_smart_truncate`."""
+    user = f"Τίτλος: {article['title']}\n\nΚείμενο ({len(body)} χαρακτήρες):\n{body}"
+    raw = client.complete_json(_SUMMARIZE_SYSTEM, user, timeout=90)
+    try:
+        data = parse_json_loose(raw)
+    except ValueError:
+        return ""
+    summary = data.get("summary") if isinstance(data, dict) else None
+    return summary.strip() if isinstance(summary, str) else ""
+
+
 def extract_article(conn: sqlite3.Connection, article: sqlite3.Row, client: LLMClient, system: str,
-                    session: Optional[requests.Session] = None, use_full_text: bool = True) -> str:
+                    session: Optional[requests.Session] = None, use_full_text: bool = True,
+                    sleep: Callable[[float], None] = time.sleep) -> str:
     """Επεξεργάζεται ένα άρθρο και ενημερώνει τη βάση. Επιστρέφει την τελική κατάσταση
     ('done' | 'irrelevant'). Σε LLMError το εκτοξεύει προς τον καλούντα (αυτός αποφασίζει: stop/retry)."""
     text = article["full_text"]
@@ -315,6 +377,13 @@ def extract_article(conn: sqlite3.Connection, article: sqlite3.Row, client: LLMC
         text = fetch_full_text(article["url"], session)
         if text:
             conn.execute("UPDATE articles SET full_text=? WHERE id=?", (text, article["id"]))
+    if len(text) > FULL_TEXT_MAX:
+        # Αντί να το κόψουμε εμείς στα τυφλά, ζητάμε περίληψη από το ίδιο LLM (βλ. `summarize_long_text`) — μόνο
+        # το ΜΗΝΥΜΑ προς το LLM αλλάζει· το πλήρες/smart-truncated `full_text` παραμένει όπως είναι στη βάση.
+        sleep(MIN_SECONDS_BETWEEN_CALLS)
+        summarized = summarize_long_text(client, article, text)
+        if summarized:
+            text = summarized
     raw = client.complete_json(system, build_user_message(article, text))
     try:
         extracted = scope_mod.normalize(parse_json_loose(raw))
@@ -352,7 +421,7 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
         while True:
             attempts += 1
             try:
-                status = extract_article(conn, art, client, system, session, use_full_text)
+                status = extract_article(conn, art, client, system, session, use_full_text, sleep=sleep)
                 stats[status] += 1
                 stats["processed"] += 1
                 consecutive_network = 0

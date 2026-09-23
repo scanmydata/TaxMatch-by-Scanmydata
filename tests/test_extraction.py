@@ -107,6 +107,91 @@ def test_full_text_fetched_and_stored(conn):
     assert "Το κείμενο του άρθρου" in s.calls[-1][2]["json"]["messages"][1]["content"]
 
 
+def test_very_long_article_is_summarized_by_llm_instead_of_character_truncated(conn):
+    long_text = "Άρθρο 1: παράταση προθεσμίας ΦΠΑ. " * 400        # πολύ πάνω από FULL_TEXT_MAX
+    assert len(long_text) > llm_extract.FULL_TEXT_MAX
+
+    def route(url, **kw):
+        system = kw["json"]["messages"][0]["content"]
+        if "Συνοψίζεις" in system:
+            assert str(len(long_text)) in kw["json"]["messages"][1]["content"]   # πήρε ΟΛΟΚΛΗΡΟ το κείμενο, όχι κομμένο
+            return llm_reply({"summary": "Παράταση προθεσμίας ΦΠΑ έως 31/12."})
+        assert "Παράταση προθεσμίας ΦΠΑ έως 31/12" in kw["json"]["messages"][1]["content"]
+        assert "Άρθρο 1: παράταση προθεσμίας ΦΠΑ. Άρθρο 1" not in kw["json"]["messages"][1]["content"]
+        return llm_reply({"relevant": True, "scope": {"type": "all"}, "deadline": "2026-12-31"})
+
+    s = FakeSession().route("groq.com", route)
+    art = add_article(conn)
+    conn.execute("UPDATE articles SET full_text=? WHERE id=?", (long_text, art["id"]))
+    art = conn.execute("SELECT * FROM articles WHERE id=?", (art["id"],)).fetchone()
+    status = llm_extract.extract_article(conn, art, make_client(s), "sys", session=None, use_full_text=False,
+                                         sleep=lambda _s: None)
+    assert status == "done"
+    assert len(s.calls) == 2                                  # 1 περίληψη + 1 κύρια εξαγωγή
+    assert conn.execute("SELECT full_text FROM articles WHERE id=?", (art["id"],)).fetchone()[0] == long_text
+
+
+def test_summarize_falls_back_to_smart_truncate_on_invalid_json(conn):
+    long_text = "Κείμενο άρθρου. " * 500
+    calls = {"n": 0}
+
+    def route(url, **kw):
+        calls["n"] += 1
+        system = kw["json"]["messages"][0]["content"]
+        if "Συνοψίζεις" in system:
+            return llm_reply("δεν είναι json")               # άκυρη απάντηση περίληψης -> fallback
+        return llm_reply({"relevant": True, "scope": {"type": "all"}})
+
+    s = FakeSession().route("groq.com", route)
+    art = add_article(conn)
+    conn.execute("UPDATE articles SET full_text=? WHERE id=?", (long_text, art["id"]))
+    art = conn.execute("SELECT * FROM articles WHERE id=?", (art["id"],)).fetchone()
+    status = llm_extract.extract_article(conn, art, make_client(s), "sys", session=None, use_full_text=False,
+                                         sleep=lambda _s: None)
+    assert status == "done"
+    final_msg = s.calls[-1][2]["json"]["messages"][1]["content"]
+    assert llm_extract._TRUNCATION_MARK.strip() in final_msg    # έπεσε πίσω στο smart truncate, όχι στο ωμό κείμενο
+
+
+def test_summarize_error_propagates_like_a_normal_llm_error(conn):
+    long_text = "Κείμενο άρθρου. " * 500
+
+    def route(url, **kw):
+        system = kw["json"]["messages"][0]["content"]
+        if "Συνοψίζεις" in system:
+            return FakeResponse(b"", 429, {"retry-after": "3"})
+        raise AssertionError("δεν έπρεπε να φτάσει ποτέ στην κύρια εξαγωγή")
+
+    s = FakeSession().route("groq.com", route)
+    art = add_article(conn)
+    conn.execute("UPDATE articles SET full_text=? WHERE id=?", (long_text, art["id"]))
+    art = conn.execute("SELECT * FROM articles WHERE id=?", (art["id"],)).fetchone()
+    with pytest.raises(llm_extract.LLMError) as exc_info:
+        llm_extract.extract_article(conn, art, make_client(s), "sys", session=None, use_full_text=False,
+                                    sleep=lambda _s: None)
+    assert exc_info.value.kind == "rate_limit"
+
+
+def test_short_article_is_not_summarized(conn):
+    s = FakeSession().route("groq.com", llm_reply({"relevant": True, "scope": {"type": "all"}}))
+    art = add_article(conn)
+    llm_extract.extract_article(conn, art, make_client(s), "sys", session=None, use_full_text=False,
+                                sleep=lambda _s: None)
+    assert len(s.calls) == 1                                  # καμία κλήση περίληψης για κοντό κείμενο
+
+
+def test_full_text_strips_subscription_upsell_from_paywalled_circulars(conn):
+    html = ("<html><body><article>"
+            "Περίληψη: Οι υποσταθμοί διανομής δεν υπάγονται στο τέλος καθαριότητας."
+            "Συνδρομητικό περιεχόμενο Το πλήρες κείμενο είναι διαθέσιμο στα μέλη. "
+            "Αποκτήστε πρόσβαση — 100,00€/έτος (πλέον Φ.Π.Α.)"
+            "</article></body></html>")
+    s = FakeSession().route("x.gr", FakeResponse(html, headers={"content-type": "text/html"}))
+    text = llm_extract.fetch_full_text("https://x.gr/circulars/1", s)
+    assert "υποσταθμοί διανομής" in text
+    assert "100,00" not in text and "Συνδρομητικό" not in text
+
+
 def test_full_text_refuses_private_hosts():
     s = FakeSession()
     assert llm_extract.fetch_full_text("http://127.0.0.1:8000/x", s) == ""
