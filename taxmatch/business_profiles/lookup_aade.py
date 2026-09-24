@@ -74,8 +74,9 @@ class _HyperHttp:
                 parts.extend(f"{k}={v}" for k, v in kv.items())
         return "; ".join(parts)
 
-    def _once(self, method: str, url: str, form: Optional[Dict[str, str]] = None) -> requests.Response:
-        headers = {"User-Agent": UA, "Accept-Language": "el-GR,el;q=0.9,en;q=0.8"}
+    def _once(self, method: str, url: str, form: Optional[Dict[str, str]] = None,
+              extra_headers: Optional[Dict[str, str]] = None) -> requests.Response:
+        headers = {"User-Agent": UA, "Accept-Language": "el-GR,el;q=0.9,en;q=0.8", **(extra_headers or {})}
         ck = self._cookie(url)
         if ck:
             headers["Cookie"] = ck
@@ -87,8 +88,9 @@ class _HyperHttp:
         self._store(url, resp)
         return resp
 
-    def follow(self, method: str, url: str, form: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        res = self._once(method, url, form)
+    def follow(self, method: str, url: str, form: Optional[Dict[str, str]] = None,
+               headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        res = self._once(method, url, form, headers)
         loc = res.headers.get("Location")
         cur = url
         hops = 0
@@ -97,7 +99,12 @@ class _HyperHttp:
             res = self._once("GET", cur)
             loc = res.headers.get("Location")
             hops += 1
-        return {"url": cur, "status": res.status_code, "text": res.text}
+        content = res.content
+        ctype = (res.headers.get("Content-Type") or "").lower()
+        is_pdf = "application/pdf" in ctype or content[:4] == b"%PDF"
+        # `content`/`is_pdf`: για εκτυπώσεις (μητρώο, δηλώσεις) — βλ. aml/retrieval.py
+        return {"url": cur, "status": res.status_code, "text": "" if is_pdf else res.text,
+                "content": content, "ct": ctype, "is_pdf": is_pdf}
 
 
 def _tag(xml: str, name: str) -> str:

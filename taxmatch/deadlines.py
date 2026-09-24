@@ -10,12 +10,14 @@ from .ingestion.filters import normalize_text
 
 
 def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Optional[str] = None,
-                   include_news: bool = True, include_rules: bool = True, include_conditional: bool = True) -> list[dict[str, Any]]:
+                   include_news: bool = True, include_rules: bool = True, include_conditional: bool = True,
+                   include_aml: bool = False) -> list[dict[str, Any]]:
     """Γεγονότα με ημερομηνία στο [start, end]. kind:
     * 'general' — γεγονός του ημερολογίου taxheaven (πραγματική ημερομηνία)·
     * 'rule'    — υπολογισμένη κανονική προθεσμία (προσαρμοσμένη στον πελάτη αν δοθεί `afm`)· `conditional`=True όταν
                   ισχύει μόνο υπό προϋποθέσεις που δεν γνωρίζουμε (π.χ. VIES: μόνο αν υπήρξαν ενδοκοινοτικές συναλλαγές)·
-    * 'news'    — προθεσμία από άρθρο που ταίριαξε (n_clients = πόσους πελάτες αφορά, ή τη συγκεκριμένη επιχείρηση)."""
+    * 'news'    — προθεσμία από άρθρο που ταίριαξε (n_clients = πόσους πελάτες αφορά, ή τη συγκεκριμένη επιχείρηση)·
+    * 'aml'     — επανεξέταση δέουσας επιμέλειας πελάτη (`include_aml`, μόνο στο native GUI — το web δεν τα δείχνει)."""
     s, e = start.isoformat(), end.isoformat()
     events: list[dict[str, Any]] = []
     general_by_day: dict[str, list[str]] = {}
@@ -52,6 +54,13 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
         for r in conn.execute(sql, args):
             events.append({"kind": "news", "id": r["id"], "title": r["title"], "date": r["deadline"],
                            "url": r["url"], "n_clients": r["n"], "description": "", "conditional": False})
-    order = {"news": 0, "rule": 1, "general": 2}
+    if include_aml:
+        from .aml import model as aml_model, store as aml_store
+        for r in aml_store.reviews_between(conn, start, end, afm=afm):
+            events.append({"kind": "aml", "id": r["afm"], "title": f"Επανεξέταση δέουσας επιμέλειας: {r['name'] or r['afm']}",
+                           "date": r["next_review"], "url": "", "n_clients": 1, "afm": r["afm"], "conditional": False,
+                           "description": f"Τρέχουσα κατάταξη: {aml_model.CATEGORY_LABEL.get(r['final_category'], '')}. "
+                                          "Νέα αξιολόγηση από «Δέουσα επιμέλεια» ή την καρτέλα του πελάτη."})
+    order = {"news": 0, "aml": 1, "rule": 2, "general": 3}
     events.sort(key=lambda ev: (ev["date"], order[ev["kind"]], ev["title"]))
     return events

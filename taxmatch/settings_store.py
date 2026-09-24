@@ -43,6 +43,15 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("max_extractions_per_run", "Μέγιστες εξαγωγές LLM ανά έλεγχο", default="60"),
     SettingDef("fetch_full_text", "Λήψη πλήρους κειμένου άρθρου", default="1"),
     SettingDef("daily_time", "Ώρα καθημερινού ελέγχου", default="08:00"),
+    # Δέουσα επιμέλεια (taxmatch/aml): μία μεθοδολογία για ΟΛΟΥΣ τους πελάτες — γι' αυτό είναι ρύθμιση γραφείου
+    SettingDef("aml_model", "Μοντέλο βαθμολόγησης (A|B)", default="A"),
+    SettingDef("aml_review_low", "Επανεξέταση χαμηλού κινδύνου (μήνες)", default="24"),
+    SettingDef("aml_review_medium", "Επανεξέταση μέτριου κινδύνου (μήνες)", default="12"),
+    SettingDef("aml_review_high", "Επανεξέταση υψηλού κινδύνου (μήνες)", default="12"),
+    SettingDef("aml_officer", "Υπεύθυνος συμμόρφωσης"),
+    # Κεφαλίδα γραφείου στα έγγραφα (έως 4 γραμμές: επωνυμία, διεύθυνση, δραστηριότητα, ΑΦΜ/ΔΟΥ/τηλέφωνο)
+    SettingDef("aml_office_info", "Στοιχεία γραφείου για τα έγγραφα"),
+    SettingDef("aml_office_city", "Τόπος υπογραφής εγγράφων"),
 ]}
 
 

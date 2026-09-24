@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")     # πριν από ΚΑ
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from taxmatch import db, settings_store  # noqa: E402
 from taxmatch.business_profiles import service  # noqa: E402
@@ -52,8 +52,8 @@ def window(qapp, conn):
 
 
 def test_main_window_builds_all_pages_without_crashing(window):
-    assert set(window._pages.keys()) == {"dashboard", "clients", "calendar", "news", "settings"}
-    assert window.stack.count() == 5
+    assert set(window._pages.keys()) == {"dashboard", "clients", "calendar", "news", "aml", "settings"}
+    assert window.stack.count() == 6
 
 
 def test_dashboard_shows_kpis(window, conn):
@@ -408,3 +408,167 @@ def test_add_client_dialog_with_excel_path_routes_to_excel_import(window, conn, 
 
     window.on_add_client()
     assert len(calls) == 1 and calls[0] == Path("C:/fake/clients.xlsx")
+
+
+# ------------------------------------------------------------------ δέουσα επιμέλεια (taxmatch/aml)
+
+def test_aml_page_lists_clients_and_kpis(window, conn):
+    from datetime import date
+    from taxmatch.aml import store
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΑΕ")
+    service.add(conn, "123456783", "ΧΩΡΙΣ ΑΞΙΟΛΟΓΗΣΗ")
+    store.save_assessment(conn, AFM, factors=["a_cash"], assessed_on=date(2024, 1, 10))   # εκπρόθεσμη
+    window._show_page("aml")
+    page = window.aml_page
+    assert page.table.rowCount() == 2
+    assert page._kpi["overdue"].text() == "1" and page._kpi["missing"].text() == "1"
+    page.filter.setCurrentIndex(page.filter.findData("missing"))
+    visible = [r for r in range(page.table.rowCount()) if not page.table.isRowHidden(r)]
+    assert [page.table.item(r, 0).text() for r in visible] == ["123456783"]
+    window._reload_notices()
+    texts = [window.notices_box.itemAt(i).widget().findChild(QLabel).text() for i in range(window.notices_box.count())]
+    assert any("δέουσας επιμέλειας" in t for t in texts)
+
+
+def test_aml_assessment_dialog_live_result_and_save(qapp, conn):
+    from taxmatch.aml import model, store
+    from taxmatch.gui.aml_dialog import AmlAssessmentDialog
+    service.add(conn, AFM, "ΤΑΒΕΡΝΑ ΑΕ")
+    service.set_kads(conn, AFM, [{"code": "56.10.11.01", "descr": "Εστιατόρια", "is_main": True}])
+    dlg = AmlAssessmentDialog(conn, AFM)
+    assert dlg.factor_checks["a_cash"].isChecked()                  # πρόταση από ΚΑΔ εστίασης
+    assert "ΜΕΤΡΙΟΣ" in dlg.result_title.text()
+    dlg.pep.setCurrentIndex(dlg.pep.findData("domestic"))           # ΠΕΠ -> υποχρεωτικά «ΥΠΕΡΙΣΧΥΕΙ»
+    assert dlg.override_checks["o_pep"].isChecked() and not dlg.override_checks["o_pep"].isEnabled()
+    assert "ΥΨΗΛΟΣ" in dlg.result_title.text()
+    dlg.approved_by.setText("Διαχειριστής")
+    dlg.justification.setPlainText("ΠΕΠ ημεδαπό")
+    dlg._save(export=False)
+    a = store.get_assessment(conn, dlg.saved_id)
+    assert a["final_category"] == model.HIGH and "o_pep" in a["overrides"]
+    assert store.get_profile(conn, AFM)["pep_status"] == "domestic"
+    dlg.deleteLater()
+
+
+def test_aml_self_check_answers_persist(window, conn):
+    from taxmatch.aml import store
+    page = window.aml_page
+    no_button = next(b for b in page._q_groups[3].buttons() if b.property("state") == "no")
+    no_button.setChecked(True)
+    assert store.office_items(conn)["q03"]["state"] == "no"
+    assert not page._q_fix[3].isHidden()
+    page._step_checks["step01"].setChecked(True)
+    assert store.office_items(conn)["step01"]["state"] == "done"
+    page.reload()                                                   # ξαναφόρτωμα από τη βάση
+    assert next(b for b in page._q_groups[3].buttons() if b.property("state") == "no").isChecked()
+    assert page._step_checks["step01"].isChecked()
+
+
+def test_client_detail_has_aml_tab(window, conn):
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΑΕ")
+    dlg = ClientDetailDialog(window, AFM)
+    assert "Δεν έχει γίνει ακόμη αξιολόγηση" in dlg.aml_summary.text()
+    dlg.deleteLater()
+
+
+def test_aml_dialog_transactions_drive_factors(qapp, conn):
+    from taxmatch.aml import store
+    from taxmatch.gui.aml_dialog import AmlAssessmentDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    dlg = AmlAssessmentDialog(conn, AFM)
+    assert not dlg.factor_checks["g_sector"].isChecked()
+    dlg._add_tx_row({"amount": "15_50", "channel": "cash_1_10k", "frequency": "weekly", "activity": "real_estate",
+                     "country": "sanctions"})
+    assert dlg.factor_checks["g_sector"].isChecked() and dlg.factor_checks["a_cash"].isChecked()
+    assert dlg.override_checks["o_sanctions"].isChecked() and "ΥΨΗΛΟΣ" in dlg.result_title.text()
+    dlg.tx_table.selectRow(0)
+    dlg._remove_tx_row()                                             # αφαίρεση γραμμής -> οι παράγοντες φεύγουν
+    assert not dlg.factor_checks["g_sector"].isChecked() and not dlg.override_checks["o_sanctions"].isChecked()
+    dlg._add_tx_row({"amount": "lt15", "channel": "bank", "country": "gr"})
+    dlg._save(export=False)
+    p = store.get_profile(conn, AFM)
+    assert len(p["transactions"]) == 1 and p["file_status"] == "docs_pending"
+    dlg.deleteLater()
+
+
+def test_aml_pdfs_and_case_dialog(qapp, conn, tmp_path):
+    from taxmatch.aml import cases, documents, store
+    from taxmatch.gui.aml_case_dialog import AmlCaseDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    aid = store.save_assessment(conn, AFM, factors=["a_simple", "b_eu"])
+    out = documents.write_pdf(documents.assessment_html(conn, aid), tmp_path / "e.pdf", "Έκθεση")
+    assert out.read_bytes()[:4] == b"%PDF" and out.stat().st_size > 1000
+    dlg = AmlCaseDialog(conn, kind="suspicion", afm=AFM)
+    dlg.description.setPlainText("Ασυνήθιστες καταθέσεις μετρητών")
+    dlg.flag_checks["structuring"].setChecked(True)
+    dlg._save()
+    c = cases.get(conn, dlg.saved_id)
+    assert c["afm"] == AFM and c["red_flags"] == ["structuring"]
+    dlg.deleteLater()
+
+
+def test_aml_dialog_ubo_pep_forces_high_and_saves_rep(qapp, conn):
+    from taxmatch.aml import store
+    from taxmatch.gui.aml_dialog import AmlAssessmentDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ' WHERE afm=?", (AFM,))
+    dlg = AmlAssessmentDialog(conn, AFM)
+    assert dlg.ubo_group.isVisibleTo(dlg)                      # νομικό πρόσωπο -> πίνακας δικαιούχων
+    dlg._add_ubo_row({"name": "ΔΙΚΑΙΟΥΧΟΣ", "percent": "100", "pep": "domestic"})
+    assert dlg.override_checks["o_pep"].isChecked() and "ΥΨΗΛΟΣ" in dlg.result_title.text()
+    dlg.rep_fields["name"].setText("ΕΚΠΡΟΣΩΠΟΣ")
+    dlg.approved_by.setText("Διαχειριστής")
+    dlg._save(export=False)
+    p = store.get_profile(conn, AFM)
+    assert p["rep"]["name"] == "ΕΚΠΡΟΣΩΠΟΣ" and p["ubos"][0]["pep"] == "domestic"
+    dlg.client_kind.setCurrentIndex(dlg.client_kind.findData("individual"))
+    assert not dlg.ubo_group.isVisibleTo(dlg)
+    dlg.deleteLater()
+
+
+def test_aml_page_templates_tab_lists_six_slots(window):
+    window._show_page("aml")
+    assert window.aml_page.tpl_table.rowCount() == 6
+    assert window.aml_page.tpl_table.item(0, 1).text() == "Προεπιλογή εφαρμογής"
+
+
+def test_aml_dialog_saves_rep_credentials_encrypted_and_fetch_needs_credentials(qapp, conn):
+    from taxmatch.aml import retrieval
+    from taxmatch.gui.aml_dialog import AmlAssessmentDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ' WHERE afm=?", (AFM,))
+    dlg = AmlAssessmentDialog(conn, AFM)
+    assert dlg.rep_user.isVisibleTo(dlg) and dlg.fetch_btn.isEnabled()
+    dlg._fetch_documents()                                   # χωρίς κανέναν κωδικό: μήνυμα, καμία κλήση δικτύου
+    assert not dlg._tasks
+    dlg.rep_user.setText("rep")
+    dlg.rep_pass.setText("pw")
+    dlg._save(export=False)
+    assert retrieval.get_rep_credentials(conn, AFM) == ("rep", "pw")
+    dlg.deleteLater()
+
+
+def test_aml_dialog_kmpd_import_sanctions_and_gemi(qapp, conn, monkeypatch):
+    from taxmatch.aml import gemi_browser, retrieval
+    from taxmatch.gui.aml_dialog import AmlAssessmentDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ' WHERE afm=?", (AFM,))
+    dlg = AmlAssessmentDialog(conn, AFM)
+    assert "Δεν έχει γίνει έλεγχος" in dlg.sanctions_label.text()
+    dlg._add_ubo_row({"name": "ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ", "afm": "111111111", "pep": "no"})
+    msg = dlg._apply_ubo_import({"found": [{"name": "ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ", "afm": "111111111", "percent": "60",
+                                            "control": "Εταίρος"},
+                                           {"name": "ΙΩΑΝΝΟΥ ΜΑΡΙΑ", "afm": "222222222", "percent": "40", "control": ""}],
+                                 "rep": {"name": "ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ", "afm": "111111111"},
+                                 "note": "ΚΜΠΔ: αρ. καταχώρισης 1 (εκτύπωση 24/09/2026)."})
+    ubos = dlg.ubos()
+    assert [(u["afm"], u["percent"], u["pep"]) for u in ubos] == [("111111111", "60", "no"),
+                                                                   ("222222222", "40", "")]
+    assert "1 νέοι" in msg and dlg.rep_fields["afm"].text() == "111111111" and dlg.ubo_state.currentData() == "pending"
+    dlg.gemi_user.setText("gemi")
+    dlg.gemi_pass.setText("pw")
+    dlg._save(export=False)
+    assert gemi_browser.get_credentials(conn, AFM) == ("gemi", "pw") and dlg.gemi_pass.text() == ""
+    assert retrieval.get_rep_credentials(conn, AFM) is None
+    dlg.deleteLater()

@@ -139,6 +139,167 @@ MIGRATIONS: list[str] = [
         event_count INTEGER NOT NULL DEFAULT 0
     )
     """,
+    # v5 — δέουσα επιμέλεια (ν. 4557/2018). ΣΚΟΠΙΜΑ χωρίς FOREIGN KEY/CASCADE προς `businesses`: η διαγραφή ενός
+    # πελάτη ΔΕΝ πρέπει να σβήνει το ιστορικό δέουσας επιμέλειας (τήρηση 5 ετών μετά τη λήξη της σχέσης, άρθρο 30).
+    """
+    CREATE TABLE aml_profile (
+        afm                TEXT PRIMARY KEY,
+        pep_status         TEXT NOT NULL DEFAULT 'unknown',  -- no|domestic|foreign|family|associate|unknown
+        relationship_start TEXT NOT NULL DEFAULT '',          -- ISO ημερομηνία έναρξης σχέσης
+        relationship_end   TEXT NOT NULL DEFAULT '',          -- ISO ημερομηνία λήξης (αρχή της 5ετίας τήρησης)
+        purpose            TEXT NOT NULL DEFAULT '',          -- σκοπός/φύση σχέσης + πηγές
+        kyc_json           TEXT NOT NULL DEFAULT '{}',        -- {item: 'YYYY-MM-DD' ημερομηνία ολοκλήρωσης}
+        notes              TEXT NOT NULL DEFAULT '',
+        updated_at         TEXT NOT NULL
+    );
+
+    CREATE TABLE aml_assessments (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        afm             TEXT NOT NULL,
+        client_name     TEXT NOT NULL DEFAULT '',             -- στιγμιότυπο: μένει και αν διαγραφεί ο πελάτης
+        kind            TEXT NOT NULL DEFAULT 'initial',      -- initial|periodic|extraordinary
+        assessed_on     TEXT NOT NULL,                        -- ISO ημερομηνία
+        model           TEXT NOT NULL DEFAULT 'A',            -- A|B: ποιο μοντέλο αποφάσισε
+        factors_json    TEXT NOT NULL DEFAULT '[]',
+        overrides_json  TEXT NOT NULL DEFAULT '[]',
+        sum_a           INTEGER NOT NULL DEFAULT 0,
+        cat_a           TEXT NOT NULL DEFAULT '',
+        total_b         INTEGER NOT NULL DEFAULT 0,
+        cat_b           TEXT NOT NULL DEFAULT '',
+        model_category  TEXT NOT NULL,
+        final_category  TEXT NOT NULL,                        -- = model_category ή ΥΨΗΛΟΤΕΡΗ (ποτέ χαμηλότερη)
+        escalation_note TEXT NOT NULL DEFAULT '',
+        justification   TEXT NOT NULL DEFAULT '',
+        assessor        TEXT NOT NULL DEFAULT '',
+        approved_by     TEXT NOT NULL DEFAULT '',             -- έγκριση ανώτερου στελέχους (υψηλός κίνδυνος/ΠΕΠ)
+        next_review     TEXT NOT NULL DEFAULT '',             -- ISO ημερομηνία επόμενης επανεξέτασης
+        created_at      TEXT NOT NULL
+    );
+    CREATE INDEX idx_aml_assess_afm ON aml_assessments(afm, assessed_on);
+
+    CREATE TABLE aml_office (
+        item       TEXT PRIMARY KEY,                          -- q01..q23 | step01..step15 | doc_*
+        state      TEXT NOT NULL DEFAULT '',                  -- yes|no|na|done|''
+        note       TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE aml_register (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,                             -- training|report|rejection|whistle|audit
+        event_date TEXT NOT NULL,
+        afm        TEXT NOT NULL DEFAULT '',
+        title      TEXT NOT NULL DEFAULT '',
+        details    TEXT NOT NULL DEFAULT '',
+        outcome    TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_aml_register_kind ON aml_register(kind, event_date)
+    """,
+    # v6 — δέουσα επιμέλεια: προφίλ συναλλαγών/προέλευσης κεφαλαίων, κατάσταση φακέλου, έγγραφα ανά νομική μορφή,
+    # πραγματικοί δικαιούχοι, τρόπος εξόφλησης αμοιβής (βλ. aml/content.py)
+    """
+    ALTER TABLE aml_profile ADD COLUMN tx_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE aml_profile ADD COLUMN file_status TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aml_profile ADD COLUMN docs_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE aml_profile ADD COLUMN ubo_state TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aml_profile ADD COLUMN ubo_notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aml_profile ADD COLUMN fee_payment TEXT NOT NULL DEFAULT ''
+    """,
+    # v7 — δέουσα επιμέλεια: είδος πελάτη (διορθώσιμο) και υποθέσεις (εσωτερικές καταγγελίες ν. 4990/2022 /
+    # εσωτερικές αναφορές ύποπτων συναλλαγών -> απόφαση για αναφορά στην Αρχή). Κι αυτές ΔΕΝ διαγράφονται με τον πελάτη.
+    """
+    ALTER TABLE aml_profile ADD COLUMN client_kind TEXT NOT NULL DEFAULT '';
+
+    CREATE TABLE aml_cases (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind            TEXT NOT NULL,                        -- suspicion | whistle
+        received_on     TEXT NOT NULL,                        -- ISO ημερομηνία παραλαβής/εντοπισμού
+        channel         TEXT NOT NULL DEFAULT '',
+        afm             TEXT NOT NULL DEFAULT '',             -- πελάτης (για suspicion· προαιρετικό για whistle)
+        client_name     TEXT NOT NULL DEFAULT '',
+        category        TEXT NOT NULL DEFAULT '',             -- κατηγορία παράβασης (whistle)
+        description     TEXT NOT NULL DEFAULT '',
+        reporter        TEXT NOT NULL DEFAULT '',             -- κενό αν ανώνυμη
+        anonymous       INTEGER NOT NULL DEFAULT 0,
+        handler         TEXT NOT NULL DEFAULT '',             -- υπεύθυνος παραλαβής/διερεύνησης
+        status          TEXT NOT NULL DEFAULT 'received',
+        ack_on          TEXT NOT NULL DEFAULT '',             -- βεβαίωση παραλαβής (whistle)
+        feedback_on     TEXT NOT NULL DEFAULT '',             -- ενημέρωση καταγγέλλοντα (whistle)
+        tx_description  TEXT NOT NULL DEFAULT '',             -- συναλλαγή(ές) (suspicion)
+        tx_amount       TEXT NOT NULL DEFAULT '',
+        tx_date         TEXT NOT NULL DEFAULT '',
+        red_flags_json  TEXT NOT NULL DEFAULT '[]',
+        decision        TEXT NOT NULL DEFAULT '',             -- report | no_report | exempt (suspicion) / outcome (whistle)
+        decision_reason TEXT NOT NULL DEFAULT '',
+        decided_on      TEXT NOT NULL DEFAULT '',
+        authority_ref   TEXT NOT NULL DEFAULT '',             -- αριθμός πρωτοκόλλου αναφοράς στην Αρχή
+        actions         TEXT NOT NULL DEFAULT '',
+        closed_on       TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX idx_aml_cases_kind ON aml_cases(kind, received_on)
+    """,
+    # v8 — δέουσα επιμέλεια: νόμιμος εκπρόσωπος + πραγματικοί δικαιούχοι ανά πελάτη, και πρότυπα Word του γραφείου
+    # (δήλωση/συμφωνητικό/αξιολόγηση × φυσικά/νομικά πρόσωπα — βλ. aml/templating.py)
+    """
+    ALTER TABLE aml_profile ADD COLUMN rep_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE aml_profile ADD COLUMN ubo_json TEXT NOT NULL DEFAULT '[]';
+
+    CREATE TABLE aml_templates (
+        slot        TEXT PRIMARY KEY,                     -- π.χ. 'declaration:legal'
+        filename    TEXT NOT NULL DEFAULT '',
+        content     BLOB NOT NULL,
+        uploaded_at TEXT NOT NULL
+    )
+    """,
+    # v9 — δέουσα επιμέλεια: έγγραφα φακέλου που ανακτήθηκαν αυτόματα (Μητρώο ΑΑΔΕ, Έντυπο Ν/Ε1/Ε3, ΚΜΠΔ) και
+    # κωδικοί TAXISnet του ΝΟΜΙΜΟΥ ΕΚΠΡΟΣΩΠΟΥ (το ΚΜΠΔ δείχνει την εταιρεία μόνο σε αυτόν — βλ. aml/retrieval.py).
+    # Χωρίς FK/CASCADE, όπως όλοι οι πίνακες aml_* (τήρηση 5ετίας).
+    """
+    CREATE TABLE aml_files (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        afm          TEXT NOT NULL,
+        doc_key      TEXT NOT NULL,                        -- κλειδί της λίστας εγγράφων (aade, tax_return, ubo_registry…)
+        kind         TEXT NOT NULL DEFAULT '',             -- registry | income_n | income_e1 | income_e3 | kmpd | kmpd_cert
+        filename     TEXT NOT NULL,
+        path         TEXT NOT NULL,
+        bytes        INTEGER NOT NULL DEFAULT 0,
+        source       TEXT NOT NULL DEFAULT '',             -- aade | kmpd | manual
+        retrieved_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_aml_files_afm ON aml_files(afm, doc_key);
+
+    CREATE TABLE aml_rep_credentials (
+        afm        TEXT PRIMARY KEY,                       -- ΑΦΜ του ΠΕΛΑΤΗ (νομικού προσώπου)
+        taxis_user TEXT NOT NULL DEFAULT '',               -- enc:1:… του νόμιμου εκπροσώπου
+        taxis_pass TEXT NOT NULL DEFAULT '',               -- enc:1:…
+        updated_at TEXT NOT NULL
+    )
+    """,
+    # v10 — δέουσα επιμέλεια: έλεγχοι σε λίστες κυρώσεων (τεκμήριο ελέγχου για τον φάκελο, άρθρο 30) και κωδικοί
+    # Γ.Ε.ΜΗ. (businessportal) ανά πελάτη για τη σύνδεση στον τοπικό browser. Χωρίς FK/CASCADE (τήρηση 5ετίας).
+    """
+    CREATE TABLE aml_screenings (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        afm         TEXT NOT NULL,
+        screened_at TEXT NOT NULL,
+        source      TEXT NOT NULL DEFAULT '',              -- π.χ. «EU FSF 22/09/2026»
+        subjects_json TEXT NOT NULL DEFAULT '[]',          -- [{role, name, latin}]
+        hits_json   TEXT NOT NULL DEFAULT '[]',            -- πιθανές ταυτίσεις (προς έλεγχο από τον λογιστή)
+        result      TEXT NOT NULL DEFAULT 'clear',         -- clear | possible
+        review_note TEXT NOT NULL DEFAULT ''               -- «ψευδώς θετικό επειδή…» / «επιβεβαιώθηκε…»
+    );
+    CREATE INDEX idx_aml_screenings_afm ON aml_screenings(afm, screened_at);
+
+    CREATE TABLE aml_gemi_credentials (
+        afm        TEXT PRIMARY KEY,
+        gemi_user  TEXT NOT NULL DEFAULT '',               -- enc:1:…
+        gemi_pass  TEXT NOT NULL DEFAULT '',               -- enc:1:…
+        updated_at TEXT NOT NULL
+    )
+    """,
 ]
 
 

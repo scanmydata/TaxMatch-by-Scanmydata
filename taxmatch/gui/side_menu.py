@@ -208,12 +208,13 @@ class SideMenu(QWidget):
                   "Προσθήκη πελάτη — με ΑΦΜ (η επωνυμία έρχεται αυτόματα) ή από Excel")
         box.addSpacing(6)
 
-        self._pages = ("dashboard", "clients", "calendar", "news", "settings", "schedule")
+        self._pages = ("dashboard", "clients", "calendar", "news", "aml", "settings", "schedule")
         for name, text, tip in [
             ("dashboard", "Αρχική", "Σημερινό ενημερωτικό: ποιον αφορά τι"),
             ("clients", "Πελάτες", "Η λίστα των πελατών σας"),
             ("calendar", "Ημερολόγιο", "Προθεσμίες υποχρεώσεων: ΦΠΑ, VIES, Intrastat, ΑΠΔ…"),
             ("news", "Νέα & Matches", "Όλα τα άρθρα και ποιους πελάτες αφορούν"),
+            ("aml", "Δέουσα επιμέλεια", "Ανάλυση κινδύνου πελατών και φάκελος συμμόρφωσης (ν. 4557/2018)"),
         ]:
             self._add(box, name, text, tip)
 

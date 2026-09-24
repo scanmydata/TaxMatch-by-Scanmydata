@@ -54,7 +54,7 @@ def kind_colour(kind: str) -> str:
     Συνάρτηση και όχι σταθερό dict: το `CURRENT.accent` κ.λπ. πρέπει να διαβάζεται ΤΗ ΣΤΙΓΜΗ της κλήσης, αλλιώς
     ένα dict φτιαγμένο στο import θα κρατούσε τα χρώματα του αρχικού θέματος για πάντα, ακόμη κι αν ο χρήστης
     άλλαζε σε φωτεινό/σκούρο θέμα αργότερα."""
-    return {"news": CURRENT.accent, "rule": CURRENT.warn}.get(kind, CURRENT.muted)
+    return {"news": CURRENT.accent, "rule": CURRENT.warn, "aml": CURRENT.ok}.get(kind, CURRENT.muted)
 
 
 def add_reveal(field: QLineEdit) -> QLineEdit:

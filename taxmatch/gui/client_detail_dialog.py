@@ -1,4 +1,4 @@
-"""Καρτέλα πελάτη: προφίλ (επεξεργάσιμο), κωδικοί TAXISnet, προσεχείς προθεσμίες, νέα που τον αφορούν."""
+"""Καρτέλα πελάτη: προφίλ (επεξεργάσιμο), κωδικοί TAXISnet, προσεχείς προθεσμίες, νέα που τον αφορούν, δέουσα επιμέλεια."""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 
 from .. import db as dbmod
 from .. import deadlines
+from ..aml import model as aml_model, store as aml_store
+from ..aml.content import ASSESSMENT_LABEL
 from ..business_profiles import credentials as client_creds, service as clients
 from ..matching import engine
 from .busy import BusyOverlay
@@ -65,6 +67,7 @@ class ClientDetailDialog(QDialog):
         tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet")
         tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προσεχείς προθεσμίες")
         news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
+        tabs.addTab(self._aml_tab(), icon("aml", CURRENT.muted, 16), "Δέουσα επιμέλεια")
         if b["lookup_status"] == "ok":
             # Τα στοιχεία του πελάτη είναι ήδη πλήρη· αυτό που θα κοιτάξει πρώτα ο λογιστής είναι τι νέο τον αφορά,
             # όχι το προφίλ που δεν έχει αλλάξει.
@@ -223,6 +226,62 @@ class ClientDetailDialog(QDialog):
         box.addWidget(self.matches_list)
         return page
 
+    def _aml_tab(self) -> QWidget:
+        page = QWidget()
+        box = QVBoxLayout(page)
+        self.aml_summary = QLabel("")
+        self.aml_summary.setWordWrap(True)
+        self.aml_summary.setTextFormat(Qt.TextFormat.RichText)
+        box.addWidget(self.aml_summary)
+        row = QHBoxLayout()
+        assess = QPushButton(icon("aml", CURRENT.txt, 16), "  Νέα αξιολόγηση κινδύνου")
+        assess.setObjectName("primary")
+        assess.clicked.connect(self._new_aml_assessment)
+        row.addWidget(assess)
+        row.addStretch()
+        box.addLayout(row)
+        hist = QLabel("Ιστορικό αξιολογήσεων")
+        hist.setObjectName("muted")
+        box.addWidget(hist)
+        self.aml_history = QListWidget()
+        box.addWidget(self.aml_history, 1)
+        return page
+
+    def _new_aml_assessment(self) -> None:
+        if self.main.aml_page.open_assessment(self.afm):
+            self._reload()
+
+    def _reload_aml(self) -> None:
+        a = aml_store.latest(self.conn, self.afm)
+        profile = aml_store.get_profile(self.conn, self.afm)
+        done, total = aml_store.kyc_completeness(profile)
+        pep = aml_model.PEP_LABEL.get(profile["pep_status"], "")
+        if a:
+            cat = a["final_category"]
+            colour = {aml_model.LOW: CURRENT.ok, aml_model.MEDIUM: CURRENT.warn, aml_model.HIGH: CURRENT.bad}[cat]
+            badge = due_badge(a["next_review"])
+            review = badge[0] if badge else a["next_review"]
+            self.aml_summary.setText(
+                f"<span style='font-size:16px; font-weight:800; color:{colour}'>{aml_model.CATEGORY_LABEL[cat]} κίνδυνος</span>"
+                f" → {aml_model.DD_LABEL[cat]}<br>Τελευταία αξιολόγηση: {a['assessed_on']} "
+                f"({ASSESSMENT_LABEL.get(a['kind'], a['kind'])}, Μοντέλο {a['model']}) · Επόμενη επανεξέταση: {review}"
+                f"<br>ΠΕΠ: {pep} · Λίστα KYC: {done}/{total}")
+        else:
+            self.aml_summary.setText(f"<b style='color:{CURRENT.warn}'>Δεν έχει γίνει ακόμη αξιολόγηση κινδύνου.</b> "
+                                     f"Ο ν. 4557/2018 (άρθρο 13 παρ. 9) τη ζητά για κάθε πελάτη, νέο και υφιστάμενο."
+                                     f"<br>ΠΕΠ: {pep} · Λίστα KYC: {done}/{total}")
+        self.aml_history.clear()
+        for h in aml_store.history(self.conn, self.afm):
+            text = (f"{h['assessed_on']}  ·  {ASSESSMENT_LABEL.get(h['kind'], h['kind'])}  ·  "
+                    f"{aml_model.CATEGORY_LABEL[h['final_category']]}  ·  "
+                    + (f"{h['total_b']}/100" if h["model"] == "B" else f"{h['sum_a']:+d}")
+                    + (f"  ·  {h['justification'][:80]}" if h["justification"] else ""))
+            self.aml_history.addItem(QListWidgetItem(text))
+        if not self.aml_history.count():
+            placeholder = QListWidgetItem("Καμία αξιολόγηση ακόμη.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.aml_history.addItem(placeholder)
+
     def _open_deadline(self, item: QListWidgetItem) -> None:
         ev = item.data(Qt.ItemDataRole.UserRole)
         NewsDialog(ev["title"], ev["url"], meta=ev["date"], summary=ev.get("description", ""), parent=self).exec()
@@ -261,7 +320,8 @@ class ClientDetailDialog(QDialog):
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _delete_client(self) -> None:
-        if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;\n\n"
+                                "Το ιστορικό δέουσας επιμέλειας ΔΕΝ διαγράφεται (τήρηση 5 ετών, άρθρο 30 ν. 4557/2018).") != QMessageBox.StandardButton.Yes:
             return
         clients.delete(self.conn, self.afm)
         self.accept()
@@ -324,6 +384,8 @@ class ClientDetailDialog(QDialog):
                 item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.deadlines_list.addItem(item)
+
+        self._reload_aml()
 
         matches = engine.digest(self.conn, days=90, afm=self.afm)
         self.matches_list.clear()

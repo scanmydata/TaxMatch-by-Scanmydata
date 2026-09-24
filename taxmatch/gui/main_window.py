@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, logs, notices as notices_mod, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
+from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
 from ..extraction import llm_extract
@@ -31,6 +32,7 @@ from ..identifiers import is_valid_afm, kad_digits, normalize_afm
 from ..ingestion import sources, taxheaven_calendar
 from ..matching import engine
 from . import i18n
+from .aml_page import AmlPage
 from .busy import BusyOverlay
 from .client_detail_dialog import ClientDetailDialog
 from .client_dialog import ClientDialog
@@ -59,7 +61,7 @@ _C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP,
 _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτλος", 0, "Διπλό κλικ για προεπισκόπηση"),
              ("Κατάσταση", 110, ""), ("Πελάτες", 60, "")]
 
-TOUR_VERSION = 1
+TOUR_VERSION = 3                                       # 2: νέα σελίδα «Δέουσα επιμέλεια» · 3: βήματα του φακέλου ΔΕ
 
 _WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
 
@@ -222,8 +224,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self.stack, 1)
         self._pages = {
             "dashboard": self._dashboard_page(), "clients": self._clients_page(),
-            "calendar": self._calendar_page(), "news": self._news_page(), "settings": self._settings_page(),
+            "calendar": self._calendar_page(), "news": self._news_page(), "aml": AmlPage(self),
+            "settings": self._settings_page(),
         }
+        self.aml_page: AmlPage = self._pages["aml"]
         for page in self._pages.values():
             self.stack.addWidget(page)
 
@@ -263,7 +267,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(page)
         self.menu.set_active(name)
         {"dashboard": self.reload_dashboard, "clients": self.reload_clients, "calendar": self.reload_calendar,
-         "news": self.reload_news, "settings": self.reload_settings}.get(name, lambda: None)()
+         "news": self.reload_news, "aml": self.aml_page.reload, "settings": self.reload_settings}.get(name, lambda: None)()
 
     def reload_all(self) -> None:
         self._reload_notices()
@@ -271,8 +275,17 @@ class MainWindow(QMainWindow):
         self.reload_clients()
         self.reload_calendar()
         self.reload_news()
+        self.aml_page.reload()
         self.reload_settings()
         self._refresh_status_bar()
+
+    def after_aml_change(self) -> None:
+        """Μετά από αποθήκευση αξιολόγησης δέουσας επιμέλειας: η επανεξέταση εμφανίζεται στο Ημερολόγιο/Αρχική και
+        η ειδοποίηση για εκπρόθεσμες/ελλιπείς αξιολογήσεις ενημερώνεται αμέσως."""
+        self.aml_page.reload_clients()
+        self._render_calendar_from_db()
+        self.reload_dashboard()
+        self._reload_notices()
 
     def _refresh_status_bar(self) -> None:
         total = self.conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0]
@@ -285,7 +298,7 @@ class MainWindow(QMainWindow):
             item = self.notices_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        for n in notices_mod.collect(self.conn):
+        for n in notices_mod.collect(self.conn) + self._aml_notices():
             frame = QFrame()
             frame.setObjectName("banner")
             row = QHBoxLayout(frame)
@@ -300,8 +313,25 @@ class MainWindow(QMainWindow):
             row.addWidget(btn)
             self.notices_box.addWidget(frame)
 
+    def _aml_notices(self) -> list[dict]:
+        """Ειδοποίηση μόνο για ΕΚΠΡΟΘΕΣΜΕΣ επανεξετάσεις δέουσας επιμέλειας (όχι για «χωρίς αξιολόγηση»: θα ήταν
+        μόνιμο banner για κάθε γραφείο που δεν χρησιμοποιεί το module — εκείνο φαίνεται στη σελίδα της). Ζει εδώ και
+        όχι στο `notices.collect`, γιατί το web UI δεν έχει σελίδα δέουσας επιμέλειας για να οδηγήσει."""
+        out = []
+        overdue = aml_store.summary_counts(self.conn)["overdue"]
+        if overdue:
+            out.append({"level": "warn", "endpoint": "aml", "label": "Δέουσα επιμέλεια",
+                        "text": f"Εκπρόθεσμη επανεξέταση δέουσας επιμέλειας σε {overdue} "
+                                f"{'πελάτη' if overdue == 1 else 'πελάτες'} (άρθρο 13 παρ. 7 ν. 4557/2018)."})
+        pending = aml_cases.attention(self.conn)
+        if pending:
+            out.append({"level": "danger", "endpoint": "aml", "label": "Υποθέσεις",
+                        "text": f"{len(pending)} {'υπόθεση θέλει' if len(pending) == 1 else 'υποθέσεις θέλουν'} ενέργεια: "
+                                + "; ".join(f"#{c['id']} {c['reason']}" for c in pending[:3]) + "."})
+        return out
+
     def _go_from_notice(self, endpoint: str) -> None:
-        page = {"main.settings": "settings", "main.clients_list": "clients"}.get(endpoint, "dashboard")
+        page = {"main.settings": "settings", "main.clients_list": "clients", "aml": "aml"}.get(endpoint, "dashboard")
         self._show_page(page)
 
     # ------------------------------------------------------------------ Αρχική
@@ -366,7 +396,7 @@ class MainWindow(QMainWindow):
     def reload_dashboard(self) -> None:
         today = date.today()
         groups = engine.digest_articles(self.conn, days=3)
-        upcoming = deadlines.events_between(self.conn, today, today + timedelta(days=21))
+        upcoming = deadlines.events_between(self.conn, today, today + timedelta(days=21), include_aml=True)
         urgent = sum(1 for ev in upcoming if (date.fromisoformat(ev["date"]) - today).days <= 7)
         cutoff = (datetime.now().astimezone().astimezone(tz=None) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         articles_n = self.conn.execute("SELECT COUNT(*) FROM articles WHERE COALESCE(published_at,fetched_at)>=?", (cutoff,)).fetchone()[0]
@@ -413,6 +443,9 @@ class MainWindow(QMainWindow):
 
     def _open_dash_deadline(self, item: QListWidgetItem) -> None:
         ev = item.data(Qt.ItemDataRole.UserRole)
+        if ev.get("kind") == "aml":
+            self.aml_page.open_assessment(ev["afm"])
+            return
         NewsDialog(ev["title"], ev["url"], meta=ev["date"], summary=ev.get("description", ""), parent=self).exec()
 
     # ------------------------------------------------------------------ Πελάτες
@@ -580,7 +613,8 @@ class MainWindow(QMainWindow):
         afms = self._selected_client_afms()
         if not afms:
             return
-        if QMessageBox.question(self, "Διαγραφή", f"Διαγραφή {len(afms)} πελατών μαζί με τα matches και τους κωδικούς τους;") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Διαγραφή", f"Διαγραφή {len(afms)} πελατών μαζί με τα matches και τους κωδικούς τους;\n\n"
+                                "Το ιστορικό δέουσας επιμέλειας ΔΕΝ διαγράφεται (τήρηση 5 ετών, άρθρο 30 ν. 4557/2018).") != QMessageBox.StandardButton.Yes:
             return
         for afm in afms:
             clients.delete(self.conn, afm)
@@ -804,7 +838,7 @@ class MainWindow(QMainWindow):
         self._cal_events = deadlines.events_between(
             self.conn, first, date(first.year, first.month, last_day), afm=afm,
             include_news=self.cal_news.isChecked(), include_rules=self.cal_rules.isChecked(),
-            include_conditional=self.cal_cond.isChecked())
+            include_conditional=self.cal_cond.isChecked(), include_aml=True)
         self._fill_client_combo()
         if self._cal_view_day is not None:
             self._render_cal_day()
@@ -854,7 +888,8 @@ class MainWindow(QMainWindow):
         for ev in self._cal_events:
             if ev["date"] != day_str:
                 continue
-            kind_label = {"news": "νέα", "rule": "κανόνας", "general": "ΑΑΔΕ/taxheaven"}.get(ev["kind"], ev["kind"])
+            kind_label = {"news": "νέα", "rule": "κανόνας", "general": "ΑΑΔΕ/taxheaven",
+                          "aml": "δέουσα επιμέλεια"}.get(ev["kind"], ev["kind"])
             text = f"{ev['title']}  ·  {kind_label}"
             if ev.get("conditional"):
                 text += " · υπό προϋποθέσεις"
@@ -882,6 +917,9 @@ class MainWindow(QMainWindow):
 
     def _open_cal_event(self, item: QListWidgetItem) -> None:
         ev = item.data(Qt.ItemDataRole.UserRole)
+        if ev.get("kind") == "aml":
+            self.aml_page.open_assessment(ev["afm"])
+            return
         NewsDialog(ev["title"], ev["url"], meta=ev["date"], summary=ev.get("description", ""), parent=self).exec()
 
     # ------------------------------------------------------------------ Νέα & Matches
@@ -1428,7 +1466,21 @@ class MainWindow(QMainWindow):
                 lambda: self.cal_grid_box, lambda: (self._show_page("calendar"), self._close_cal_day())),
             Step("4. Νέα & Matches", "Κάθε άρθρο δείχνει ποιους πελάτες αφορά και γιατί. Διπλό κλικ ανοίγει προεπισκόπηση "
                 "πριν τον σύνδεσμο — ποτέ απευθείας browser.", lambda: self.news_table, lambda: self._show_page("news")),
-            Step("5. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν — φαίνονται πρώτα στη λίστα — με αυτόματη "
+            Step("5. Δέουσα επιμέλεια", "Ανάλυση κινδύνου κάθε πελάτη κατά τον ν. 4557/2018 (Παραρτήματα Ι/ΙΙ, ΠΕΠ, "
+                "τρίτες χώρες υψηλού κινδύνου). Διπλό κλικ σε πελάτη ανοίγει τον φάκελό του: KYC, εκπρόσωπος και "
+                "πραγματικοί δικαιούχοι, συναλλαγές/προέλευση κεφαλαίων, παράγοντες κινδύνου με ζωντανό αποτέλεσμα, "
+                "αυτόματη λήψη εγγράφων (Μητρώο ΑΑΔΕ, δήλωση εισοδήματος, ΚΜΠΔ), έλεγχος σε λίστες κυρώσεων ΕΕ και "
+                "σύνδεση στο Γ.Ε.ΜΗ. Οι επανεξετάσεις μπαίνουν αυτόματα στο Ημερολόγιο.",
+                lambda: self.aml_page.table, lambda: (self._show_page("aml"), self.aml_page.tabs.setCurrentIndex(0))),
+            Step("5α. Έγγραφα πελάτη", "Για τον επιλεγμένο πελάτη: Δήλωση παροχής στοιχείων, Ερωτηματολόγιο KYC, Έκθεση "
+                "αξιολόγησης και Ρήτρες σύμβασης σε PDF, Word από τα πρότυπα του γραφείου σας, αυτόματη λήψη εγγράφων "
+                "και μαζικός έλεγχος κυρώσεων για όλους τους πελάτες.",
+                lambda: self.aml_page.docs_btn, lambda: (self._show_page("aml"), self.aml_page.tabs.setCurrentIndex(0))),
+            Step("5β. Γραφείο & υποθέσεις", "Στις υπόλοιπες καρτέλες: αυτοδιάγνωση με τα 23 σημεία της ΑΑΔΕ, φάκελος "
+                "συμμόρφωσης γραφείου, υποθέσεις (αναφορές ύποπτων συναλλαγών στην Αρχή και καταγγελίες ν. 4990/2022 με "
+                "τις προθεσμίες τους), μητρώα, πρότυπα Word και μεθοδολογία (Μοντέλο Α/Β).",
+                lambda: self.aml_page.tabs.tabBar(), lambda: self._show_page("aml")),
+            Step("6. Ρυθμίσεις", "Κλειδιά API, μοντέλο LLM (προτιμώνται δωρεάν — φαίνονται πρώτα στη λίστα — με αυτόματη "
                 "εναλλαγή αν κάποιο σταματήσει να δουλεύει), πηγές ειδήσεων, προγραμματισμός, κύριος κωδικός και αντίγραφο "
                 "ασφαλείας/επαναφορά της βάσης.", lambda: self.menu.button("settings"), lambda: self._show_page("settings")),
         ]
