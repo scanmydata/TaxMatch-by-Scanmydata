@@ -23,6 +23,9 @@ FIELD_ALIASES: dict[str, set[str]] = {
     "afm": {"αφμ", "α φ μ", "afm", "vat", "vat number", "vatnumber", "tax id", "taxid", "αφμ υποχρεου"},
     "name": {"επωνυμια επωνυμο", "επωνυμια", "επωνυμο", "ονομασια", "name", "company", "πελατης", "επιχειρηση",
              "ονομα επιχειρησης", "onomasia"},
+    # «Όνομα» (μικρό όνομα) — στο Excel των λογιστικών προγραμμάτων το «Επωνυμία/Επώνυμο» έχει ΜΟΝΟ το επώνυμο των
+    # φυσικών προσώπων και το μικρό όνομα είναι χωριστή στήλη· χωρίς αυτήν οι πελάτες εισάγονταν ως «ΑΓΓΕΛΙΚΑΚΗΣ».
+    "first_name": {"ονομα", "μικρο ονομα", "first name", "firstname", "given name"},
     "kad": {"καδ", "κ α δ", "kad", "καδ κυριο", "κυριος καδ", "καδ κυριος"},
     "taxis_user": {"ονομα χρηστη taxisnet", "χρηστης taxisnet", "taxisnet user", "taxisnet username", "taxis user",
                    "ονομα χρηστη taxis", "username taxisnet", "taxis net user", "ονομα χρηστη taxis net",
@@ -80,6 +83,14 @@ class ImportResult:
     @property
     def credential_count(self) -> int:
         return sum(1 for r in self.rows if r.has_credentials)
+
+
+def full_name(surname: str, first_name: str) -> str:
+    """«ΕΠΩΝΥΜΟ ΟΝΟΜΑ» για φυσικά πρόσωπα· οι εταιρείες (κενό μικρό όνομα) μένουν ως έχουν."""
+    surname, first_name = " ".join(surname.split()), " ".join(first_name.split())
+    if not first_name or strip_accents(surname).upper().endswith(strip_accents(first_name).upper()):
+        return surname
+    return f"{surname} {first_name}".strip()
 
 
 def _split_kads(v: object) -> list[str]:
@@ -184,7 +195,7 @@ def parse_rows(table: Iterable[tuple]) -> ImportResult:
             result.duplicates += 1
             continue
         seen.add(afm)
-        result.rows.append(ImportRow(afm=afm, name=get(row, "name"), kads=_split_kads(get(row, "kad")),
+        result.rows.append(ImportRow(afm=afm, name=full_name(get(row, "name"), get(row, "first_name")), kads=_split_kads(get(row, "kad")),
                                      checksum_ok=is_valid_afm(afm),
                                      taxis_user=get(row, "taxis_user"), taxis_pass=get(row, "taxis_pass")))
     _finish(result)

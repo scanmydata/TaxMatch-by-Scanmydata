@@ -223,3 +223,33 @@ def test_for_matching_and_filters(conn):
     assert [b["afm"] for b in service.list_all(conn, q="βητα")] == ["123456783"]
     fm = {b["afm"]: b for b in service.for_matching(conn)}
     assert fm[AFM]["kads"] == ["47.11.10.01"] and fm["123456783"]["kads"] == []
+
+
+def test_import_combines_surname_and_first_name_columns_for_natural_persons():
+    """Στο Excel των λογιστικών προγραμμάτων η «Επωνυμία/Επώνυμο» έχει ΜΟΝΟ το επώνυμο των φυσικών προσώπων και το
+    μικρό όνομα είναι χωριστή στήλη «Όνομα» — πριν εισάγονταν ως «ΑΓΓΕΛΙΚΑΚΗΣ» χωρίς όνομα. Οι εταιρείες (κενό
+    «Όνομα») μένουν ως έχουν· «Όνομα Πατρός» ΔΕΝ προστίθεται."""
+    res = import_excel.parse_rows([
+        ("Κωδικός", "Α.Φ.Μ.", "Επωνυμία/Επώνυμο", "Όνομα", "Όνομα Πατρός", "Είδος"),
+        ("1ΕΦΚΑ", "120988099", "ΑΓΓΕΛΙΚΑΚΗΣ", "ΙΩΑΝΝΗΣ", "ΔΗΜΗΤΡΙΟΣ", "Φυσικό Πρόσωπο"),
+        ("10ΚΦΠΑ", "996532865", "BIOMEDLEX ΑΣΤΙΚΗ ΜΗ ΚΕΡΔΟΣΚΟΠΙΚΗ ΕΤΑΙΡΕΙΑ", "", "", "Νομικό Πρόσωπο"),
+    ])
+    assert [r.name for r in res.rows] == ["ΑΓΓΕΛΙΚΑΚΗΣ ΙΩΑΝΝΗΣ", "BIOMEDLEX ΑΣΤΙΚΗ ΜΗ ΚΕΡΔΟΣΚΟΠΙΚΗ ΕΤΑΙΡΕΙΑ"]
+
+
+def test_full_name_does_not_duplicate_first_name_already_in_the_surname_cell():
+    assert import_excel.full_name("ΑΛΗΦΡΑΓΚΗΣ ΛΟΥΚΑΣ", "ΛΟΥΚΑΣ") == "ΑΛΗΦΡΑΓΚΗΣ ΛΟΥΚΑΣ"
+    assert import_excel.full_name("ΑΛΗΦΡΑΓΚΗΣ", "") == "ΑΛΗΦΡΑΓΚΗΣ"
+
+
+def test_reimport_completes_surname_only_names_but_never_replaces_a_user_edited_name(conn):
+    """Πελάτες που είχαν εισαχθεί παλιότερα μόνο με επώνυμο συμπληρώνονται από νέα εισαγωγή του ίδιου Excel
+    (η νέα επωνυμία ΕΠΕΚΤΕΙΝΕΙ την υπάρχουσα)· όνομα που άλλαξε ο χρήστης (δεν είναι πρόθεμα) μένει ως έχει."""
+    service.add(conn, AFM, "ΑΓΓΕΛΙΚΑΚΗΣ")
+    service.add(conn, "123456783", "Χειροκίνητο όνομα")
+    res = import_excel.parse_rows([("ΑΦΜ", "Επωνυμία", "Όνομα"), (AFM, "ΑΓΓΕΛΙΚΑΚΗΣ", "ΙΩΑΝΝΗΣ"),
+                                   ("123456783", "ΑΛΛΟ", "ΟΝΟΜΑ")])
+    out = service.import_result(conn, res)
+    assert service.get(conn, AFM)["name"] == "ΑΓΓΕΛΙΚΑΚΗΣ ΙΩΑΝΝΗΣ"
+    assert service.get(conn, "123456783")["name"] == "Χειροκίνητο όνομα"
+    assert out["updated"] == 1

@@ -11,6 +11,7 @@ import requests
 from .. import db, settings_store
 from ..identifiers import format_kad, kad_digits, normalize_afm
 from . import credentials, legal_form, lookup_aade, lookup_business_portal as portal, vies
+from ..textutil import strip_accents
 from .import_excel import ImportResult
 from .vat_profile import interpret_vat_profile
 
@@ -124,6 +125,17 @@ def for_matching(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             for r in conn.execute("SELECT afm,name,legal_form,books_category,vat_subject FROM businesses")]
 
 
+def _is_better_name(current: str, new: str) -> bool:
+    """Κενή επωνυμία, ή η νέα ΕΠΕΚΤΕΙΝΕΙ την υπάρχουσα (π.χ. «ΑΓΓΕΛΙΚΑΚΗΣ» -> «ΑΓΓΕΛΙΚΑΚΗΣ ΙΩΑΝΝΗΣ») — έτσι μια νέα
+    εισαγωγή του ίδιου Excel συμπληρώνει τα μικρά ονόματα που έλειπαν από παλιότερη εισαγωγή, χωρίς ποτέ να
+    αντικαταστήσει επωνυμία που διόρθωσε ο χρήστης (αυτή δεν είναι πρόθεμα της νέας)."""
+    current = " ".join((current or "").split())
+    if not current:
+        return True
+    a, b = strip_accents(current).upper(), strip_accents(new).upper()
+    return len(b) > len(a) and b.startswith(a + " ")
+
+
 def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]:
     """Αποθηκεύει τις γραμμές του import. Υπάρχοντες πελάτες δεν αντικαθίστανται (συμπληρώνεται μόνο κενή επωνυμία)·
     οι κωδικοί TAXISnet όμως ΕΝΗΜΕΡΩΝΟΝΤΑΙ και σε υπάρχοντες (η μαζική ρύθμιση κωδικών είναι βασική χρήση)."""
@@ -133,7 +145,7 @@ def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]
             added += 1
         else:
             existing = conn.execute("SELECT name FROM businesses WHERE afm=?", (r.afm,)).fetchone()
-            if r.name and not existing["name"]:
+            if r.name and _is_better_name(existing["name"], r.name):
                 conn.execute("UPDATE businesses SET name=?, updated_at=? WHERE afm=?", (r.name, db.utcnow(), r.afm))
                 updated += 1
         if r.has_credentials and credentials.set_(conn, r.afm, r.taxis_user, r.taxis_pass):

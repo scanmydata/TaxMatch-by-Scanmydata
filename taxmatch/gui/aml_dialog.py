@@ -655,6 +655,7 @@ class AmlAssessmentDialog(QDialog):
             toast(self, f"Ο έλεγχος κυρώσεων απέτυχε: {msg}", "danger")
 
         self.sanctions_btn.setEnabled(False)
+        toast(self, "Ξεκίνησε ο έλεγχος σε λίστες κυρώσεων…", "info")
         self.busy.start("Έλεγχος σε λίστες κυρώσεων…")
         self._tasks.append(run_task(self, work, on_progress=self.busy.start, on_done=done, on_error=failed))
 
@@ -700,6 +701,7 @@ class AmlAssessmentDialog(QDialog):
             toast(self, f"Γ.Ε.ΜΗ.: {msg}", "danger")
 
         self.gemi_btn.setEnabled(False)
+        toast(self, "Ξεκίνησε η σύνδεση στο Γ.Ε.ΜΗ.…", "info")
         self.busy.start("Σύνδεση στο Γ.Ε.ΜΗ.…")
         self._tasks.append(run_task(self, lambda progress: gemi_browser.open_logged_in(*creds, progress=progress),
                                     on_progress=self.busy.start, on_done=done, on_error=failed))
@@ -772,6 +774,7 @@ class AmlAssessmentDialog(QDialog):
             toast(self, f"Η λήψη απέτυχε: {msg}", "danger")
 
         self.fetch_btn.setEnabled(False)
+        toast(self, "Ξεκίνησε η λήψη εγγράφων…", "info")
         self.busy.start("Λήψη εγγράφων…")
         self._tasks.append(run_task(self, work, on_progress=self.busy.start, on_done=done, on_error=failed))
 

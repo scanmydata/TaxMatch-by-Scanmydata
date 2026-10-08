@@ -16,14 +16,14 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLay
 
 from .theme import CURRENT
 
-_DEFAULT_MS = {"ok": 4200, "warn": 6000, "danger": 5000}
+_DEFAULT_MS = {"ok": 4200, "info": 4200, "warn": 6000, "danger": 5000}
 
 
 class _ToastItem(QFrame):
     def __init__(self, message: str, level: str) -> None:
         super().__init__()
         self.setObjectName("toastItem")
-        colour = {"ok": CURRENT.ok, "warn": CURRENT.warn, "danger": CURRENT.bad}.get(level, CURRENT.accent)
+        colour = {"ok": CURRENT.ok, "warn": CURRENT.warn, "danger": CURRENT.bad}.get(level, CURRENT.accent)  # info = accent
         self.setStyleSheet(
             f"QFrame#toastItem {{ background:{CURRENT.panel}; border:1px solid {CURRENT.line}; "
             f"border-left:3px solid {colour}; border-radius:10px; }}"
@@ -60,7 +60,8 @@ class ToastHost(QWidget):
         host.installEventFilter(self)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        if watched is self._host and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+        # getattr: το φίλτρο μπορεί να κληθεί και κατά τη δημιουργία/καταστροφή, πριν οριστεί (ή αφού χαθεί) το `_host`
+        if watched is getattr(self, "_host", None) and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
             self._reposition()
         return False
 
@@ -99,7 +100,7 @@ class ToastHost(QWidget):
 def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = None) -> None:
     """Δείχνει ένα πλευρικό μήνυμα πάνω στο `window` (`MainWindow` ή οποιοδήποτε `QDialog`).
 
-    `level`: "ok" (πράσινο) | "warn" (πορτοκαλί) | "danger" (κόκκινο, εξαφανίζεται μόνο του μετά από 5"). Πάντα
+    `level`: "info" (μπλε — «ξεκίνησε μια ενέργεια») | "ok" (πράσινο) | "warn" (πορτοκαλί) | "danger" (κόκκινο, εξαφανίζεται μόνο του μετά από 5"). Πάντα
     κλείνει και χειροκίνητα με το «×». `ms=0` το αφήνει μέχρι να κλείσει μόνο χειροκίνητα — δεν το χρησιμοποιούμε
     πια για σφάλματα (ο χρήστης θέλει να εξαφανίζονται μόνα τους), κρατιέται μόνο ως δυνατότητα.
     """

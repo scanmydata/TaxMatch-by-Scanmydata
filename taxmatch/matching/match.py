@@ -91,6 +91,10 @@ def _criterion_form(forms: list[str], business: dict[str, Any]) -> tuple[Optiona
     return False, "νομική μορφή"
 
 
+#: Λόγος match για άρθρο «για όλους» — τα στοχευμένα matches (ΚΑΔ/βιβλία/ΦΠΑ/νομική μορφή) έχουν άλλον λόγο.
+ALL_SCOPE_REASON = "Αφορά όλες τις επιχειρήσεις"
+
+
 def match_business(extracted: dict[str, Any], business: dict[str, Any]) -> Optional[Match]:
     """`extracted` = κανονικοποιημένο JSON (scope.normalize), `business` = {kads, books_category,
     vat_subject, legal_form, …}. Επιστρέφει Match ή None."""
@@ -98,7 +102,7 @@ def match_business(extracted: dict[str, Any], business: dict[str, Any]) -> Optio
         return None
     scope = extracted.get("scope") or {}
     if scope.get("type", "all") == "all":
-        return Match("Αφορά όλες τις επιχειρήσεις", 1.0)
+        return Match(ALL_SCOPE_REASON, 1.0)
 
     results: list[tuple[Optional[bool], str]] = []
     if scope.get("kad_prefixes"):

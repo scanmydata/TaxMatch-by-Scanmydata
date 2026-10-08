@@ -78,7 +78,8 @@ def test_client_search_filter_hides_non_matching_rows(window, conn):
     service.add(conn, AFM, "ΚΑΦΕΤΕΡΙΑ")
     service.add(conn, "123456783", "ΒΙΒΛΙΟΠΩΛΕΙΟ")
     window.reload_clients()
-    window.client_search.setText("καφε")
+    window.quick_search.setText("καφε")             # η ΜΙΑ γραμμή αναζήτησης (πάνω-δεξιά) φιλτράρει τον πίνακα
+    assert not hasattr(window, "client_search"), "δεν πρέπει να υπάρχει δεύτερη μπάρα αναζήτησης στους Πελάτες"
     assert window.client_table.rowCount() == 2
     visible = [r for r in range(2) if not window.client_table.isRowHidden(r)]
     assert len(visible) == 1
@@ -130,6 +131,13 @@ def test_llm_model_refresh_populates_combo_and_keeps_current_selection(window, c
     assert window._combo_model_value(window.llm_model_groq) == "llama-3.3-70b-versatile"
 
 
+def _toast_texts(window):
+    host = getattr(window, "_toast_host", None)
+    if host is None:
+        return []
+    return [host._box.itemAt(i).widget().layout().itemAt(0).widget().text() for i in range(host._box.count())]
+
+
 def test_start_lookup_uses_its_own_db_connection_not_the_uis(window, conn):
     """`_start_lookup`'s `work()` χρησιμοποιούσε το `self.conn` (φτιαγμένο στο UI thread) μέσα σε πραγματικό
     background QThread· το sqlite3 απαγορεύει χρήση μιας σύνδεσης από ΑΛΛΟ thread από αυτό που τη δημιούργησε
@@ -154,11 +162,10 @@ def test_test_llm_uses_its_own_db_connection_not_the_uis(window, conn):
     settings_store.set_value(conn, "groq_api_key", "")
     window._toast_host = None  # νέο host ώστε να μετρήσουμε καθαρά τα toasts αυτού του test
     window._test_llm()
-    assert _pump_until(lambda: window._toast_host is not None and window._toast_host._box.count() > 0)
-    # Το toast δεν εκθέτει το κείμενό του ως attribute δημόσια· το πρώτο widget της γραμμής του είναι το QLabel.
-    label = window._toast_host._box.itemAt(0).widget().layout().itemAt(0).widget()
-    assert "thread" not in label.text().lower() and "sqlite" not in label.text().lower()
-    assert "API key" in label.text() or "δεν έχει οριστεί" in label.text()
+    # Πρώτα εμφανίζεται το toast έναρξης («Ξεκίνησε η δοκιμή…»), μετά το αποτέλεσμα — περιμένουμε το αποτέλεσμα.
+    assert _pump_until(lambda: any("API key" in t or "δεν έχει οριστεί" in t for t in _toast_texts(window)))
+    for text in _toast_texts(window):
+        assert "thread" not in text.lower() and "sqlite" not in text.lower()
 
 
 def test_test_llm_success_clears_the_stale_error_banner(window, conn, monkeypatch):
@@ -572,3 +579,193 @@ def test_aml_dialog_kmpd_import_sanctions_and_gemi(qapp, conn, monkeypatch):
     assert gemi_browser.get_credentials(conn, AFM) == ("gemi", "pw") and dlg.gemi_pass.text() == ""
     assert retrieval.get_rep_credentials(conn, AFM) is None
     dlg.deleteLater()
+
+
+# ------------------------------------------------------------------ λίστα πελατών: επιλογή/φίλτρα, import popup
+
+def _visible_rows(window):
+    return [r for r in range(window.client_table.rowCount()) if not window.client_table.isRowHidden(r)]
+
+
+def test_select_all_deselect_all_and_dynamic_clear_filters_button(window, conn):
+    service.add(conn, AFM, "ΚΑΦΕΤΕΡΙΑ")
+    service.add(conn, "123456783", "ΒΙΒΛΙΟΠΩΛΕΙΟ")
+    service.add(conn, "100000008", "ΚΑΦΕΝΕΙΟ")
+    window.reload_clients()
+    assert window.client_clear_filters_btn.isHidden(), "το «Διαγραφή φίλτρων» φαίνεται μόνο όταν υπάρχει φίλτρο"
+
+    window._set_all_clients_checked(True)
+    assert len(window._selected_client_afms()) == 3
+    window._set_all_clients_checked(False)
+    assert window._selected_client_afms() == []
+
+    window.quick_search.setText("καφε")
+    assert len(_visible_rows(window)) == 2
+    assert not window.client_clear_filters_btn.isHidden()
+    assert "(1)" in window.client_clear_filters_btn.text()
+    window._set_all_clients_checked(True)                  # επιλέγει ΜΟΝΟ τους ορατούς
+    assert len(window._selected_client_afms()) == 2
+    assert "εμφανίζονται 2 από 3" in window.client_sel_label.text()
+
+    window._clear_client_filters()
+    assert window.quick_search.text() == "" and len(_visible_rows(window)) == 3
+    assert window.client_clear_filters_btn.isHidden()
+    window._set_all_clients_checked(False)
+    assert window._selected_client_afms() == []
+
+
+def test_clear_filters_button_counts_column_filters_too(window, conn):
+    from taxmatch.gui.main_window import _C_STATE
+    service.add(conn, AFM, "ΚΑΦΕΤΕΡΙΑ")
+    service.add(conn, "123456783", "ΒΙΒΛΙΟΠΩΛΕΙΟ")
+    conn.execute("UPDATE businesses SET activity_state='active' WHERE afm=?", (AFM,))
+    window.reload_clients()
+    window._client_col_filter.filters[_C_STATE] = {"Ενεργή"}
+    window._apply_client_filter()
+    assert len(_visible_rows(window)) == 1 and not window.client_clear_filters_btn.isHidden()
+    window._clear_client_filters()
+    assert window._client_col_filter.filters == {} and len(_visible_rows(window)) == 2
+
+
+def _write_clients_xlsx(path):
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Α.Φ.Μ.", "Επωνυμία/Επώνυμο", "Όνομα"])
+    ws.append(["094259216", "ΔΟΚΙΜΑΣΤΙΚΟΣ", "ΓΙΩΡΓΟΣ"])
+    wb.save(path)
+
+
+@pytest.mark.parametrize("button_text, expect_lookup, expect_import", [("Εισαγωγή & ενημέρωση στοιχείων", True, True),
+                                                                          ("Μόνο εισαγωγή", False, True), ("Άκυρο", False, False)])
+def test_excel_import_popup_asks_whether_to_update_details_now(window, conn, monkeypatch, tmp_path,
+                                                               button_text, expect_lookup, expect_import):
+    """Μαζική εισαγωγή Excel -> ΕΝΑ popup με τρεις επιλογές: «Εισαγωγή & ενημέρωση στοιχείων» / «Μόνο εισαγωγή» /
+    «Άκυρο». Η ανάκτηση (ΑΑΔΕ/ΓΕΜΗ/VIES) ξεκινά ΜΟΝΟ στην πρώτη."""
+    from PySide6.QtWidgets import QMessageBox
+    xlsx = tmp_path / "clients.xlsx"
+    _write_clients_xlsx(xlsx)
+    looked_up = []
+    monkeypatch.setattr(window, "_start_lookup", lambda afms: looked_up.append(list(afms)))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton",
+                        lambda self: next(b for b in self.buttons() if b.text() == button_text))
+
+    window._import_excel_from_path(xlsx)
+
+    assert (service.get(conn, "094259216") is not None) is expect_import
+    if expect_import:
+        assert service.get(conn, "094259216")["name"] == "ΔΟΚΙΜΑΣΤΙΚΟΣ ΓΙΩΡΓΟΣ"
+    assert looked_up == ([["094259216"]] if expect_lookup else [])
+
+
+def test_run_check_announces_start_and_result_with_flash_messages(window, conn, monkeypatch):
+    from taxmatch.gui import main_window as mw_mod
+    monkeypatch.setattr(mw_mod.pipeline, "run_pipeline",
+                        lambda trigger, on_progress=None, **k: {"errors": [], "match": {"added": 2}})
+    window._toast_host = None
+    window._run_check()
+    assert any("Ξεκίνησε ο έλεγχος" in t for t in _toast_texts(window)), "toast έναρξης πάνω-δεξιά"
+    assert _pump_until(lambda: any("2 νέα matches" in t for t in _toast_texts(window)))
+
+
+def test_start_lookup_announces_start_with_a_flash_message(window, conn):
+    service.add(conn, AFM, "ΔΟΚΙΜΗ")
+    window._toast_host = None
+    window._start_lookup([AFM])
+    assert any("Ξεκίνησε η ανάκτηση στοιχείων" in t for t in _toast_texts(window))
+    assert _pump_until(lambda: window.run_status.text() == "Η ανάκτηση στοιχείων ολοκληρώθηκε.")
+
+
+# ------------------------------------------------------------------ ημερολόγιο: νέα ημέρας -> πελάτες -> popup
+
+def _article_with_deadline(conn, deadline, afm_names):
+    import json
+    now = db.utcnow()
+    conn.execute("INSERT INTO articles(source,title,url,url_hash,published_at,fetched_at,extraction_status,extracted_json,deadline) "
+                 "VALUES ('taxheaven_new','Νέα προθεσμία ΦΠΑ','https://x/9','h9',?,?,'done',?,?)",
+                 (now, now, json.dumps({"summary": "Περίληψη νέου", "action_required": "Υποβολή",
+                                        "scope": {"type": "all"}, "relevant": True}), deadline))
+    art = conn.execute("SELECT id FROM articles WHERE url_hash='h9'").fetchone()["id"]
+    for afm, name, reason, conf in afm_names:
+        service.add(conn, afm, name)
+        conn.execute("INSERT INTO matches(article_id,afm,matched_reason,confidence,created_at) VALUES (?,?,?,?,?)",
+                     (art, afm, reason, conf, now))
+    return art
+
+
+def test_calendar_day_news_click_lists_clients_and_double_click_opens_popup(window, conn, monkeypatch):
+    from datetime import date
+
+    from taxmatch.gui import main_window as mw_mod
+    d = date.today().replace(day=1)
+    _article_with_deadline(conn, d.isoformat(), [(AFM, "ΚΑΦΕΤΕΡΙΑ", "ΚΑΔ 56", 1.0), ("123456783", "ΒΙΒΛΙΟΠΩΛΕΙΟ", "βιβλία Β", 0.5)])
+    window._cal_month = d
+    window.reload_calendar()
+    window._open_cal_day_date(d)
+
+    items = [window.cal_list.item(i) for i in range(window.cal_list.count())]
+    news_row = next(i for i, it in enumerate(items)
+                    if (it.data(Qt.ItemDataRole.UserRole) or {}).get("kind") == "news")
+    window.cal_list.setCurrentRow(news_row)                 # κλικ σε νέο -> λίστα πελατών δεξιά
+    assert window.cal_clients_list.count() == 2
+    assert "(2)" in window.cal_clients_title.text()
+    texts = [window.cal_clients_list.item(i).text() for i in range(2)]
+    assert any("ΚΑΦΕΤΕΡΙΑ" in t for t in texts) and any("να επιβεβαιωθεί" in t for t in texts)
+
+    shown = []
+
+    class FakeNews:
+        def __init__(self, title, url, **kw):
+            shown.append((title, kw))
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(mw_mod, "NewsDialog", FakeNews)
+    window.cal_list.itemActivated.emit(window.cal_list.item(news_row))        # διπλό κλικ -> popup με το νέο
+    assert shown and shown[0][0] == "Νέα προθεσμία ΦΠΑ"
+    assert shown[0][1]["summary"] == "Περίληψη νέου" and shown[0][1]["action"] == "Υποβολή"
+
+    opened = []
+    monkeypatch.setattr(window, "open_client_detail", lambda afm: opened.append(afm))
+    window.cal_clients_list.itemActivated.emit(window.cal_clients_list.item(0))
+    assert opened and opened[0] in (AFM, "123456783")
+
+
+def test_calendar_day_non_news_event_explains_it_is_not_client_specific(window, conn):
+    from datetime import date
+    window._cal_month = date(2026, 7, 1)
+    window.cal_news.setChecked(False)
+    window.reload_calendar()
+    day = sorted({ev["date"] for ev in window._cal_events if ev["kind"] == "rule"})[0]
+    window._open_cal_day_date(date.fromisoformat(day))
+    rule_row = next(i for i in range(window.cal_list.count())
+                    if (window.cal_list.item(i).data(Qt.ItemDataRole.UserRole) or {}).get("kind") == "rule")
+    window.cal_list.setCurrentRow(rule_row)
+    assert window.cal_clients_list.count() == 0 and "δεν συνδέεται" in window.cal_clients_hint.text()
+
+
+# ------------------------------------------------------------------ καρτέλα πελάτη: στοχευμένα νέα
+
+def test_client_detail_shows_only_targeted_news_unless_general_is_checked(window, conn):
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    now = db.utcnow()
+    for h, title, reason in (("g1", "Γενικό νέο", "Αφορά όλες τις επιχειρήσεις"), ("t1", "Στοχευμένο νέο", "ΚΑΔ 56")):
+        conn.execute("INSERT INTO articles(source,title,url,url_hash,published_at,fetched_at,extraction_status,extracted_json) "
+                     "VALUES ('s',?,?,?,?,?,'done','{}')", (title, "https://x/" + h, h, now, now))
+    service.add(conn, AFM, "ΚΑΦΕΤΕΡΙΑ")
+    for h, reason in (("g1", "Αφορά όλες τις επιχειρήσεις"), ("t1", "ΚΑΔ 56")):
+        aid = conn.execute("SELECT id FROM articles WHERE url_hash=?", (h,)).fetchone()["id"]
+        conn.execute("INSERT INTO matches(article_id,afm,matched_reason,confidence,created_at) VALUES (?,?,?,?,?)",
+                     (aid, AFM, reason, 1.0, now))
+    dlg = ClientDetailDialog(window, AFM)
+
+    def titles():
+        return [dlg.matches_list.item(i).text() for i in range(dlg.matches_list.count())]
+
+    assert len(titles()) == 1 and "Στοχευμένο νέο" in titles()[0]
+    assert "1 γενικά νέα κρύφτηκαν" in dlg.matches_hint.text()
+    dlg.show_general.setChecked(True)
+    assert len(titles()) == 2 and dlg.matches_hint.text() == ""
+    dlg.close()
