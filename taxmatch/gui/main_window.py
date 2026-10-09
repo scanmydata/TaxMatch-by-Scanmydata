@@ -61,7 +61,7 @@ _C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP,
 _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτλος", 0, "Διπλό κλικ για προεπισκόπηση"),
              ("Κατάσταση", 110, ""), ("Πελάτες", 60, "")]
 
-TOUR_VERSION = 3                                       # 2: νέα σελίδα «Δέουσα επιμέλεια» · 3: βήματα του φακέλου ΔΕ
+TOUR_VERSION = 4                                       # 2: νέα σελίδα «Δέουσα επιμέλεια» · 3: βήματα του φακέλου ΔΕ · 4: λίστα πελατών/ημερολόγιο
 
 _WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
 
@@ -218,8 +218,11 @@ class MainWindow(QMainWindow):
         quick_row = QHBoxLayout()
         quick_row.addStretch()
         self.quick_search = QLineEdit()
-        self.quick_search.setPlaceholderText("Γρήγορη αναζήτηση πελάτη (ΑΦΜ ή επωνυμία)…  [Ctrl+K]")
+        self.quick_search.setPlaceholderText("Αναζήτηση πελατών (ΑΦΜ, επωνυμία, …)  [Ctrl+K]")
+        self.quick_search.setToolTip("Φιλτράρει τη λίστα πελατών σε όλες τις στήλες. Enter: μετάβαση στους Πελάτες "
+                                     "(και άνοιγμα της καρτέλας αν μείνει ένας).")
         self.quick_search.setFixedWidth(300)
+        self.quick_search.setClearButtonEnabled(True)
         self.quick_search.returnPressed.connect(self._quick_client_search)
         quick_row.addWidget(self.quick_search)
         root.addLayout(quick_row)
@@ -467,12 +470,13 @@ class MainWindow(QMainWindow):
             return
         self._open_event_dialog(ev)
 
-    def _open_event_dialog(self, ev: dict) -> None:
+    def _open_event_dialog(self, ev: dict, summary: Optional[str] = None, action: str = "") -> None:
         """Προεπισκόπηση προθεσμίας ΜΕ τους πελάτες που αφορά (υπόχρεοι / υπό προϋποθέσεις)."""
         kind = {"rule": "κανονική προθεσμία", "general": "ημερολόγιο ΑΑΔΕ/taxheaven", "news": "από άρθρο"}.get(ev["kind"], "")
         meta = date.fromisoformat(ev["date"]).strftime("%d/%m/%Y") + (f" · {kind}" if kind else "")
-        NewsDialog(ev["title"], ev["url"], meta=meta, summary=ev.get("description", ""), parent=self,
-                  clients=deadlines.clients_for_event(self.conn, ev), on_client=self.open_client_detail).exec()
+        NewsDialog(ev["title"], ev["url"], meta=meta, summary=ev.get("description", "") if summary is None else summary,
+                  action=action, parent=self, clients=deadlines.clients_for_event(self.conn, ev),
+                  on_client=self.open_client_detail).exec()
 
     # ------------------------------------------------------------------ Πελάτες
     def _clients_page(self) -> QWidget:
@@ -491,16 +495,25 @@ class MainWindow(QMainWindow):
         export_btn.clicked.connect(self.on_export_csv)
         top.addWidget(export_btn)
         top.addStretch()
-        self.client_search = QLineEdit()
-        self.client_search.setPlaceholderText("Αναζήτηση σε όλες τις στήλες…")
-        self.client_search.setFixedWidth(240)
-        self.client_search.textChanged.connect(self._apply_client_filter)
-        top.addWidget(self.client_search)
         root.addLayout(top)
 
         selbar = QHBoxLayout()
         self.client_sel_label = QLabel("Κανένας πελάτης επιλεγμένος")
         selbar.addWidget(self.client_sel_label)
+        sel_all_btn = QPushButton("Επιλογή όλων")
+        sel_all_btn.setToolTip("Επιλέγει όλους τους πελάτες που εμφανίζονται τώρα (σύμφωνα με την αναζήτηση/τα φίλτρα)")
+        sel_all_btn.clicked.connect(lambda: self._set_all_clients_checked(True))
+        selbar.addWidget(sel_all_btn)
+        sel_none_btn = QPushButton("Αποεπιλογή όλων")
+        sel_none_btn.setToolTip("Αποεπιλέγει όλους τους πελάτες")
+        sel_none_btn.clicked.connect(lambda: self._set_all_clients_checked(False))
+        selbar.addWidget(sel_none_btn)
+        # Εμφανίζεται ΜΟΝΟ όσο υπάρχει ενεργό φίλτρο στήλης ή αναζήτηση (δυναμικά, βλ. _apply_client_filter).
+        self.client_clear_filters_btn = QPushButton("Διαγραφή φίλτρων")
+        self.client_clear_filters_btn.setToolTip("Σβήνει την αναζήτηση και όλα τα φίλτρα στηλών")
+        self.client_clear_filters_btn.clicked.connect(self._clear_client_filters)
+        self.client_clear_filters_btn.setVisible(False)
+        selbar.addWidget(self.client_clear_filters_btn)
         selbar.addStretch()
         del_btn = QPushButton("  Διαγραφή επιλεγμένων")
         del_btn.setObjectName("danger")
@@ -529,6 +542,7 @@ class MainWindow(QMainWindow):
         self._client_col_filter.filtersChanged.connect(self._apply_client_filter)
         setup_columns(self.client_table, _CLIENT_COLS, self._prefs, "clients")
         self.client_table.itemChanged.connect(lambda _i: self._sync_client_selection_label())
+        self.quick_search.textChanged.connect(lambda _t: self._apply_client_filter())   # η ΜΙΑ γραμμή αναζήτησης (πάνω-δεξιά)
         root.addWidget(self.client_table, 1)
         return page
 
@@ -575,7 +589,7 @@ class MainWindow(QMainWindow):
     def _apply_client_filter(self) -> None:
         """Συνδυάζει αναζήτηση κειμένου + φίλτρα στηλών σε ΕΝΑ πέρασμα — δεν καλεί `TableColumnFilter.apply()`
         (θα ξανάγραφε το setRowHidden αγνοώντας την αναζήτηση, βλ. σχόλιο στο `_clients_page`)."""
-        needle = self.client_search.text().strip().lower()
+        needle = self.quick_search.text().strip().lower()
         col_filters = self._client_col_filter.filters
         for row in range(self.client_table.rowCount()):
             text_ok = not needle or any(needle in (self.client_table.item(row, c).text() or "").lower()
@@ -583,6 +597,29 @@ class MainWindow(QMainWindow):
             col_ok = all(not allowed or self.client_table.item(row, c).text() in allowed
                         for c, allowed in col_filters.items())
             self.client_table.setRowHidden(row, not (text_ok and col_ok))
+        active = len([c for c, v in col_filters.items() if v]) + (1 if needle else 0)
+        self.client_clear_filters_btn.setVisible(bool(active))
+        self.client_clear_filters_btn.setText(f"Διαγραφή φίλτρων ({active})")
+        self._sync_client_selection_label()
+
+    def _clear_client_filters(self) -> None:
+        self.quick_search.clear()                              # το σήμα textChanged ξαναφιλτράρει
+        self._client_col_filter.clear()
+        self._apply_client_filter()
+
+    def _set_all_clients_checked(self, checked: bool) -> None:
+        """Επιλογή: μόνο οι ΟΡΑΤΟΙ πελάτες (σεβόμαστε φίλτρα/αναζήτηση)· αποεπιλογή: όλοι, ώστε να μη μένει
+        «κρυφή» επιλογή πίσω από φίλτρο."""
+        table = self.client_table
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        table.blockSignals(True)
+        for row in range(table.rowCount()):
+            if checked and table.isRowHidden(row):
+                continue
+            item = table.item(row, _C_CHK)
+            if item:
+                item.setCheckState(state)
+        table.blockSignals(False)
         self._sync_client_selection_label()
 
     def _selected_client_afms(self) -> list[str]:
@@ -597,7 +634,12 @@ class MainWindow(QMainWindow):
 
     def _sync_client_selection_label(self) -> None:
         n = len(self._selected_client_afms())
-        self.client_sel_label.setText(f"{n} επιλεγμένοι" if n else "Κανένας πελάτης επιλεγμένος")
+        total = self.client_table.rowCount()
+        shown = sum(1 for r in range(total) if not self.client_table.isRowHidden(r))
+        text = f"{n} επιλεγμένοι" if n else "Κανένας πελάτης επιλεγμένος"
+        if shown != total:
+            text += f"  ·  εμφανίζονται {shown} από {total}"
+        self.client_sel_label.setText(text)
 
     def _quick_client_search(self) -> None:
         """Ctrl+K / Enter στο πεδίο πάνω-δεξιά: φιλτράρει τους πελάτες από ΟΠΟΙΑΔΗΠΟΤΕ σελίδα και, αν μείνει
@@ -606,15 +648,14 @@ class MainWindow(QMainWindow):
         if not needle:
             return
         self._show_page("clients")
-        self.client_search.setText(needle)
+        self._apply_client_filter()
         visible = [row for row in range(self.client_table.rowCount()) if not self.client_table.isRowHidden(row)]
         if len(visible) == 1:
             afm = self.client_table.item(visible[0], _C_CHK).data(Qt.ItemDataRole.UserRole)
             self.quick_search.clear()
-            self.client_search.clear()
             self.open_client_detail(afm)
         else:
-            self.client_search.setFocus()
+            self.client_table.setFocus()
 
     def _open_selected_client(self) -> None:
         row = self.client_table.currentRow()
@@ -662,17 +703,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             toast(self, f"Δεν ήταν δυνατή η ανάγνωση του αρχείου: {exc}", "danger")
             return
+        with_creds = [r.afm for r in res.rows if r.has_credentials]
+        lookup_afms = with_creds or [r.afm for r in res.rows]
         msg = (f"Βρέθηκαν {len(res.rows)} πελάτες" + (f", {res.credential_count} με κωδικούς TAXISnet" if res.credential_count else "")
-              + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ". Εισαγωγή;")
-        if QMessageBox.question(self, "Επιβεβαίωση εισαγωγής", msg) != QMessageBox.StandardButton.Yes:
+              + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ".\n\n"
+              f"Να γίνει ΤΩΡΑ και ενημέρωση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για {len(lookup_afms)} "
+              f"{'πελάτες με κωδικούς TAXISnet' if with_creds else 'πελάτες'}; Μπορεί να πάρει λίγα λεπτά — "
+              "η εφαρμογή μένει διαθέσιμη και μπορείτε να την κάνετε και αργότερα από «Ανανέωση στοιχείων».")
+        box = QMessageBox(QMessageBox.Icon.Question, "Επιβεβαίωση εισαγωγής", msg, parent=self)
+        btn_both = box.addButton("Εισαγωγή & ενημέρωση στοιχείων", QMessageBox.ButtonRole.AcceptRole)
+        btn_only = box.addButton("Μόνο εισαγωγή", QMessageBox.ButtonRole.YesRole)
+        box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_both)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked not in (btn_both, btn_only):
             return
         backup_mod.create_backup(config.db_path(), reason="import")
         out = clients.import_result(self.conn, res)
         engine.rematch(self.conn)
-        self._start_lookup([r.afm for r in res.rows if r.has_credentials] or [r.afm for r in res.rows])
         toast(self, f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}.", "ok")
         self.reload_clients()
         self._refresh_status_bar()
+        if clicked is btn_both:
+            self._start_lookup(lookup_afms)
 
     def on_export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Εξαγωγή πελατών", "pelates.csv", "CSV (*.csv)")
@@ -692,6 +746,8 @@ class MainWindow(QMainWindow):
         if not afms:
             return
         self.run_status.setText(f"Ανάκτηση στοιχείων για {len(afms)} πελάτες…")
+        toast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {len(afms)} "
+                    f"{'πελάτη' if len(afms) == 1 else 'πελάτες'}…", "info")
 
         def work(progress):
             # Νέα σύνδεση εδώ, ΠΟΤΕ self.conn — δημιουργήθηκε στο UI thread, το sqlite3 απαγορεύει χρήση από
@@ -711,13 +767,15 @@ class MainWindow(QMainWindow):
 
         def done(_n):
             self.run_status.setText("Η ανάκτηση στοιχείων ολοκληρώθηκε.")
+            toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
             self.reload_clients()
             self.reload_dashboard()
             self._reload_notices()
             self._refresh_status_bar()
 
         self._tasks.append(run_task(self, work, on_progress=self.run_status.setText, on_done=done,
-                                    on_error=lambda m: self.run_status.setText(f"Σφάλμα ανάκτησης: {m}")))
+                                    on_error=lambda m: (self.run_status.setText(f"Σφάλμα ανάκτησης: {m}"),
+                                                          toast(self, f"Σφάλμα ανάκτησης: {m}", "danger"))))
 
     def open_client_detail(self, afm: str) -> None:
         dlg = ClientDetailDialog(self, afm)
@@ -807,9 +865,37 @@ class MainWindow(QMainWindow):
         dtop.addWidget(self.cal_day_label)
         dtop.addStretch()
         droot.addLayout(dtop)
+        dsplit = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget()
+        lbox = QVBoxLayout(left)
+        lbox.setContentsMargins(0, 0, 0, 0)
+        lbox.addWidget(_section_header("Υποχρεώσεις & νέα της ημέρας", "calendar"))
         self.cal_list = QListWidget()
-        self.cal_list.itemClicked.connect(self._open_cal_event)
-        droot.addWidget(self.cal_list, 1)
+        # κλικ: δείχνει δεξιά ποιους πελάτες αφορά· διπλό κλικ (ή Enter): ανοίγει το νέο σε popup
+        self.cal_list.currentItemChanged.connect(lambda cur, _prev: self._show_cal_event_clients(cur))
+        self.cal_list.itemActivated.connect(self._open_cal_event)
+        self.cal_list.setToolTip("Κλικ: ποιους πελάτες αφορά · Διπλό κλικ: άνοιγμα του νέου")
+        lbox.addWidget(self.cal_list, 1)
+        dsplit.addWidget(left)
+        side = QWidget()
+        sbox = QVBoxLayout(side)
+        sbox.setContentsMargins(0, 0, 0, 0)
+        self.cal_clients_title = QLabel("Πελάτες που αφορά")
+        self.cal_clients_title.setStyleSheet("font-weight:600;")
+        sbox.addWidget(self.cal_clients_title)
+        self.cal_clients_hint = QLabel("")
+        self.cal_clients_hint.setObjectName("muted")
+        self.cal_clients_hint.setWordWrap(True)
+        sbox.addWidget(self.cal_clients_hint)
+        self.cal_clients_list = QListWidget()
+        self.cal_clients_list.setWordWrap(True)
+        self.cal_clients_list.itemActivated.connect(self._open_cal_client)
+        self.cal_clients_list.setToolTip("Διπλό κλικ: άνοιγμα της καρτέλας του πελάτη")
+        sbox.addWidget(self.cal_clients_list, 1)
+        dsplit.addWidget(side)
+        dsplit.setStretchFactor(0, 1)
+        dsplit.setStretchFactor(1, 1)
+        droot.addWidget(dsplit, 1)
         self.cal_stack.addWidget(day_page)
 
         self._cal_month = date.today().replace(day=1)
@@ -909,6 +995,10 @@ class MainWindow(QMainWindow):
         self.cal_stack.setCurrentIndex(1)
         d = self._cal_view_day
         self.cal_day_label.setText(i18n.long_date(d))
+        cur = self.cal_list.currentItem()
+        prev = cur.data(Qt.ItemDataRole.UserRole) if cur is not None else None
+        prev_key = (prev["kind"], prev["id"]) if prev else None
+        self.cal_list.blockSignals(True)
         self.cal_list.clear()
         day_str = d.isoformat()
         for ev in self._cal_events:
@@ -929,6 +1019,71 @@ class MainWindow(QMainWindow):
             placeholder = QListWidgetItem("Καμία υποχρέωση αυτή την ημέρα.")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.cal_list.addItem(placeholder)
+        else:
+            # κράτα την επιλογή αν ξαναζωγραφίζεται (π.χ. μετά τον συγχρονισμό δικτύου), αλλιώς διάλεξε την πρώτη
+            row = 0
+            for i in range(self.cal_list.count()):
+                e = self.cal_list.item(i).data(Qt.ItemDataRole.UserRole)
+                if e and (e["kind"], e["id"]) == prev_key:
+                    row = i
+                    break
+            self.cal_list.setCurrentRow(row)
+        self.cal_list.blockSignals(False)
+        self._show_cal_event_clients(self.cal_list.currentItem())
+
+    def _show_cal_event_clients(self, item: Optional[QListWidgetItem]) -> None:
+        """Δεξί πλαίσιο της ημερήσιας προβολής: ποιους πελάτες αφορά η επιλεγμένη υποχρέωση/νέο."""
+        lst = self.cal_clients_list
+        lst.clear()
+        ev = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        self.cal_clients_title.setText("Πελάτες που αφορά")
+        self.cal_clients_hint.setText("")
+        if not ev:
+            self.cal_clients_hint.setText("Επιλέξτε ένα νέο από τη λίστα για να δείτε ποιους πελάτες αφορά.")
+            return
+        rows: list[dict] = []
+        if ev["kind"] == "news":
+            rows = [dict(r) for r in self.conn.execute(
+                "SELECT m.afm, m.matched_reason, m.confidence, b.name FROM matches m JOIN businesses b ON b.afm=m.afm "
+                "WHERE m.article_id=? ORDER BY b.name COLLATE NOCASE, b.afm", (ev["id"],))]
+        elif ev["kind"] == "aml":
+            b = clients.get(self.conn, ev["afm"])
+            rows = [{"afm": ev["afm"], "name": b["name"] if b else "", "matched_reason": "Επανεξέταση δέουσας επιμέλειας",
+                     "confidence": 1.0}]
+        else:
+            # κανονική προθεσμία ή γεγονός του ημερολογίου ΑΑΔΕ/taxheaven: υπόχρεοι από τα στοιχεία του Μητρώου
+            people = deadlines.clients_for_event(self.conn, ev)
+            if people is None:
+                self.cal_clients_hint.setText("Γεγονός του ημερολογίου ΑΑΔΕ/taxheaven που δεν αντιστοιχεί σε γνωστή "
+                                              "περιοδική υποχρέωση — δεν είναι γνωστό ποιους πελάτες αφορά.")
+                return
+            rows = [{"afm": c["afm"], "name": c["name"], "confidence": 1.0 if c["status"] == "yes" else 0.5,
+                     "matched_reason": c["reason"] or "υπόχρεος", "maybe": c["status"] != "yes"} for c in people]
+            n_maybe = sum(1 for r in rows if r["maybe"])
+            if n_maybe:
+                self.cal_clients_hint.setText(f"{len(rows) - n_maybe} υπόχρεοι · {n_maybe} υπό προϋποθέσεις που η εφαρμογή "
+                                              "δεν γνωρίζει (π.χ. προσωπικό, ενδοκοινοτικές συναλλαγές).")
+        self.cal_clients_title.setText(f"Πελάτες που αφορά ({len(rows)})")
+        if not rows:
+            self.cal_clients_hint.setText("Κανένας πελάτης δεν έχει ταιριάξει με αυτό το νέο." if ev["kind"] == "news" else
+                                          "Κανένας από τους πελάτες σας δεν είναι υπόχρεος (με βάση τα στοιχεία του Μητρώου).")
+            return
+        for r in rows:
+            text = f"{r['name'] or r['afm']}  ·  {r['afm']}\n{r['matched_reason']}"      # 2 γραμμές: χωρίς οριζόντιο scroll
+            colour = None
+            if r["confidence"] < 1:
+                text += "  ·  υπό προϋποθέσεις" if r.get("maybe") else "  ·  να επιβεβαιωθεί"
+                colour = CURRENT.warn
+            it = QListWidgetItem(dot_icon(colour or CURRENT.ok), text)
+            if colour:
+                it.setForeground(QColor(colour))
+            it.setData(Qt.ItemDataRole.UserRole, r["afm"])
+            lst.addItem(it)
+
+    def _open_cal_client(self, item: QListWidgetItem) -> None:
+        afm = item.data(Qt.ItemDataRole.UserRole)
+        if afm:
+            self.open_client_detail(afm)
 
     def _fill_client_combo(self) -> None:
         current = self.cal_client.currentData()
@@ -946,7 +1101,12 @@ class MainWindow(QMainWindow):
         if ev.get("kind") == "aml":
             self.aml_page.open_assessment(ev["afm"])
             return
-        self._open_event_dialog(ev)
+        summary, action = ev.get("description", ""), ""
+        if ev.get("kind") == "news":
+            art = self.conn.execute("SELECT * FROM articles WHERE id=?", (ev["id"],)).fetchone()
+            if art:
+                summary, action = self._article_preview(art)
+        self._open_event_dialog(ev, summary=summary, action=action)
 
     # ------------------------------------------------------------------ Νέα & Matches
     def _news_page(self) -> QWidget:
@@ -1007,11 +1167,9 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(True)
         resort(table, 1)
 
-    def _open_selected_news(self) -> None:
-        row = self.news_table.currentRow()
-        if row < 0:
-            return
-        a = self.news_table.item(row, 2).data(Qt.ItemDataRole.UserRole)
+    @staticmethod
+    def _article_preview(a) -> tuple[str, str]:
+        """(περίληψη, απαιτούμενη ενέργεια) για το popup ενός άρθρου (`articles` row ή dict)."""
         summary, action = "", ""
         try:
             ex = json.loads(a["extracted_json"] or "{}")
@@ -1022,6 +1180,14 @@ class MainWindow(QMainWindow):
             # Δεν έχει αναλυθεί ακόμη με LLM (σε αναμονή/φιλτραρίστηκε/απέτυχε) — δείξε ό,τι κείμενο έχουμε ήδη
             # ανακτήσει αντί για άδειο διάλογο: το πλήρες κείμενο του άρθρου, αλλιώς την περίληψη του RSS feed.
             summary = (a["full_text"] or a["raw_summary"] or "")[:2000]
+        return summary, action
+
+    def _open_selected_news(self) -> None:
+        row = self.news_table.currentRow()
+        if row < 0:
+            return
+        a = self.news_table.item(row, 2).data(Qt.ItemDataRole.UserRole)
+        summary, action = self._article_preview(a)
         people = deadlines.clients_for_article(self.conn, a["id"]) if a["n_matches"] else None
         NewsDialog(a["title"], a["url"], meta=f"{a['source']} · {(a['published_at'] or '')[:10]}",
                   summary=summary, action=action, parent=self, clients=people,
@@ -1245,6 +1411,7 @@ class MainWindow(QMainWindow):
             self.busy.stop()
             toast(self, m, "danger")
 
+        toast(self, "Ξεκίνησε η ανανέωση της λίστας μοντέλων…", "info")
         self.busy.start("Ανανέωση λίστας μοντέλων…")
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
@@ -1299,6 +1466,7 @@ class MainWindow(QMainWindow):
             self.busy.stop()
             toast(self, msg, "danger")
 
+        toast(self, "Ξεκίνησε η δοκιμή σύνδεσης LLM…", "info")
         self.busy.start("Δοκιμή σύνδεσης LLM…")
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
@@ -1322,6 +1490,7 @@ class MainWindow(QMainWindow):
             self.busy.stop()
             toast(self, m, "danger")
 
+        toast(self, "Ξεκίνησε η δοκιμή σύνδεσης ΑΑΔΕ…", "info")
         self.busy.start("Δοκιμή σύνδεσης ΑΑΔΕ…")
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
@@ -1412,6 +1581,7 @@ class MainWindow(QMainWindow):
         for b in self._run_buttons:
             b.setEnabled(False)
         self.run_status.setText("Έναρξη…")
+        toast(self, "Ξεκίνησε ο έλεγχος νέων — μπορείτε να συνεχίσετε να δουλεύετε.", "info")
 
         def work(progress):
             # ΧΩΡΙΣ conn=self.conn: αφήνουμε το pipeline να ανοίξει τη δική του σύνδεση σε αυτό το thread — το
@@ -1429,12 +1599,14 @@ class MainWindow(QMainWindow):
                 (f" · {match['updated']} ενημερώθηκαν" if match.get("updated") else "")
             base = f"Ολοκληρώθηκε ✓ — {summary}." if not errs else f"Ολοκληρώθηκε με σημειώσεις ({summary}): " + "· ".join(errs)[:200]
             self.run_status.setText(base)
+            toast(self, base, "ok" if not errs else "warn")
             self.reload_all()
 
         def failed(msg):
             for b in self._run_buttons:
                 b.setEnabled(True)
             self.run_status.setText(f"Σφάλμα: {msg}")
+            toast(self, f"Σφάλμα ελέγχου: {msg}", "danger")
 
         self._tasks.append(run_task(self, work, on_progress=self.run_status.setText, on_done=done, on_error=failed))
 
@@ -1487,10 +1659,12 @@ class MainWindow(QMainWindow):
             Step("1. Νέος πελάτης", "Γράψτε μόνο το ΑΦΜ: στο 9ο ψηφίο η επωνυμία έρχεται μόνη της από το VIES. "
                 "Οι κωδικοί TAXISnet είναι προαιρετικοί — χρησιμεύουν στην αυτόματη ανάκτηση ΚΑΔ/ΔΟΥ/βιβλίων από το Μητρώο ΑΑΔΕ.",
                 lambda: self.menu.button("add_client")),
-            Step("2. Οι πελάτες σας", "Κάθε στήλη έχει φίλτρο τύπου Excel (περάστε το ποντίκι πάνω από την επικεφαλίδα). "
-                "Τσεκάρετε πελάτες για μαζικές ενέργειες.", lambda: self.client_table, lambda: self._show_page("clients")),
+            Step("2. Οι πελάτες σας", "Κάθε στήλη έχει φίλτρο τύπου Excel και η αναζήτηση πάνω-δεξιά φιλτράρει όλες τις "
+                "στήλες· το «Διαγραφή φίλτρων» εμφανίζεται όσο υπάρχει φίλτρο. Τσεκάρετε πελάτες (ή «Επιλογή όλων») για "
+                "μαζικές ενέργειες. Η εισαγωγή Excel ρωτά αν θέλετε αμέσως και ενημέρωση στοιχείων.", lambda: self.client_table, lambda: self._show_page("clients")),
             Step("3. Ημερολόγιο", "Συνδυάζει το γενικό ημερολόγιο taxheaven, τους κανονικούς κανόνες (ΦΠΑ/VIES/Intrastat…) "
-                "και τις προθεσμίες που εντοπίστηκαν σε άρθρα. Κλικ σε μια ημέρα δείχνει τις υποχρεώσεις της.",
+                "και τις προθεσμίες που εντοπίστηκαν σε άρθρα. Κλικ σε μια ημέρα δείχνει τις υποχρεώσεις της· κλικ σε νέο δείχνει "
+                "ποιους πελάτες αφορά και διπλό κλικ το ανοίγει.",
                 lambda: self.cal_grid_box, lambda: (self._show_page("calendar"), self._close_cal_day())),
             Step("4. Νέα & Matches", "Κάθε άρθρο δείχνει ποιους πελάτες αφορά και γιατί. Διπλό κλικ ανοίγει προεπισκόπηση "
                 "πριν τον σύνδεσμο — ποτέ απευθείας browser.", lambda: self.news_table, lambda: self._show_page("news")),

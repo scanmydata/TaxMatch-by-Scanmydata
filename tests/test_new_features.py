@@ -1,7 +1,7 @@
 """Κωδικοί TAXISnet ανά πελάτη, VIES, εισαγωγή με κωδικούς, νέες πηγές/φίλτρα, κανόνες ημερολογίου."""
 import io
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 from openpyxl import Workbook
@@ -289,10 +289,8 @@ def test_template_download_and_logs_and_dialog_everywhere(client):
 
 # ---------------------------------------------------------------- φίλτρα πηγών
 def item(title, url, summary=""):
-    # πρόσφατη ημερομηνία: ο αποδιπλασιασμός θεμάτων κοιτά 14 ημέρες πίσω — σταθερή ημερομηνία «έληγε» με τον καιρό
-    from datetime import datetime, timedelta, timezone
-    when = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return rss_fetch.FeedItem(title, url, when, summary, "", url)
+    # Πάντα «τώρα»: το dedup κοιτά μόνο τις τελευταίες 14 μέρες — σταθερή ημερομηνία θα έσπαγε το test με τον καιρό.
+    return rss_fetch.FeedItem(title, url, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), summary, "", url)
 
 
 def test_keyword_prefilter():

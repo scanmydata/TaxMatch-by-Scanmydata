@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -17,6 +17,7 @@ from ..aml import model as aml_model, store as aml_store
 from ..aml.content import ASSESSMENT_LABEL
 from ..business_profiles import credentials as client_creds, service as clients
 from ..matching import engine
+from ..matching.match import ALL_SCOPE_REASON
 from .busy import BusyOverlay
 from .icons import dot_icon, icon
 from .news_dialog import NewsDialog
@@ -201,6 +202,7 @@ class ClientDetailDialog(QDialog):
             self.busy.stop()
             toast(self, m, "danger")
 
+        toast(self, "Ξεκίνησε η δοκιμή σύνδεσης TAXISnet…", "info")
         self.busy.start("Δοκιμή σύνδεσης…")
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
@@ -221,6 +223,14 @@ class ClientDetailDialog(QDialog):
     def _matches_tab(self) -> QWidget:
         page = QWidget()
         box = QVBoxLayout(page)
+        # Προεπιλογή: ΜΟΝΟ στοχευμένα νέα (ΚΑΔ/βιβλία/ΦΠΑ/νομική μορφή της επιχείρησης). Τα «για όλες τις επιχειρήσεις»
+        # (π.χ. γενικά φορολογικά νέα) αφορούν τους πάντες και πνίγουν τα πραγματικά σχετικά — προαιρετικά με τσεκάρισμα.
+        self.show_general = QCheckBox("Εμφάνιση και γενικών νέων (που αφορούν όλες τις επιχειρήσεις)")
+        self.show_general.toggled.connect(lambda _on: self._reload_matches())
+        box.addWidget(self.show_general)
+        self.matches_hint = QLabel("")
+        self.matches_hint.setObjectName("muted")
+        box.addWidget(self.matches_hint)
         self.matches_list = QListWidget()
         self.matches_list.itemActivated.connect(self._open_match)
         box.addWidget(self.matches_list)
@@ -310,12 +320,14 @@ class ClientDetailDialog(QDialog):
 
         def done(_out):
             self.busy.stop()
+            toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
             self._reload()
 
         def failed(m):
             self.busy.stop()
             toast(self, m, "danger")
 
+        toast(self, "Ξεκίνησε η ανάκτηση στοιχείων του πελάτη…", "info")
         self.busy.start("Ανάκτηση στοιχείων…")
         self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
@@ -387,10 +399,19 @@ class ClientDetailDialog(QDialog):
 
         self._reload_aml()
 
-        matches = engine.digest(self.conn, days=90, afm=self.afm)
+        self._reload_matches()
+
+    def _reload_matches(self) -> None:
+        all_matches = engine.digest(self.conn, days=90, afm=self.afm)
+        general = [m for m in all_matches if m["matched_reason"] == ALL_SCOPE_REASON]
+        matches = all_matches if self.show_general.isChecked() else             [m for m in all_matches if m["matched_reason"] != ALL_SCOPE_REASON]
+        self.matches_hint.setText(
+            f"{len(general)} γενικά νέα κρύφτηκαν (αφορούν όλες τις επιχειρήσεις) — τσεκάρετε το παραπάνω για να τα δείτε."
+            if general and not self.show_general.isChecked() else "")
         self.matches_list.clear()
         if not matches:
-            placeholder = QListWidgetItem("Κανένα άρθρο δεν έχει ταιριάξει ακόμη.")
+            placeholder = QListWidgetItem("Κανένα στοχευμένο άρθρο δεν έχει ταιριάξει ακόμη." if general
+                                          else "Κανένα άρθρο δεν έχει ταιριάξει ακόμη.")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.matches_list.addItem(placeholder)
         for m in matches[:50]:

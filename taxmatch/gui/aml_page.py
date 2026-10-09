@@ -405,7 +405,7 @@ class AmlPage(QWidget):
                 msg += " " + " · ".join(result["errors"][:3])
             toast(self.main, msg, "ok" if result["files"] and not result["errors"] else "warn", ms=9000)
 
-        toast(self.main, f"Λήψη εγγράφων για {afm}…", "ok")
+        toast(self.main, f"Ξεκίνησε η λήψη εγγράφων για {afm}…", "info")
         self.main._tasks.append(run_task(self.main, work, on_done=done,
                                          on_error=lambda m: toast(self.main, f"Η λήψη απέτυχε: {m}", "danger")))
 
@@ -435,7 +435,7 @@ class AmlPage(QWidget):
             else:
                 toast(self.main, f"Κυρώσεις ΕΕ: καμία ταύτιση σε {total} πελάτες.", "ok")
 
-        toast(self.main, "Έλεγχος κυρώσεων για όλους τους πελάτες…", "ok")
+        toast(self.main, "Ξεκίνησε ο έλεγχος κυρώσεων για όλους τους πελάτες…", "info")
         self.main._tasks.append(run_task(self.main, work, on_done=done,
                                          on_error=lambda m: toast(self.main, f"Ο έλεγχος απέτυχε: {m}", "danger")))
 
