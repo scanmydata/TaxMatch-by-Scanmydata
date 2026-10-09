@@ -572,3 +572,66 @@ def test_aml_dialog_kmpd_import_sanctions_and_gemi(qapp, conn, monkeypatch):
     assert gemi_browser.get_credentials(conn, AFM) == ("gemi", "pw") and dlg.gemi_pass.text() == ""
     assert retrieval.get_rep_credentials(conn, AFM) is None
     dlg.deleteLater()
+
+
+def test_aml_table_is_sortable_movable_and_page_tour_targets_exist(window, conn):
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    window._show_page("aml")
+    page = window.aml_page
+    header = page.table.horizontalHeader()
+    assert page.table.isSortingEnabled() and header.sectionsMovable()
+    assert all(header.sectionResizeMode(c).name == "Interactive" for c in range(page.table.columnCount()))
+    page.reload_clients()
+    page._col_filter.filters = {2: {"κάτι άλλο"}}            # φίλτρο στήλης συνδυάζεται με την αναζήτηση
+    page._apply_filter()
+    assert page.table.isRowHidden(0)
+    page._col_filter.filters = {}
+    page._apply_filter()
+    assert not page.table.isRowHidden(0)
+    for step in page.tour_steps():
+        if step.before:
+            step.before()
+        target = step.target()
+        assert target is not None and target.isVisibleTo(window), step.title
+
+
+def test_aml_template_edit_in_word_is_saved_back(window, conn, monkeypatch, tmp_path):
+    from PySide6.QtGui import QDesktopServices
+    from taxmatch.aml import templating
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()) or True)
+    page = window.aml_page
+    page.reload_templates()
+    page.tpl_table.selectRow(2)
+    page._edit_template()
+    assert opened and opened[0].endswith(".docx")
+    slot = templating.SLOTS[2]
+    edited = templating.default_template("declaration", "legal")            # «ο χρήστης αποθήκευσε κάτι άλλο στο Word»
+    from pathlib import Path
+    Path(opened[0]).write_bytes(edited)
+    page._sync_edited_templates()
+    data, name, custom = templating.get_template(conn, slot)
+    assert custom and data == edited
+    assert "Του γραφείου" in page.tpl_table.item(2, 1).text()
+
+
+def test_dashboard_click_shows_clients_concerned(window, conn, monkeypatch):
+    from taxmatch.gui import main_window as mw
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET activity_state='active', vat_subject=1, books_category='Γ' WHERE afm=?", (AFM,))
+    seen = {}
+
+    class FakeDialog:
+        def __init__(self, title, url, **kw):
+            seen.update(kw, title=title)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(mw, "NewsDialog", FakeDialog)
+    window.reload_dashboard()
+    items = [window.dash_deadlines.item(i) for i in range(window.dash_deadlines.count())]
+    vat = next(i for i in items if "ΦΠΑ (μηνιαία)" in i.text())
+    assert "1 πελάτες" in vat.text()
+    window.dash_deadlines.itemClicked.emit(vat)                        # ΑΠΛΟ κλικ, όχι διπλό
+    assert [c["afm"] for c in seen["clients"]] == [AFM] and seen["clients"][0]["status"] == "yes"

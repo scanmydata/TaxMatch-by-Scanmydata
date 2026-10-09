@@ -10,20 +10,21 @@
 Όλα τοπικά (SQLite, πίνακες `aml_*`)· δίκτυο ΜΟΝΟ στην «Αυτόματη λήψη εγγράφων» (aml/retrieval.py, background thread)."""
 from __future__ import annotations
 
+import re
 from datetime import date
 from html import escape as html_escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .. import settings_store
+from .. import config, settings_store
 from ..aml import cases as cases_mod, content, documents as aml_docs, export as aml_export, model, store
 from ..aml import retrieval, sanctions, templating
 from .. import db as dbmod
@@ -33,13 +34,22 @@ from .aml_dialog import AmlAssessmentDialog, category_colour
 from .icons import icon
 from .theme import CURRENT
 from .toast import toast
-from .widgets import GrDateEdit, due_badge
+from .table_filter import TableColumnFilter
+from .tour import Step, Tour
+from .widgets import GrDateEdit, due_badge, resort, setup_columns
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
 
-_COLS = ["ΑΦΜ", "Επωνυμία", "Κίνδυνος", "Βαθμολογία", "Δέουσα επιμέλεια", "ΠΕΠ", "Τελ. αξιολόγηση",
-         "Επόμενη επανεξέταση", "KYC", "Έγγραφα", "Κατάσταση φακέλου"]
+#: (επικεφαλίδα, πλάτος — 0 = ό,τι περισσεύει, tooltip) — βλ. widgets.setup_columns
+_COL_SPEC = [("ΑΦΜ", 84, ""), ("Επωνυμία", 0, "Διπλό κλικ: αξιολόγηση / φάκελος πελάτη"), ("Κίνδυνος", 124, "Τελική κατάταξη"),
+             ("Βαθμός", 58, "Βαθμολογία του μοντέλου του γραφείου (Α: άθροισμα · Β: /100)"),
+             ("Επιμέλεια", 96, "Είδος δέουσας επιμέλειας"), ("ΠΕΠ", 90, "Πολιτικώς εκτεθειμένο πρόσωπο"),
+             ("Αξιολόγηση", 88, "Ημερομηνία τελευταίας αξιολόγησης"), ("Επανεξέταση", 110, "Επόμενη επανεξέταση"),
+             ("KYC", 44, "Βήματα γνωριμίας που ολοκληρώθηκαν"), ("Έγγραφα", 62, "Έγγραφα φακέλου που παραλήφθηκαν"),
+             ("Κατάσταση φακέλου", 130, "")]
+_COLS = [c[0] for c in _COL_SPEC]
+_FILTER_COLS = (2, 4, 5, 10)                        # φίλτρο τύπου Excel: Κίνδυνος, Επιμέλεια, ΠΕΠ, Κατάσταση φακέλου
 _FILTERS = (("all", "Όλοι οι πελάτες"), ("missing", "Χωρίς αξιολόγηση"), ("overdue", "Εκπρόθεσμη επανεξέταση"),
             ("due_soon", "Επανεξέταση σε 30 ημέρες"), ("high", "Υψηλός κίνδυνος"), ("pep", "ΠΕΠ"),
             ("docs", "Εκκρεμούν έγγραφα"), ("alerts", "Red flag / εκκρεμότητες φακέλου"),
@@ -70,7 +80,7 @@ class AmlPage(QWidget):
         self.tabs.addTab(self._clients_tab(), icon("clients", CURRENT.muted, 16), "Κατάσταση πελατών")
         self.tabs.addTab(self._self_check_tab(), icon("check", CURRENT.muted, 16), "Αυτοδιάγνωση (ΑΑΔΕ)")
         self.tabs.addTab(self._folder_tab(), icon("folder", CURRENT.muted, 16), "Φάκελος συμμόρφωσης")
-        self.tabs.addTab(self._cases_tab(), icon("bell", CURRENT.muted, 16), "Υποθέσεις (καταγγελίες/αναφορές)")
+        self.tabs.addTab(self._cases_tab(), icon("bell", CURRENT.muted, 16), "Υποθέσεις")
         self.tabs.addTab(self._registers_tab(), icon("edit", CURRENT.muted, 16), "Μητρώα")
         self.tabs.addTab(self._templates_tab(), icon("csv", CURRENT.muted, 16), "Πρότυπα εγγράφων")
         self.tabs.addTab(self._method_tab(), icon("info", CURRENT.muted, 16), "Μεθοδολογία & ρυθμίσεις")
@@ -118,34 +128,58 @@ class AmlPage(QWidget):
         top.addWidget(self.filter)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Αναζήτηση ΑΦΜ/επωνυμίας…")
-        self.search.setFixedWidth(220)
+        self.search.setMinimumWidth(240)
         self.search.textChanged.connect(self._apply_filter)
-        top.addWidget(self.search)
-        top.addStretch()
-        assess = QPushButton(icon("edit", CURRENT.txt, 16), "  Αξιολόγηση επιλεγμένου")
+        top.addWidget(self.search, 1)
+        help_btn = self.help_btn = QPushButton(icon("info", CURRENT.txt, 16), "  Ξενάγηση")
+        help_btn.setToolTip("Σύντομη ξενάγηση στη Δέουσα επιμέλεια")
+        help_btn.clicked.connect(self.start_tour)
+        top.addWidget(help_btn)
+        manual_btn = QPushButton(icon("pdf", CURRENT.txt, 16), "  Εγχειρίδιο")
+        manual_btn.setToolTip("Άνοιγμα του εγχειριδίου (κεφάλαιο 8: Δέουσα επιμέλεια)")
+        manual_btn.clicked.connect(self.main.on_manual)
+        top.addWidget(manual_btn)
+        box.addLayout(top)
+
+        # Δεύτερη σειρά: ενέργειες για τον επιλεγμένο πελάτη. Χωριστά από τα φίλτρα — σε μία σειρά δεν χωρούσαν και τα
+        # κουμπιά έπεφταν το ένα πάνω στο άλλο (αναφορά χρήστη, 2026-10-09).
+        actions = QHBoxLayout()
+        assess = self.assess_btn = QPushButton(icon("edit", CURRENT.txt, 16), "  Αξιολόγηση πελάτη")
         assess.setObjectName("primary")
+        assess.setToolTip("Άνοιγμα του φακέλου του επιλεγμένου πελάτη για νέα αξιολόγηση")
         assess.clicked.connect(self._assess_selected)
-        top.addWidget(assess)
-        sheet = QPushButton(icon("excel", CURRENT.txt, 16), "  Φύλλο τελευταίας αξιολόγησης")
-        sheet.clicked.connect(self._export_selected_sheet)
-        top.addWidget(sheet)
-        docs_btn = self.docs_btn = QPushButton(icon("pdf", CURRENT.txt, 16), "  Έγγραφα πελάτη (PDF / Word) ▾")
+        actions.addWidget(assess)
+        docs_btn = self.docs_btn = QPushButton(icon("pdf", CURRENT.txt, 16), "  Έγγραφα πελάτη  ▾")
         docs_menu = QMenu(docs_btn)
         for label, kind in (("Δήλωση παροχής στοιχείων", "declaration"), ("Ερωτηματολόγιο γνωριμίας (KYC)", "questionnaire"),
                             ("Έκθεση αξιολόγησης κινδύνου", "assessment"), ("Ρήτρες σύμβασης ν. 4557/2018", "clauses")):
-            docs_menu.addAction(label, lambda k=kind: self._client_pdf(k))
-        docs_menu.addSeparator()
-        docs_menu.addAction("Αυτόματη λήψη εγγράφων (Μητρώο ΑΑΔΕ · Ν/Ε1/Ε3 · ΚΜΠΔ)", self._fetch_selected_documents)
-        docs_menu.addAction("Έλεγχος κυρώσεων ΕΕ — ΟΛΟΙ οι πελάτες", self._screen_all_clients)
+            docs_menu.addAction(label + " (PDF)", lambda k=kind: self._client_pdf(k))
         docs_menu.addSeparator()
         for doc_type, label in templating.DOC_TYPES:
             docs_menu.addAction(f"Word από πρότυπο γραφείου: {label}", lambda d=doc_type: self._client_word(d))
+        docs_menu.addSeparator()
+        docs_menu.addAction("Αυτόματη λήψη εγγράφων (Μητρώο ΑΑΔΕ · Ν/Ε1/Ε3 · ΚΜΠΔ)", self._fetch_selected_documents)
         docs_btn.setMenu(docs_menu)
-        top.addWidget(docs_btn)
-        summary = QPushButton(icon("excel", CURRENT.txt, 16), "  Συγκεντρωτική κατάσταση (Excel)")
+        actions.addWidget(docs_btn)
+        sheet = QPushButton(icon("excel", CURRENT.txt, 16), "  Φύλλο αξιολόγησης")
+        sheet.setToolTip("Excel με την τελευταία αξιολόγηση του επιλεγμένου πελάτη")
+        sheet.clicked.connect(self._export_selected_sheet)
+        actions.addWidget(sheet)
+        actions.addStretch()
+        screen_all = QPushButton(icon("check", CURRENT.txt, 16), "  Έλεγχος κυρώσεων (όλοι)")
+        screen_all.setToolTip("Έλεγχος όλων των πελατών στην Ενοποιημένη λίστα κυρώσεων της ΕΕ")
+        screen_all.clicked.connect(self._screen_all_clients)
+        actions.addWidget(screen_all)
+        summary = QPushButton(icon("excel", CURRENT.txt, 16), "  Συγκεντρωτική (Excel)")
+        summary.setToolTip("Συγκεντρωτική κατάσταση όλων των πελατών σε Excel")
         summary.clicked.connect(self._export_summary)
-        top.addWidget(summary)
-        box.addLayout(top)
+        actions.addWidget(summary)
+        box.addLayout(actions)
+        for layout in (top, actions):                       # κανένα κουμπί στενότερο από το κείμενό του
+            for i in range(layout.count()):
+                w = layout.itemAt(i).widget()
+                if isinstance(w, QPushButton):
+                    w.setMinimumWidth(w.sizeHint().width())
 
         self.table = QTableWidget(0, len(_COLS))
         self.table.setHorizontalHeaderLabels(_COLS)
@@ -156,11 +190,13 @@ class AmlPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setSortingEnabled(True)
         self.table.doubleClicked.connect(self._assess_selected)
-        for col, width in enumerate((90, 0, 90, 80, 110, 120, 100, 180, 50, 65, 230)):
-            if width:
-                self.table.setColumnWidth(col, width)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Όπως οι πίνακες Πελάτες/Νέα: ταξινόμηση με κλικ στην επικεφαλίδα, στήλες που σέρνονται (σειρά/πλάτος) και
+        # θυμούνται τη διάταξη, φίλτρο τύπου Excel. apply_fn = η ΔΙΚΗ μας συνάρτηση που συνδυάζει όλα τα κριτήρια
+        # (βλ. CLAUDE.md §Κανόνες για το TableColumnFilter).
+        self._col_filter = TableColumnFilter(self.table, _FILTER_COLS, apply_fn=self._apply_filter)
+        self._col_filter.filtersChanged.connect(self._apply_filter)
+        self.table.setColumnWidth(1, 220)                    # αρχικό πλάτος αν το παράθυρο είναι στενό (η στήλη «γεμίζει» μόνη της)
+        setup_columns(self.table, _COL_SPEC, self.main._prefs, "aml_clients")
         box.addWidget(self.table, 1)
         hint = QLabel("Διπλό κλικ: νέα αξιολόγηση (φορτώνει τις επιλογές της προηγούμενης). Οι επανεξετάσεις "
                       "εμφανίζονται και στο Ημερολόγιο. Η διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό δέουσας επιμέλειας "
@@ -218,6 +254,7 @@ class AmlPage(QWidget):
                     item.setForeground(QColor(CURRENT.muted))
                 t.setItem(i, col, item)
         t.setSortingEnabled(True)
+        resort(t)
         self._apply_filter()
 
     def _row_matches(self, r: dict, key: str) -> bool:
@@ -241,7 +278,42 @@ class AmlPage(QWidget):
             ok = bool(r) and self._row_matches(r, key)
             if ok and needle:
                 ok = needle in r["afm"] or needle in (r["name"] or "").lower()
+            if ok:
+                ok = all(not allowed or self.table.item(row, c).text() in allowed
+                         for c, allowed in self._col_filter.filters.items())
             self.table.setRowHidden(row, not ok)
+
+    # ------------------------------------------------------------------ ξενάγηση σελίδας
+    def tour_steps(self) -> list[Step]:
+        first = lambda: self.tabs.setCurrentIndex(0)  # noqa: E731
+        return [
+            Step("Δέουσα επιμέλεια", "Εδώ οργανώνονται οι υποχρεώσεις του γραφείου ως υπόχρεης οντότητας (ν. 4557/2018): "
+                 "ανάλυση κινδύνου κάθε πελάτη, φάκελος συμμόρφωσης, μητρώα και υποθέσεις.", lambda: self.tabs.tabBar(), first),
+            Step("1. Εικόνα με μια ματιά", "Πόσοι πελάτες δεν έχουν αξιολόγηση, πόσες επανεξετάσεις έληξαν ή λήγουν σε 30 "
+                 "ημέρες, υψηλός κίνδυνος, ΠΕΠ, έγγραφα που λείπουν.", lambda: self._kpi["missing"].parentWidget(), first),
+            Step("2. Οι πελάτες", "Κλικ στην επικεφαλίδα ταξινομεί· οι στήλες σέρνονται για αλλαγή σειράς και πλάτους· το "
+                 "χωνί φιλτράρει όπως στο Excel. Διπλό κλικ ανοίγει τον φάκελο του πελάτη.", lambda: self.table, first),
+            Step("3. Αξιολόγηση πελάτη", "Ο φάκελος έχει τρεις καρτέλες: KYC (είδος πελάτη, ΠΕΠ, εκπρόσωπος, δικαιούχοι, "
+                 "έγγραφα), Συναλλαγές/προέλευση κεφαλαίων και Παράγοντες κινδύνου — το αποτέλεσμα φαίνεται ζωντανά. Από "
+                 "εκεί: αυτόματη λήψη εγγράφων (Μητρώο ΑΑΔΕ, δήλωση εισοδήματος, ΚΜΠΔ), έλεγχος κυρώσεων, σύνδεση Γ.Ε.ΜΗ.",
+                 lambda: self.assess_btn, first),
+            Step("4. Έγγραφα πελάτη", "Δήλωση παροχής στοιχείων, Ερωτηματολόγιο KYC, Έκθεση αξιολόγησης και Ρήτρες σύμβασης "
+                 "σε PDF — ή Word από τα πρότυπα του γραφείου σας.", lambda: self.docs_btn, first),
+            Step("5. Πρότυπα εγγράφων", "Τα έξι πρότυπα Word (Δήλωση, Συμφωνητικό, Αξιολόγηση × φυσικά/νομικά). "
+                 "«Επεξεργασία στο Word» ανοίγει το πρότυπο· μόλις το αποθηκεύσετε, η εφαρμογή κρατά τη νέα εκδοχή.",
+                 lambda: self.tpl_table, lambda: self.tabs.setCurrentIndex(5)),
+            Step("6. Γραφείο", "Αυτοδιάγνωση με τα 23 σημεία της ΑΑΔΕ, φάκελος συμμόρφωσης, υποθέσεις (αναφορές ύποπτων "
+                 "συναλλαγών στην Αρχή, καταγγελίες ν. 4990/2022), μητρώα και μεθοδολογία (Μοντέλο Α/Β).",
+                 lambda: self.tabs.tabBar(), first),
+        ]
+
+    def start_tour(self) -> None:
+        old = getattr(self, "_tour", None)
+        if old is not None:
+            old.deleteLater()
+        self._tour = Tour(self.main, self.tour_steps())
+        self._tour.start()
+        self._tour.setFocus()
 
     def _selected_afm(self) -> Optional[str]:
         row = self.table.currentRow()
@@ -393,9 +465,10 @@ class AmlPage(QWidget):
         page = QWidget()
         box = QVBoxLayout(page)
         info = QLabel("Έξι πρότυπα Word: Δήλωση παροχής στοιχείων, Ιδιωτικό συμφωνητικό και Αξιολόγηση κινδύνου, χωριστά για "
-                      "φυσικά και νομικά πρόσωπα. Κατεβάστε το τρέχον πρότυπο, προσαρμόστε το στο Word (π.χ. το δικό σας "
-                      "συμφωνητικό 2026) γράφοντας πεδία όπως ${client_name} ή {{client_afm}}, και ανεβάστε το. Γίνονται "
-                      "δεκτά και πρότυπα με πεδία του taxis.com.gr (${meponimia_etairias}, ${mtitlos1}…).")
+                      "φυσικά και νομικά πρόσωπα. «Επεξεργασία στο Word» (ή διπλό κλικ) ανοίγει το πρότυπο· γράψτε το κείμενό "
+                      "σας με πεδία όπως ${client_name} ή {{client_afm}} και πατήστε Αποθήκευση στο Word — η εφαρμογή κρατά "
+                      "αυτόματα τη νέα εκδοχή. Μπορείτε και να ανεβάσετε έτοιμο .docx (π.χ. το συμφωνητικό σας, ή πρότυπο "
+                      "του taxis.com.gr με πεδία ${meponimia_etairias}, ${mtitlos1}…).")
         info.setWordWrap(True)
         info.setObjectName("muted")
         box.addWidget(info)
@@ -408,16 +481,33 @@ class AmlPage(QWidget):
         self.tpl_table.setColumnWidth(0, 360)
         self.tpl_table.setColumnWidth(1, 300)
         self.tpl_table.horizontalHeader().setStretchLastSection(True)
-        self.tpl_table.setMaximumHeight(240)
+        self.tpl_table.setFixedHeight(232)
         box.addWidget(self.tpl_table)
         row = QHBoxLayout()
-        for label, handler in (("Λήψη προτύπου…", self._download_template), ("Ανέβασμα δικού σας (.docx)…", self._upload_template),
+        for label, handler in (("Επεξεργασία στο Word", self._edit_template), ("Δοκιμή με πελάτη…", self._preview_template),
+                               ("Ανέβασμα δικού σας (.docx)…", self._upload_template),
+                               ("Αποθήκευση αντιγράφου…", self._download_template),
                                ("Επαναφορά προεπιλογής", self._reset_template)):
             b = QPushButton(label)
+            if handler == self._edit_template:
+                b.setObjectName("primary")
+                self.tpl_edit_btn = b
             b.clicked.connect(handler)
+            b.setMinimumWidth(b.sizeHint().width())
             row.addWidget(b)
         row.addStretch()
         box.addLayout(row)
+        self.tpl_table.doubleClicked.connect(self._edit_template)
+        # Επεξεργασία: το πρότυπο γράφεται σε αρχείο εργασίας και παρακολουθείται ο ΦΑΚΕΛΟΣ (το Word αποθηκεύει με
+        # προσωρινό αρχείο + μετονομασία, οπότε η παρακολούθηση του ίδιου του αρχείου χάνεται στην πρώτη αποθήκευση).
+        self._tpl_editing: dict[str, tuple[str, bytes]] = {}          # διαδρομή -> (θέση, τελευταίο γνωστό περιεχόμενο)
+        self._tpl_watcher = QFileSystemWatcher(self)
+        self._tpl_timer = QTimer(self)
+        self._tpl_timer.setSingleShot(True)
+        self._tpl_timer.setInterval(1200)
+        self._tpl_timer.timeout.connect(self._sync_edited_templates)
+        self._tpl_watcher.directoryChanged.connect(lambda _p: self._tpl_timer.start())
+        self._tpl_watcher.fileChanged.connect(lambda _p: self._tpl_timer.start())
         fields = QGroupBox("Διαθέσιμα πεδία")
         fl = QVBoxLayout(fields)
         text = QLabel("<table cellpadding=2>" + "".join(
@@ -435,6 +525,7 @@ class AmlPage(QWidget):
         return page
 
     def reload_templates(self) -> None:
+        self._sync_edited_templates()
         info = templating.template_info(self.conn)
         for i, slot in enumerate(templating.SLOTS):
             custom = info.get(slot)
@@ -454,6 +545,75 @@ class AmlPage(QWidget):
             toast(self.main, "Επιλέξτε πρώτα ένα πρότυπο από τη λίστα.", "warn")
             return None
         return self.tpl_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+
+    def _template_work_dir(self) -> Path:
+        folder = config.data_dir() / "aml_templates"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _edit_template(self, *_args) -> None:
+        slot = self._selected_slot()
+        if not slot:
+            return
+        data, _name, _custom = templating.get_template(self.conn, slot)
+        label = re.sub(r'[\\/:*?"<>|]+', " ", templating.slot_label(slot))
+        path = self._template_work_dir() / f"{label}.docx"
+        try:
+            if not path.exists() or path.read_bytes() != data:
+                path.write_bytes(data)
+        except OSError:
+            pass                                    # ήδη ανοιχτό στο Word: απλώς φέρ' το μπροστά
+        self._tpl_editing[str(path)] = (slot, data)
+        folder = str(path.parent)
+        if folder not in self._tpl_watcher.directories():
+            self._tpl_watcher.addPath(folder)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            toast(self.main, "Δεν βρέθηκε πρόγραμμα για αρχεία .docx (Word/LibreOffice).", "danger")
+            return
+        toast(self.main, "Το πρότυπο άνοιξε για επεξεργασία. Πατήστε Αποθήκευση στο Word — η νέα εκδοχή κρατιέται αυτόματα.",
+              "ok", ms=8000)
+
+    def _sync_edited_templates(self) -> None:
+        """Ό,τι αποθηκεύτηκε στο Word από την τελευταία φορά γίνεται το πρότυπο του γραφείου."""
+        saved = []
+        for path, (slot, known) in list(self._tpl_editing.items()):
+            try:
+                data = Path(path).read_bytes()
+            except OSError:
+                continue                            # κλειδωμένο/στη μέση αποθήκευσης — θα ξαναδοκιμαστεί στην επόμενη αλλαγή
+            if not data or data == known:
+                continue
+            try:
+                templating.save_template(self.conn, slot, Path(path).name, data)
+            except ValueError:
+                continue                            # μισογραμμένο αρχείο
+            self._tpl_editing[path] = (slot, data)
+            saved.append(templating.slot_label(slot))
+        if saved:
+            self.reload_templates()
+            toast(self.main, "Αποθηκεύτηκε το πρότυπο: " + ", ".join(saved), "ok")
+
+    def _preview_template(self) -> None:
+        """Γεμίζει το επιλεγμένο πρότυπο με τα στοιχεία του επιλεγμένου πελάτη και το ανοίγει — για έλεγχο των πεδίων."""
+        slot = self._selected_slot()
+        if not slot:
+            return
+        self._sync_edited_templates()
+        afm = self._selected_afm() or next((r["afm"] for r in getattr(self, "_rows", []) if r["is_client"]), None)
+        if not afm:
+            toast(self.main, "Χρειάζεται τουλάχιστον ένας πελάτης για τη δοκιμή.", "warn")
+            return
+        data, _name, _custom = templating.get_template(self.conn, slot)
+        out, unknown = templating.render(data, templating.build_fields(self.conn, afm))
+        path = self._template_work_dir() / f"Δοκιμή - {afm}.docx"
+        try:
+            path.write_bytes(out)
+        except OSError:
+            toast(self.main, "Κλείστε πρώτα την προηγούμενη δοκιμή στο Word.", "warn")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if unknown:
+            toast(self.main, "Πεδία χωρίς τιμή: " + ", ".join(sorted(unknown)[:8]), "warn", ms=9000)
 
     def _download_template(self) -> None:
         slot = self._selected_slot()

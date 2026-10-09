@@ -17,6 +17,8 @@ datas = [
     (str(ROOT / "taxmatch" / "extraction" / "prompts"), "taxmatch/extraction/prompts"),
     (str(ROOT / "packaging" / "taxmatch.ico"), "packaging"),
 ]
+if (ROOT / "packaging" / "manual.pdf").exists():          # το χτίζει το build.ps1 (βήμα 3c)
+    datas.append((str(ROOT / "packaging" / "manual.pdf"), "."))
 datas += collect_data_files("feedparser")
 datas += collect_data_files("tzdata")            # ζώνες ώρας (Europe/Athens) για το αρχείο καταγραφής
 

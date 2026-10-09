@@ -74,7 +74,8 @@ class AmlAssessmentDialog(QDialog):
         self._tasks: list = []
 
         self.setWindowTitle(f"Δέουσα επιμέλεια — {self.business['name'] or afm}")
-        self.resize(1180, 780)
+        screen = self.screen().availableGeometry() if self.screen() else None
+        self.resize(min(1400, screen.width() - 40) if screen else 1400, min(860, screen.height() - 60) if screen else 860)
         root = QVBoxLayout(self)
 
         head = QHBoxLayout()
@@ -108,8 +109,15 @@ class AmlAssessmentDialog(QDialog):
         self.left_tabs.addTab(_scroll(self._factors_panel()), "Παράγοντες κινδύνου")
         split.addWidget(self.left_tabs)
         split.addWidget(self._right_panel())
-        split.setStretchFactor(0, 3)
+        split.setStretchFactor(0, 5)
         split.setStretchFactor(1, 2)
+        split.setSizes([self.width() * 68 // 100, self.width() * 32 // 100])
+        # Τα πλατιά combo (π.χ. «Κεφαλαιουχική εταιρεία / νομικό πρόσωπο…») δεν πρέπει να επιβάλλουν πλάτος στο πλαίσιο —
+        # αλλιώς εμφανίζεται οριζόντια κύλιση και τα κουμπιά κόβονται (αναφορά χρήστη, 2026-10-09).
+        for combo in self.left_tabs.findChildren(QComboBox):
+            if combo.parent() is not None and not isinstance(combo.parent().parent(), QTableWidget):
+                combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                combo.setMinimumContentsLength(18)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -154,13 +162,13 @@ class AmlAssessmentDialog(QDialog):
         self.pep.currentIndexChanged.connect(self._on_pep)
         form.addRow("Πολιτικώς εκτεθειμένο πρόσωπο", self.pep)
         screen_row = QHBoxLayout()
-        self.sanctions_btn = QPushButton("Έλεγχος σε λίστες κυρώσεων ΕΕ")
+        self.sanctions_btn = QPushButton("Έλεγχος κυρώσεων ΕΕ")
         self.sanctions_btn.setToolTip("Πελάτης, νόμιμος εκπρόσωπος και πραγματικοί δικαιούχοι έναντι της Ενοποιημένης λίστας "
                                       "οικονομικών κυρώσεων της ΕΕ (περιλαμβάνει ΟΗΕ). Καταγράφεται στον φάκελο ως τεκμήριο.")
         self.sanctions_btn.clicked.connect(self._screen_sanctions)
         screen_row.addWidget(self.sanctions_btn)
-        google = QPushButton("Google (ΠΕΠ / δυσμενή δημοσιεύματα)")
-        google.setToolTip("Ανοίγει αναζήτηση Google στον browser με το όνομα του πελάτη/εκπροσώπου — μόνο το όνομα, όχι ΑΦΜ.")
+        google = QPushButton("Αναζήτηση Google")
+        google.setToolTip("ΠΕΠ / δυσμενή δημοσιεύματα. Ανοίγει αναζήτηση Google στον browser με το όνομα του πελάτη/εκπροσώπου — μόνο το όνομα, όχι ΑΦΜ.")
         google.clicked.connect(self._google_check)
         screen_row.addWidget(google)
         screen_row.addStretch()
@@ -208,21 +216,21 @@ class AmlAssessmentDialog(QDialog):
         self.docs_label = QLabel("")
         dl.addWidget(self.docs_label)
         auto = QHBoxLayout()
-        self.fetch_btn = QPushButton("Αυτόματη λήψη εγγράφων (Μητρώο ΑΑΔΕ · δήλωση εισοδήματος · ΚΜΠΔ)")
-        self.fetch_btn.setToolTip("Κατεβάζει τα PDF από TAXISnet/ΚΜΠΔ με τους κωδικούς του πελάτη (και του νόμιμου "
+        self.fetch_btn = QPushButton("Αυτόματη λήψη εγγράφων")
+        self.fetch_btn.setToolTip("Μητρώο ΑΑΔΕ · δήλωση εισοδήματος (Ν ή Ε1/Ε3) · ΚΜΠΔ. Κατεβάζει τα PDF από TAXISnet/ΚΜΠΔ με τους κωδικούς του πελάτη (και του νόμιμου "
                                   "εκπροσώπου για το ΚΜΠΔ) και τα σημειώνει ως παραληφθέντα. Μόνο ανάγνωση — "
                                   "καμία υποβολή.")
         self.fetch_btn.clicked.connect(self._fetch_documents)
         auto.addWidget(self.fetch_btn)
+        open_dir = QPushButton("Άνοιγμα φακέλου εγγράφων")
+        open_dir.clicked.connect(self._open_folder)
+        auto.addWidget(open_dir)
         auto.addStretch()
         dl.addLayout(auto)
         self.files_list = QListWidget()
         self.files_list.setMaximumHeight(110)
         self.files_list.itemActivated.connect(self._open_file)
         dl.addWidget(self.files_list)
-        open_dir = QPushButton("Άνοιγμα φακέλου εγγράφων")
-        open_dir.clicked.connect(self._open_folder)
-        dl.addWidget(open_dir)
         box.addWidget(docs)
         self.client_kind.currentIndexChanged.connect(self._build_docs)
 

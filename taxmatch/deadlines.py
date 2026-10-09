@@ -24,13 +24,14 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
     for r in conn.execute("SELECT id, title, due_date, source_url, description FROM obligations_general "
                           "WHERE due_date BETWEEN ? AND ? ORDER BY due_date, id", (s, e)):
         events.append({"kind": "general", "id": r["id"], "title": r["title"], "date": r["due_date"],
-                       "url": r["source_url"], "n_clients": None, "description": "", "conditional": False})
+                       "url": r["source_url"], "n_clients": None, "description": r["description"] or "",
+                       "conditional": False})
         general_by_day.setdefault(r["due_date"], []).append(normalize_text(r["title"]))
 
     if include_rules:
         business = None
         if afm:
-            row = conn.execute("SELECT vat_subject, vat_period_type FROM businesses WHERE afm=?", (afm,)).fetchone()
+            row = conn.execute(_BUSINESS_SQL + " WHERE afm=?", (afm,)).fetchone()
             business = dict(row) if row else None
         for oc in obligations.occurrences(start, end, business):
             if oc.conditional and not include_conditional:
@@ -61,6 +62,77 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
                            "date": r["next_review"], "url": "", "n_clients": 1, "afm": r["afm"], "conditional": False,
                            "description": f"Τρέχουσα κατάταξη: {aml_model.CATEGORY_LABEL.get(r['final_category'], '')}. "
                                           "Νέα αξιολόγηση από «Δέουσα επιμέλεια» ή την καρτέλα του πελάτη."})
+    if not afm:                                          # γενική προβολή: πόσοι πελάτες είναι υπόχρεοι σε κάθε γεγονός
+        businesses = _businesses(conn)
+        for ev in events:
+            if ev["kind"] in ("rule", "general"):
+                people = _liable(ev, businesses)
+                if people is not None:
+                    ev["n_clients"] = sum(1 for c in people if c["status"] == "yes")
+                    ev["n_maybe"] = sum(1 for c in people if c["status"] == "maybe")
     order = {"news": 0, "aml": 1, "rule": 2, "general": 3}
     events.sort(key=lambda ev: (ev["date"], order[ev["kind"]], ev["title"]))
     return events
+
+
+# ------------------------------------------------------------------ ποιους πελάτες αφορά ένα γεγονός
+_BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, books_category, activity_state, cease_date "
+                 "FROM businesses")
+_RANK = {"yes": 0, "maybe": 1, "no": 2}
+
+
+def _businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [dict(r) for r in conn.execute(_BUSINESS_SQL + " ORDER BY name")]
+
+
+def rules_for_event(ev: dict[str, Any]) -> list[str]:
+    """Ποιοι κανόνες αντιστοιχούν σε ένα γεγονός. Για γεγονός του γενικού ημερολογίου (taxheaven) γίνεται από τον τίτλο,
+    με τους ίδιους όρους που κρύβουν τον κανόνα όταν υπάρχει το πραγματικό γεγονός — αλλιώς [] (άγνωστο ποιον αφορά)."""
+    if ev["kind"] == "rule":
+        return [ev["id"]]
+    if ev["kind"] != "general":
+        return []
+    title = normalize_text(ev["title"])
+    month = date.fromisoformat(ev["date"]).month
+    ids = [r.id for r in obligations.RULES
+           if r.hide_if_feed_terms and all(t in title for t in r.hide_if_feed_terms) and month in r.due_months]
+    if "vat_monthly" in ids and "vat_quarterly" in ids:
+        if "τριμην" in title:
+            ids.remove("vat_monthly")
+        elif "μηνιαι" in title:
+            ids.remove("vat_quarterly")
+    if any(i in ids for i in ("vies", "intrastat", "oss", "ioss")):      # «Δήλωση ΦΠΑ OSS» δεν είναι η περιοδική ΦΠΑ
+        ids = [i for i in ids if i not in ("vat_monthly", "vat_quarterly")]
+    return ids
+
+
+def _liable(ev: dict[str, Any], businesses: list[dict[str, Any]]) -> Optional[list[dict[str, Any]]]:
+    ids = rules_for_event(ev)
+    if not ids:
+        return None
+    out = []
+    for b in businesses:
+        status, reason = min((obligations.liability(i, b) for i in ids), key=lambda x: _RANK[x[0]])
+        if status != "no":
+            out.append({"afm": b["afm"], "name": b["name"] or b["afm"], "status": status, "reason": reason})
+    out.sort(key=lambda c: (_RANK[c["status"]], c["name"]))
+    return out
+
+
+def clients_for_event(conn: sqlite3.Connection, ev: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    """Πελάτες που αφορά το γεγονός: [{afm, name, status 'yes'|'maybe', reason}] — ή None όταν δεν μπορούμε να το
+    ξέρουμε (γεγονός του γενικού ημερολογίου που δεν αντιστοιχεί σε κανόνα)."""
+    if ev["kind"] == "news":
+        return clients_for_article(conn, ev["id"])
+    if ev["kind"] == "aml":
+        row = conn.execute("SELECT name FROM businesses WHERE afm=?", (ev["afm"],)).fetchone()
+        return [{"afm": ev["afm"], "name": (row["name"] if row else "") or ev["afm"], "status": "yes", "reason": ""}]
+    return _liable(ev, _businesses(conn))
+
+
+def clients_for_article(conn: sqlite3.Connection, article_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT m.afm, b.name, m.matched_reason, m.confidence FROM matches m "
+                        "JOIN businesses b ON b.afm=m.afm WHERE m.article_id=? ORDER BY m.confidence DESC, b.name",
+                        (article_id,))
+    return [{"afm": r["afm"], "name": r["name"] or r["afm"], "status": "yes" if r["confidence"] >= 1.0 else "maybe",
+             "reason": r["matched_reason"] or ""} for r in rows]

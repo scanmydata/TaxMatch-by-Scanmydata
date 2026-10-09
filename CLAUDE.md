@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 328 tests, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # 333 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -347,3 +347,17 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    email στους πελάτες, αρχειοθέτηση Google Drive, «γλώσσα αναφορών» (αγγλικά), τιμοκατάλογος υπηρεσιών γραφείου/αμοιβές
    σύμβασης, υπάλληλοι ανά πελάτη, μαζική μεταβολή νομικής μορφής/κατάστασης. Τα πρότυπα του taxis ανοίγουν από το φάκελο
    πελάτη → «Ενέργειες» → «Επεξεργασία προτύπων γραφείου».
+13. **Ποιους πελάτες αφορά μια προθεσμία (2026-10-09, αναφορά χρήστη).** `obligations.liability(rule_id, business)` →
+   `yes | maybe | no` + αιτιολογία, από ό,τι ΗΔΗ έχουμε στο Μητρώο (διακοπή/ιδιώτης, υπαγωγή ΦΠΑ, περίοδος ΦΠΑ ή — όταν
+   λείπει — κατηγορία βιβλίων Γ=μηνιαία/Β=τριμηνιαία). `maybe` = εξαρτάται από κάτι που ΔΕΝ ξέρουμε (εργοδότης για
+   ΑΠΔ/Ε4, ενδοκοινοτικές για VIES/Intrastat, εγγραφή OSS/IOSS) — ποτέ εφεύρεση. `deadlines.clients_for_event()` δίνει τη
+   λίστα· για γεγονότα του γενικού ημερολογίου (taxheaven) η αντιστοίχιση σε κανόνα γίνεται από τον τίτλο
+   (`rules_for_event`, ίδιοι όροι με το `hide_if_feed_terms`) — αν δεν ταιριάζει κανόνας, `None` («άγνωστο», όχι «όλοι»).
+   Στο GUI: `NewsDialog(clients=…, on_client=…)` και ΑΠΛΟ κλικ (`itemClicked`) σε Αρχική/Ημερολόγιο.
+   **Δεν ξέρουμε ακόμη:** αν ο πελάτης είναι εργοδότης (θα έλυνε τα «υπό προϋποθέσεις» ΑΠΔ/Ε4 — πιθανή πηγή: ΕΡΓΑΝΗ/e-ΕΦΚΑ).
+   **Σελίδα Δέουσα επιμέλεια:** ο πίνακας χρησιμοποιεί πλέον `setup_columns` + `TableColumnFilter(apply_fn=_apply_filter)`
+   όπως Πελάτες/Νέα· η γραμμή εργαλείων είναι σε ΔΥΟ σειρές (σε μία τα κουμπιά επικαλύπτονταν στα 1280px)· δική της
+   ξενάγηση (`AmlPage.tour_steps`). Πρότυπα Word: «Επεξεργασία στο Word» γράφει αρχείο εργασίας στο
+   `<data>/aml_templates/` και παρακολουθεί τον ΦΑΚΕΛΟ (`QFileSystemWatcher` — το Word αποθηκεύει με μετονομασία).
+   **Εγχειρίδιο:** το `build.ps1` (βήμα 3c) χτίζει πλέον `packaging/manual.pdf` και το spec το βάζει στο πακέτο· πριν
+   ΔΕΝ υπήρχε έτοιμο PDF στο bundle (το `_bundled_manual` έψαχνε κάτι που δεν πακεταριζόταν ποτέ).

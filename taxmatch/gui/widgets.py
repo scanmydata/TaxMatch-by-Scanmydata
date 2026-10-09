@@ -428,8 +428,10 @@ class _FillColumn(QObject):
             for i in range(self._table.columnCount())
             if i != self._column and not header.isSectionHidden(i)
         )
-        room = self._table.viewport().width() - others
-        if room < 140 or abs(room - header.sectionSize(self._column)) <= 1:
+        # Ποτέ κάτω από 140: σε στενό παράθυρο η στήλη ΜΑΖΕΥΕΙ ως εκεί (και εμφανίζεται οριζόντια κύλιση) — πριν απλώς
+        # «πάγωνε» στο πλάτος που είχε όταν το παράθυρο ήταν φαρδύ και έσπρωχνε όλες τις άλλες εκτός οθόνης.
+        room = max(140, self._table.viewport().width() - others)
+        if abs(room - header.sectionSize(self._column)) <= 1:
             return
         self._guard = True
         header.resizeSection(self._column, room)

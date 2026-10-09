@@ -176,6 +176,66 @@ RULES: list[Rule] = [
 
 RULES_BY_ID = {r.id: r for r in RULES}
 
+# ------------------------------------------------------------------ ποιος πελάτης είναι υπόχρεος
+#: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
+_BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4"}
+_MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
+                 "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
+                 "oss": "μόνο αν είναι εγγεγραμμένος στο OSS", "ioss": "μόνο αν είναι εγγεγραμμένος στο IOSS",
+                 "apd": "μόνο αν απασχολεί προσωπικό", "ergani_e4": "μόνο αν απασχολεί προσωπικό"}
+
+
+def vat_period(business: dict[str, Any]) -> str:
+    """'monthly' | 'quarterly' | '' — από το Μητρώο· αλλιώς από την κατηγορία βιβλίων (Γ = μηνιαία, Β = τριμηνιαία)."""
+    pt = business.get("vat_period_type") or ""
+    if pt:
+        return pt
+    return {"Γ": "monthly", "Β": "quarterly"}.get(business.get("books_category") or "", "")
+
+
+def liability(rule_id: str, business: Optional[dict[str, Any]]) -> tuple[str, str]:
+    """('yes' | 'maybe' | 'no', αιτιολογία) για ΕΝΑΝ πελάτη, από ό,τι ήδη ξέρουμε (Μητρώο ΑΑΔΕ): κατάσταση δραστηριότητας,
+    υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
+    if business is None:                              # γενική προβολή (χωρίς συγκεκριμένο πελάτη)
+        return ("maybe", _MAYBE_REASON.get(rule_id, "")) if rule_id in _MAYBE_REASON or rule_id == "income_tax_return" else ("yes", "")
+    state = business.get("activity_state") or ""
+    if rule_id in _BUSINESS_ONLY:
+        if state == "ceased":
+            return "no", "διακοπή εργασιών" + (f" ({business['cease_date']})" if business.get("cease_date") else "")
+        if state == "none":
+            return "no", "ιδιώτης — χωρίς επιχειρηματική δραστηριότητα"
+    if rule_id in ("vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss"):
+        if business.get("vat_subject") == 0:
+            return "no", "δεν υπάγεται σε ΦΠΑ"
+    if rule_id in ("vat_monthly", "vat_quarterly"):
+        want = "monthly" if rule_id == "vat_monthly" else "quarterly"
+        period = vat_period(business)
+        books = business.get("books_category") or ""
+        if not period:
+            return "maybe", "άγνωστη περίοδος ΦΠΑ (λείπει η κατηγορία βιβλίων)"
+        if period != want:
+            return "no", "υποβάλλει " + ("τριμηνιαία" if period == "quarterly" else "μηνιαία") + " ΦΠΑ"
+        if business.get("vat_subject") is None:
+            return "maybe", "άγνωστη υπαγωγή ΦΠΑ"
+        return "yes", ("μηνιαία" if want == "monthly" else "τριμηνιαία") + " ΦΠΑ" + (f" · βιβλία {books}" if books else "")
+    if rule_id in _MAYBE_REASON:
+        return "maybe", _MAYBE_REASON[rule_id]
+    if rule_id == "income_tax_return":
+        if state == "none":
+            form = "Ε1"
+        elif is_legal_entity(business.get("legal_form") or ""):
+            form = "Έντυπο Ν"
+        else:
+            form = "Ε1/Ε3"
+        return "yes", form
+    return "yes", ""
+
+
+def is_legal_entity(legal_form: str) -> bool:
+    f = legal_form.upper().replace(".", "").replace(" ", "")
+    return any(k in f for k in ("ΑΕ", "ΙΚΕ", "ΕΠΕ", "ΟΕ", "ΕΕ", "ΚΟΙΝΣΕΠ", "ΑΣΤΙΚΗ", "ΣΥΝΕΤΑΙΡ", "ΣΩΜΑΤΕΙ", "ΚΟΙΝΟΠΡΑΞ",
+                                "ΙΔΡΥΜΑ", "ΝΠΔΔ", "ΝΠΙΔ", "ΑΜΚΕ")) and "ΑΤΟΜΙΚ" not in f
+
 
 @dataclass
 class Occurrence:
@@ -191,9 +251,10 @@ def occurrences(start: date, end: date, business: Optional[dict[str, Any]] = Non
     """Όλες οι προθεσμίες κανόνων με ημερομηνία στο [start, end]. `business`: dict με vat_subject, vat_period_type ή None (γενικό)."""
     out: list[Occurrence] = []
     for rule in RULES:
-        applies, conditional = rule.applies(business)
-        if not applies:
+        status, _reason = liability(rule.id, business)
+        if status == "no":
             continue
+        conditional = status == "maybe"
         seen: set[date] = set()
         cy, cm = _prev_month(start.year, start.month)      # η προθεσμία ενός μήνα λήξης μπορεί να πέφτει νωρίτερα/αργότερα
         last = (end.year, end.month)

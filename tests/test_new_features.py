@@ -289,7 +289,10 @@ def test_template_download_and_logs_and_dialog_everywhere(client):
 
 # ---------------------------------------------------------------- φίλτρα πηγών
 def item(title, url, summary=""):
-    return rss_fetch.FeedItem(title, url, "2026-09-20T08:00:00Z", summary, "", url)
+    # πρόσφατη ημερομηνία: ο αποδιπλασιασμός θεμάτων κοιτά 14 ημέρες πίσω — σταθερή ημερομηνία «έληγε» με τον καιρό
+    from datetime import datetime, timedelta, timezone
+    when = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rss_fetch.FeedItem(title, url, when, summary, "", url)
 
 
 def test_keyword_prefilter():
@@ -415,3 +418,38 @@ def test_calendar_page_shows_rule_events_and_toggles(client):
     assert "Πίνακας VIES" not in client.get("/calendar?month=2026-10&rules=0").get_data(as_text=True)
     cond_off = client.get("/calendar?month=2026-10&cond=0").get_data(as_text=True)
     assert "Πίνακας VIES" not in cond_off and "Δήλωση ΦΠΑ (μηνιαία)" in cond_off
+
+
+def test_liability_per_client_from_registry_data():
+    from taxmatch import obligations as ob
+    active_g = {"activity_state": "active", "vat_subject": 1, "vat_period_type": "", "books_category": "Γ"}
+    assert ob.liability("vat_monthly", active_g)[0] == "yes"            # Γ βιβλία ⇒ μηνιαία ΦΠΑ
+    assert ob.liability("vat_quarterly", active_g)[0] == "no"
+    assert ob.liability("vat_quarterly", {**active_g, "books_category": "Β"})[0] == "yes"
+    assert ob.liability("vat_monthly", {**active_g, "vat_subject": 0}) == ("no", "δεν υπάγεται σε ΦΠΑ")
+    assert ob.liability("vat_monthly", {**active_g, "books_category": ""})[0] == "maybe"
+    ceased = {**active_g, "activity_state": "ceased", "cease_date": "2025-12-31"}
+    assert ob.liability("vat_monthly", ceased)[0] == "no" and ob.liability("apd", ceased)[0] == "no"
+    assert ob.liability("income_tax_return", ceased)[0] == "yes"        # η δήλωση εισοδήματος οφείλεται και μετά τη διακοπή
+    assert ob.liability("vies", active_g)[0] == "maybe" and ob.liability("apd", {"activity_state": "none"})[0] == "no"
+    assert ob.liability("income_tax_return", {"activity_state": "active", "legal_form": "ΙΚΕ"}) == ("yes", "Έντυπο Ν")
+
+
+def test_clients_for_event_rule_and_general_calendar(conn):
+    from datetime import date
+    from taxmatch import deadlines
+    from taxmatch.business_profiles import service
+    for afm, name, books, state in (("094259216", "ΜΗΝΙΑΙΑ ΑΕ", "Γ", "active"), ("090000045", "ΤΡΙΜΗΝΙΑΙΑ ΟΕ", "Β", "active"),
+                                    ("099999999", "ΚΛΕΙΣΤΗ", "Γ", "ceased")):
+        service.add(conn, afm, name)
+        conn.execute("UPDATE businesses SET activity_state=?, vat_subject=1, books_category=? WHERE afm=?", (state, books, afm))
+    evs = deadlines.events_between(conn, date(2026, 11, 1), date(2026, 11, 30))
+    vat = next(e for e in evs if e["kind"] == "rule" and e["id"] == "vat_monthly")
+    assert vat["n_clients"] == 1 and vat["n_maybe"] == 0
+    assert [c["name"] for c in deadlines.clients_for_event(conn, vat)] == ["ΜΗΝΙΑΙΑ ΑΕ"]
+    apd = next(e for e in evs if e["id"] == "apd")
+    assert apd["n_clients"] == 0 and apd["n_maybe"] == 2                 # εργοδότες: δεν το ξέρουμε — όχι η κλειστή
+    general = {"kind": "general", "id": 1, "title": "Υποβολή δήλωσης ΦΠΑ τριμήνου", "date": "2026-10-30"}
+    assert [c["name"] for c in deadlines.clients_for_event(conn, general)] == ["ΤΡΙΜΗΝΙΑΙΑ ΟΕ"]
+    unknown = {"kind": "general", "id": 2, "title": "Τέλη κυκλοφορίας", "date": "2026-10-30"}
+    assert deadlines.clients_for_event(conn, unknown) is None            # δεν εφευρίσκουμε ποιον αφορά

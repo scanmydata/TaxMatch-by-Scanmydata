@@ -49,6 +49,11 @@ VSVersionInfo(
 )
 "@ | Set-Content -LiteralPath "packaging\version_info.txt" -Encoding utf8
 
+# 3c. Έτοιμο εγχειρίδιο PDF μέσα στο πακέτο (gui/manual.py: _bundled_manual το ψάχνει στο _MEIPASS\manual.pdf).
+# Χωρίς αυτό το εγχειρίδιο στοιχειοθετείται την ώρα που το ανοίγει ο χρήστης — λιγότερο αξιόπιστο σε πακεταρισμένο exe.
+& $py -c "import sys; from pathlib import Path; from PySide6.QtWidgets import QApplication; app = QApplication(sys.argv); from taxmatch.gui import manual; print(manual.build_manual(Path('packaging/manual.pdf')))"
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path "packaging\manual.pdf")) { throw "Το εγχειρίδιο δεν χτίστηκε" }
+
 # 4. PyInstaller
 if (Test-Path dist) { Remove-Item -LiteralPath dist -Recurse -Force }
 if (Test-Path build) { Remove-Item -LiteralPath build -Recurse -Force }

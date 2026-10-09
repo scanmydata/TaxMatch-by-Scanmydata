@@ -146,6 +146,16 @@ def _reveal(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _clients_suffix(ev: dict) -> str:
+    """« — 5 πελάτες (+2 υπό προϋπ.)» δίπλα στον τίτλο μιας προθεσμίας, όταν ξέρουμε ποιους αφορά."""
+    n, maybe = ev.get("n_clients"), ev.get("n_maybe") or 0
+    if n is None or ev.get("kind") == "aml":
+        return ""
+    if not n and not maybe:
+        return "  —  κανένας πελάτης"
+    return f"  —  {n} πελάτες" + (f" (+{maybe} υπό προϋπ.)" if maybe else "")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, *, force_show: bool = False) -> None:
         super().__init__()
@@ -378,18 +388,22 @@ class MainWindow(QMainWindow):
 
         split = QHBoxLayout()
         self.dash_articles = QListWidget()
-        self.dash_articles.itemActivated.connect(self._open_dash_article)
+        self.dash_articles.itemClicked.connect(self._open_dash_article)
         left = QVBoxLayout()
         left.addWidget(_section_header("Πρόσφατα άρθρα που αφορούν πελάτες", "bell"))
         left.addWidget(self.dash_articles, 1)
-        split.addLayout(left, 2)
+        split.addLayout(left, 3)
 
         self.dash_deadlines = QListWidget()
-        self.dash_deadlines.itemActivated.connect(self._open_dash_deadline)
+        for lst in (self.dash_articles, self.dash_deadlines):         # μεγάλοι τίτλοι: αναδίπλωση, όχι κομμένο κείμενο
+            lst.setWordWrap(True)
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            lst.setToolTip("Κλικ: προεπισκόπηση και οι πελάτες που αφορά")
+        self.dash_deadlines.itemClicked.connect(self._open_dash_deadline)
         right = QVBoxLayout()
         right.addWidget(_section_header("Προσεχείς προθεσμίες (21 ημέρες)", "calendar"))
         right.addWidget(self.dash_deadlines, 1)
-        split.addLayout(right, 1)
+        split.addLayout(right, 2)
         root.addLayout(split, 1)
         return page
 
@@ -419,7 +433,8 @@ class MainWindow(QMainWindow):
         self.dash_deadlines.clear()
         for ev in upcoming[:25]:
             badge = due_badge(ev["date"])
-            item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])), f"{ev['title']}" + (f"  ·  {badge[0]}" if badge else ""))
+            item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])),
+                                   f"{ev['title']}{_clients_suffix(ev)}" + (f"  ·  {badge[0]}" if badge else ""))
             if badge:
                 item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
@@ -438,15 +453,26 @@ class MainWindow(QMainWindow):
 
     def _open_dash_article(self, item: QListWidgetItem) -> None:
         g = item.data(Qt.ItemDataRole.UserRole)
-        NewsDialog(g["title"], g["url"], meta=f"{g.get('source', '')} · {g.get('published_at', '') or ''}",
-                  summary=g.get("summary", ""), action=g.get("action_required") or "", parent=self).exec()
+        people = [{"afm": m["afm"], "name": m["business_name"] or m["afm"], "reason": m["matched_reason"] or "",
+                   "status": "yes" if m["confidence"] >= 1.0 else "maybe"} for m in g.get("matches", [])]
+        people.sort(key=lambda c: (c["status"] != "yes", c["name"]))
+        NewsDialog(g["title"], g["url"], meta=f"{g.get('source', '')} · {(g.get('published_at', '') or '')[:10]}",
+                  summary=g.get("summary", ""), action=g.get("action_required") or "", parent=self,
+                  clients=people, on_client=self.open_client_detail).exec()
 
     def _open_dash_deadline(self, item: QListWidgetItem) -> None:
         ev = item.data(Qt.ItemDataRole.UserRole)
         if ev.get("kind") == "aml":
             self.aml_page.open_assessment(ev["afm"])
             return
-        NewsDialog(ev["title"], ev["url"], meta=ev["date"], summary=ev.get("description", ""), parent=self).exec()
+        self._open_event_dialog(ev)
+
+    def _open_event_dialog(self, ev: dict) -> None:
+        """Προεπισκόπηση προθεσμίας ΜΕ τους πελάτες που αφορά (υπόχρεοι / υπό προϋποθέσεις)."""
+        kind = {"rule": "κανονική προθεσμία", "general": "ημερολόγιο ΑΑΔΕ/taxheaven", "news": "από άρθρο"}.get(ev["kind"], "")
+        meta = date.fromisoformat(ev["date"]).strftime("%d/%m/%Y") + (f" · {kind}" if kind else "")
+        NewsDialog(ev["title"], ev["url"], meta=meta, summary=ev.get("description", ""), parent=self,
+                  clients=deadlines.clients_for_event(self.conn, ev), on_client=self.open_client_detail).exec()
 
     # ------------------------------------------------------------------ Πελάτες
     def _clients_page(self) -> QWidget:
@@ -782,7 +808,7 @@ class MainWindow(QMainWindow):
         dtop.addStretch()
         droot.addLayout(dtop)
         self.cal_list = QListWidget()
-        self.cal_list.itemActivated.connect(self._open_cal_event)
+        self.cal_list.itemClicked.connect(self._open_cal_event)
         droot.addWidget(self.cal_list, 1)
         self.cal_stack.addWidget(day_page)
 
@@ -890,7 +916,7 @@ class MainWindow(QMainWindow):
                 continue
             kind_label = {"news": "νέα", "rule": "κανόνας", "general": "ΑΑΔΕ/taxheaven",
                           "aml": "δέουσα επιμέλεια"}.get(ev["kind"], ev["kind"])
-            text = f"{ev['title']}  ·  {kind_label}"
+            text = f"{ev['title']}{_clients_suffix(ev)}  ·  {kind_label}"
             if ev.get("conditional"):
                 text += " · υπό προϋποθέσεις"
             item = QListWidgetItem(dot_icon(kind_colour(ev["kind"])), text)
@@ -920,7 +946,7 @@ class MainWindow(QMainWindow):
         if ev.get("kind") == "aml":
             self.aml_page.open_assessment(ev["afm"])
             return
-        NewsDialog(ev["title"], ev["url"], meta=ev["date"], summary=ev.get("description", ""), parent=self).exec()
+        self._open_event_dialog(ev)
 
     # ------------------------------------------------------------------ Νέα & Matches
     def _news_page(self) -> QWidget:
@@ -996,8 +1022,10 @@ class MainWindow(QMainWindow):
             # Δεν έχει αναλυθεί ακόμη με LLM (σε αναμονή/φιλτραρίστηκε/απέτυχε) — δείξε ό,τι κείμενο έχουμε ήδη
             # ανακτήσει αντί για άδειο διάλογο: το πλήρες κείμενο του άρθρου, αλλιώς την περίληψη του RSS feed.
             summary = (a["full_text"] or a["raw_summary"] or "")[:2000]
+        people = deadlines.clients_for_article(self.conn, a["id"]) if a["n_matches"] else None
         NewsDialog(a["title"], a["url"], meta=f"{a['source']} · {(a['published_at'] or '')[:10]}",
-                  summary=summary, action=action, parent=self).exec()
+                  summary=summary, action=action, parent=self, clients=people,
+                  on_client=self.open_client_detail).exec()
 
     # ------------------------------------------------------------------ Ρυθμίσεις
     def _settings_page(self) -> QWidget:
