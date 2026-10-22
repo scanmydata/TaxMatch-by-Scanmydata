@@ -135,7 +135,7 @@ def _toast_texts(window):
     host = getattr(window, "_toast_host", None)
     if host is None:
         return []
-    return [host._box.itemAt(i).widget().layout().itemAt(0).widget().text() for i in range(host._box.count())]
+    return [host._box.itemAt(i).widget().label.text() for i in range(host._box.count())]
 
 
 def test_start_lookup_uses_its_own_db_connection_not_the_uis(window, conn):
@@ -841,3 +841,142 @@ def test_dashboard_click_shows_clients_concerned(window, conn, monkeypatch):
     assert "1 πελάτες" in vat.text()
     window.dash_deadlines.itemClicked.emit(vat)                        # ΑΠΛΟ κλικ, όχι διπλό
     assert [c["afm"] for c in seen["clients"]] == [AFM] and seen["clients"][0]["status"] == "yes"
+
+
+# ---------------------------------------------------------------- 2026-10-22: toasts, πρόοδος, πίνακας πελατών, θέμα
+def test_toast_stack_height_fits_wrapped_messages(window, qapp):
+    """Τα toasts «στριμώχνονταν»: το ύψος της στοίβας υπολογιζόταν από το sizeHint (φυσικό πλάτος κειμένου, μία γραμμή)
+    αντί για το ύψος ΣΤΟ πλάτος των 340px όπου αναδιπλώνεται το κείμενο."""
+    from taxmatch.gui.toast import toast
+    window._toast_host = None
+    window.resize(1280, 800)
+    for _ in range(3):
+        toast(window, "Ένα αρκετά μακρύ μήνυμα που σίγουρα αναδιπλώνεται σε περισσότερες από μία γραμμές μέσα στο toast.",
+              "ok", ms=60000)
+    for _ in range(5):
+        QApplication.processEvents()
+    host = window._toast_host
+    assert host.height() >= host.layout().totalHeightForWidth(host.width()) - 1
+    for i in range(host.layout().count()):
+        item = host.layout().itemAt(i).widget()
+        assert item.height() >= item.layout().totalHeightForWidth(item.width()) - 1
+
+
+def test_progress_toast_shows_percent_and_finishes(window, qapp):
+    from taxmatch.gui.toast import ProgressToast
+    window._toast_host = None
+    bar = ProgressToast(window, "Ανάκτηση στοιχείων για 4 πελάτες…")
+    bar.update("Ανάκτηση στοιχείων 2/4 — ΑΛΦΑ", 1, 4)
+    item = window._toast_host.layout().itemAt(0).widget()
+    assert item.bar.maximum() == 4 and item.bar.value() == 1 and "ΑΛΦΑ" in item.label.text()
+    bar.finish("Ολοκληρώθηκε", "ok")
+    assert item.bar.isHidden() and item.label.text() == "Ολοκληρώθηκε" and hasattr(item, "_timer")
+
+
+def test_reload_clients_keeps_checked_rows_for_live_refresh(window, conn):
+    """Ο πίνακας ανανεώνεται πλέον ΜΟΝΟΣ του κατά την ανάκτηση στοιχείων — δεν πρέπει να χάνει τις επιλογές."""
+    service.add(conn, AFM, "ΑΛΦΑ")
+    service.add(conn, "123456783", "ΒΗΤΑ")
+    window.reload_clients()
+    t = window.client_table
+    row = next(r for r in range(t.rowCount()) if t.item(r, 1).text() == AFM)
+    t.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    conn.execute("UPDATE businesses SET name='ΑΛΦΑ ΝΕΟ' WHERE afm=?", (AFM,))
+    window.reload_clients()
+    assert window._selected_client_afms() == [AFM]
+    assert any(t.item(r, 2).text() == "ΑΛΦΑ ΝΕΟ" for r in range(t.rowCount()))
+
+
+def test_ui_prefs_are_isolated_from_the_real_installation(window):
+    """Με TAXMATCH_DATA_DIR (όπως εδώ) οι προτιμήσεις οθόνης ΔΕΝ γράφονται στο μητρώο του χρήστη."""
+    from taxmatch import config
+    assert Path(window._prefs.fileName()).parent == config.data_dir()
+
+
+def test_excel_help_dialog_lists_what_is_read(qapp):
+    from taxmatch.gui import excel_help
+    dlg = excel_help.ExcelHelpDialog()
+    text = " ".join(lbl.text() for lbl in dlg.findChildren(QLabel))
+    assert "TaxSystem" in text and "Γ.Ε.ΜΗ." in text and "myDATA" in text
+    dlg.deleteLater()
+
+
+def test_calendar_day_columns_do_not_grow_with_long_titles(qapp):
+    from taxmatch.gui.main_window import _DayCell
+    long = _DayCell(5, [{"title": "Πολύ μακρύς τίτλος υποχρέωσης " * 4, "kind": "rule"}], in_month=True, is_today=False)
+    empty = _DayCell(6, [], in_month=True, is_today=False)
+    assert long.minimumSizeHint().width() <= empty.minimumSizeHint().width() + 20
+
+
+# ---------------------------------------------------------------- 2026-10-22: γραφείο, αμοιβές, υποβολές
+def test_office_settings_and_services_save(window, conn):
+    from taxmatch import office
+    window.office_box.fields["office_name"].setText("ΓΡΑΦΕΙΟ ΔΟΚΙΜΗΣ")
+    window.office_box.save()
+    assert office.get_office(conn)["office_name"] == "ΓΡΑΦΕΙΟ ΔΟΚΙΜΗΣ"
+    window.services_box._seed()
+    window.services_box.table.cellWidget(0, 2).setValue(75)
+    window.services_box.save()
+    assert office.list_services(conn)[0]["default_amount"] == 75
+
+
+def test_client_fees_tab_saves_and_shows_monthly_fee_in_client_list(window, conn):
+    from taxmatch import office
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.gui.main_window import _C_FEE
+    service.add(conn, AFM, "ΑΛΦΑ")
+    dlg = ClientDetailDialog(window, AFM)
+    dlg.fees._add_row({"description": "Τήρηση βιβλίων", "amount": 90, "period": "monthly"})
+    dlg.fees._add_row({"description": "Εισόδημα", "amount": 120, "period": "yearly"})
+    assert "100,00 €" in dlg.fees.totals.text()
+    dlg.fees.save()
+    assert len(office.list_fees(conn, AFM)) == 2
+    t = window.client_table
+    row = next(r for r in range(t.rowCount()) if t.item(r, 1).text() == AFM)
+    assert t.item(row, _C_FEE).text() == "100,00 €"
+    dlg.deleteLater()
+
+
+def test_client_detail_shows_submission_checks(window, conn):
+    from taxmatch import easycheck
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.gui.main_window import _C_CHECKS
+    from datetime import date
+    service.add(conn, AFM, "ΑΛΦΑ")
+    easycheck.store_results(conn, AFM, date.today().year, [
+        {"obligation": "Φ2", "status": "not_submitted", "periods": [
+            {"period": "1ο Τρίμηνο", "status": "submitted", "detail": ""},
+            {"period": "2ο Τρίμηνο", "status": "not_submitted", "detail": ""}]}])
+    dlg = ClientDetailDialog(window, AFM)
+    texts = [dlg.checks_list.item(i).text() for i in range(dlg.checks_list.count())]
+    assert any("ΔΕΝ υποβλήθηκε" in x and "2ο Τρίμηνο" in x for x in texts)
+    window.reload_clients()
+    t = window.client_table
+    row = next(r for r in range(t.rowCount()) if t.item(r, 1).text() == AFM)
+    assert t.item(row, _C_CHECKS).text() == "✓1 ✗1"
+    dlg.deleteLater()
+
+
+def test_check_submissions_needs_credentials(window, conn):
+    service.add(conn, AFM, "ΑΛΦΑ")
+    window._toast_host = None
+    window.on_check_submissions()
+    assert any("κωδικούς TAXISnet" in t for t in _toast_texts(window))
+
+
+def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.mydata import credentials as mcreds
+    service.add(conn, AFM, "ΑΛΦΑ")
+    mcreds.set_(conn, AFM, "u", "k")
+    dlg = ClientDetailDialog(window, AFM)
+    ym = dlg.mydata.month.currentData()
+    conn.execute("INSERT INTO mydata_docs(afm, mark, direction, invoice_type, issue_date, issuer_vat, issuer_name, net, "
+                 "total, withheld, withheld_json, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (AFM, "1", "incoming", "2.1", f"{ym}-05", "111111111", "ΣΥΜΒΟΥΛΟΣ", 1000, 1000, 200, '{"3": 200}', "x"))
+    conn.execute("INSERT INTO mydata_sync(afm, ym, synced_at, n_docs) VALUES (?,?,?,1)", (AFM, ym, "x"))
+    dlg.mydata.reload()
+    assert dlg.mydata.table.rowCount() == 1 and dlg.mydata.table.item(0, 3).text() == "ΣΥΜΒΟΥΛΟΣ"
+    assert "200,00 €" in dlg.mydata.summary.text() and "επιχειρηματικής" in dlg.mydata.summary.text()
+    assert "δεκτοί" not in dlg.mydata.creds_status.text() and dlg.mydata.user.text() == "u"
+    dlg.deleteLater()

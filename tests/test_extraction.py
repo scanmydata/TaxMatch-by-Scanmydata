@@ -17,7 +17,12 @@ def make_client(session) -> LLMClient:
     return LLMClient("groq", "k", "m", "https://api.groq.com/openai/v1/chat/completions", session)
 
 
-def add_article(conn, title="Τίτλος", url="https://x.gr/1", published="2026-09-20T08:00:00Z"):
+def add_article(conn, title="Τίτλος", url="https://x.gr/1", published=None):
+    # Σχετική ημερομηνία: σταθερή («2026-09-20») έβγαινε εκτός του παραθύρου ανάλυσης 30 ημερών του extract_pending
+    # μόλις περνούσε ο μήνας, και 8 tests άρχιζαν να αποτυγχάνουν χωρίς καμία αλλαγή κώδικα (2026-10-22).
+    if published is None:
+        from datetime import datetime, timedelta, timezone
+        published = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute("INSERT INTO articles(source,title,url,url_hash,published_at,fetched_at,raw_summary) VALUES (?,?,?,?,?,?,?)",
                  ("t", title, url, url, published, db.utcnow(), "περίληψη"))
     return conn.execute("SELECT * FROM articles WHERE url=?", (url,)).fetchone()

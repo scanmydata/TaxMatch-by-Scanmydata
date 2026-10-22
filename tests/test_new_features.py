@@ -192,7 +192,7 @@ def test_generic_user_password_columns_only_in_simple_sheet():
     assert not wide.rows[0].has_credentials                               # πλατύς πίνακας: ασαφές, δεν μαντεύουμε
 
 
-def test_block_format_reads_only_taxis_net_row():
+def test_block_format_reads_taxis_and_mydata_rows_into_separate_fields():
     rows = [
         (None, "00250 ΠΑΡΑΔΕΙΓΜΑ Ο Ε 123456783"),
         (None, "Taxis Net", None, None, "taxis_u", None, "taxis_p"),
@@ -204,7 +204,9 @@ def test_block_format_reads_only_taxis_net_row():
     assert res.detected == "blocks" and [r.afm for r in res.rows] == ["123456783", "094259216"]
     assert res.rows[0].name == "ΠΑΡΑΔΕΙΓΜΑ Ο Ε" and (res.rows[0].taxis_user, res.rows[0].taxis_pass) == ("taxis_u", "taxis_p")
     assert res.rows[1].taxis_user == "u2"
-    assert "mydata_KEY" not in repr(res) and "mydata_u" not in repr(res)
+    # myDATA διαβάζεται πλέον (2026-10-22, όπως το Timologio Downloader) — αλλά στα ΔΙΚΑ του πεδία, ποτέ ως TAXISnet
+    assert (res.rows[0].mydata_user, res.rows[0].mydata_key) == ("mydata_u", "mydata_KEY")
+    assert res.rows[0].taxis_pass == "taxis_p" and not res.rows[1].has_mydata
 
 
 def test_half_credentials_dropped_with_warning_without_leaking():
@@ -451,3 +453,50 @@ def test_clients_for_event_rule_and_general_calendar(conn):
     assert [c["name"] for c in deadlines.clients_for_event(conn, general)] == ["ΤΡΙΜΗΝΙΑΙΑ ΟΕ"]
     unknown = {"kind": "general", "id": 2, "title": "Τέλη κυκλοφορίας", "date": "2026-10-30"}
     assert deadlines.clients_for_event(conn, unknown) is None            # δεν εφευρίσκουμε ποιον αφορά
+
+
+# ---------------------------------------------------------------- Excel: κωδικοί Γ.Ε.ΜΗ. (2026-10-22)
+def test_wide_sheet_reads_gemi_credentials_but_no_other_service():
+    """Επικεφαλίδες όπως στην εξαγωγή «Κωδικοί Υπόχρεων» (TaxSystem): TAXISnet + Γ.Ε.ΜΗ. διαβάζονται, οι υπόλοιποι ποτέ."""
+    head = ("Κωδικός", "Α.Φ.Μ.", "Επωνυμία/Επώνυμο", "Όνομα χρήστη TAXISNET", "Συνθηματικό TAXISNET",
+            "Όνομα χρήστη (Εργοδότη) Ι.Κ.Α.", "Συνθηματικό (Εργοδότη) Ι.Κ.Α.", "Όνομα χρήστη Γ.Ε.Μ.Η.",
+            "Συνθηματικό χρήστη Γ.Ε.Μ.Η.", "Όνομα χρήστη myData", "Συνθηματικό myData")
+    res = import_excel.parse_rows([head, ("1", AFM, "ΑΛΦΑ ΙΚΕ", "tu", "tp", "ika_u", "ika_SECRET", "gu", "gp", "md_u", "md_SECRET"),
+                                   ("2", "123456783", "ΒΗΤΑ", "tu2", "tp2", None, None, "μόνο_χρήστης", None, None, None)])
+    a, b = res.rows
+    assert (a.gemi_user, a.gemi_pass, a.has_gemi) == ("gu", "gp", True) and a.has_credentials
+    assert not b.has_gemi and res.gemi_count == 1 and any("Γ.Ε.ΜΗ." in w for w in res.warnings)
+    assert "ika_SECRET" not in repr(res) and "md_SECRET" not in repr(res)
+
+
+def test_block_format_reads_gemi_row():
+    rows = [(None, "00250 ΠΑΡΑΔΕΙΓΜΑ Ο Ε 123456783"),
+            (None, "Taxis Net", None, None, "taxis_u", None, "taxis_p"),
+            (None, "Γ.Ε.ΜΗ.", None, None, "gemi_u", None, "gemi_p")]
+    r = import_excel.parse_file("codes.xlsx", xlsx(rows)).rows[0]
+    assert (r.taxis_user, r.gemi_user, r.gemi_pass) == ("taxis_u", "gemi_u", "gemi_p")
+
+
+def test_import_result_saves_gemi_credentials_encrypted(conn):
+    from taxmatch.aml import gemi_browser
+    res = import_excel.parse_rows([("ΑΦΜ", "Όνομα χρήστη Γ.Ε.Μ.Η.", "Συνθηματικό χρήστη Γ.Ε.Μ.Η."), (AFM, "gu", "gp")])
+    out = service.import_result(conn, res)
+    assert out["gemi"] == 1 and gemi_browser.get_credentials(conn, AFM) == ("gu", "gp")
+    raw = conn.execute("SELECT gemi_pass FROM aml_gemi_credentials WHERE afm=?", (AFM,)).fetchone()[0]
+    assert raw.startswith("enc:1:") and "gp" not in raw
+
+
+def test_mydata_columns_like_timologio_never_etimologio_or_web_password(conn):
+    from taxmatch.mydata import credentials as mydata_creds
+    key = "0123456789abcdef0123456789abcdef"
+    head = ("Α.Φ.Μ.", "Επωνυμία", "Όνομα χρήστη myData", "Συνθηματικό myData", "Api myData", "Όνομα χρήστη e-timologio",
+            "Subscription key e-timologio")
+    res = import_excel.parse_rows([head, (AFM, "Α", "md_u", "WEB_PASS", key, "et_u", "ETIM_KEY"),
+                                   ("123456783", "Β", "md_u2", "f" * 32, None, None, "ETIM_KEY2")])
+    a, b = res.rows
+    assert (a.mydata_user, a.mydata_key) == ("md_u", key)
+    assert (b.mydata_user, b.mydata_key) == ("md_u2", "f" * 32)            # κλειδί σε λάθος στήλη, αλλά 32 hex
+    assert "ETIM_KEY" not in repr(res) and "WEB_PASS" not in repr(res)
+    out = service.import_result(conn, res)
+    assert out["mydata"] == 2 and mydata_creds.get(conn, AFM) == ("md_u", key)
+

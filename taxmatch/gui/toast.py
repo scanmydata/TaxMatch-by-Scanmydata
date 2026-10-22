@@ -8,11 +8,13 @@
 
 Κρατάμε τα ΕΠΙΒΕΒΑΙΩΤΙΚΑ (Ναι/Όχι πριν από διαγραφή) σε `QMessageBox.question` — δεν είναι ειδοποίηση αλλά
 απόφαση που μπλοκάρει σκόπιμα. Ο,τιδήποτε άλλο (επιτυχία/αποτυχία μιας ενέργειας) γίνεται toast.
+
+Μακριές εργασίες (π.χ. ανάκτηση στοιχείων για 160 πελάτες): `ProgressToast` — μόνιμο toast με μπάρα προόδου.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from .theme import CURRENT
 
@@ -20,26 +22,39 @@ _DEFAULT_MS = {"ok": 4200, "info": 4200, "warn": 6000, "danger": 5000}
 
 
 class _ToastItem(QFrame):
-    def __init__(self, message: str, level: str) -> None:
+    def __init__(self, message: str, level: str, progress: bool = False) -> None:
         super().__init__()
         self.setObjectName("toastItem")
-        colour = {"ok": CURRENT.ok, "warn": CURRENT.warn, "danger": CURRENT.bad}.get(level, CURRENT.accent)  # info = accent
-        self.setStyleSheet(
-            f"QFrame#toastItem {{ background:{CURRENT.panel}; border:1px solid {CURRENT.line}; "
-            f"border-left:3px solid {colour}; border-radius:10px; }}"
-        )
+        self.set_level(level)
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 10, 6, 10)
-        label = QLabel(message)
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color:{CURRENT.txt}; border:none; background:transparent;")
-        row.addWidget(label, 1)
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        self.label = QLabel(message)
+        self.label.setWordWrap(True)
+        self.label.setStyleSheet(f"color:{CURRENT.txt}; border:none; background:transparent;")
+        col.addWidget(self.label)
+        self.bar: QProgressBar | None = None
+        if progress:
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 0)                      # «απροσδιόριστη» ώσπου να έρθει η πρώτη ενημέρωση
+            self.bar.setFixedHeight(16)
+            self.bar.setFormat("%p%")
+            col.addWidget(self.bar)
+        row.addLayout(col, 1)
         self.close_btn = QPushButton("×")
         self.close_btn.setFlat(True)
         self.close_btn.setFixedSize(20, 20)
         self.close_btn.setStyleSheet(f"QPushButton {{ border:none; background:transparent; color:{CURRENT.muted}; "
                                      f"font-size:15px; }} QPushButton:hover {{ color:{CURRENT.txt}; }}")
         row.addWidget(self.close_btn, 0, Qt.AlignmentFlag.AlignTop)
+
+    def set_level(self, level: str) -> None:
+        colour = {"ok": CURRENT.ok, "warn": CURRENT.warn, "danger": CURRENT.bad}.get(level, CURRENT.accent)  # info = accent
+        self.setStyleSheet(
+            f"QFrame#toastItem {{ background:{CURRENT.panel}; border:1px solid {CURRENT.line}; "
+            f"border-left:3px solid {colour}; border-radius:10px; }}"
+        )
 
 
 class ToastHost(QWidget):
@@ -65,26 +80,49 @@ class ToastHost(QWidget):
             self._reposition()
         return False
 
+    def event(self, event) -> bool:  # noqa: N802 (Qt API)
+        # Αλλαγή κειμένου (π.χ. πρόοδος) ή νέο/λιγότερα toasts ζητούν νέο layout: ξαναϋπολογίζουμε ΚΑΙ το δικό μας
+        # ύψος — αλλιώς τα toasts στριμώχνονται στο παλιό ύψος.
+        if event.type() == QEvent.Type.LayoutRequest:
+            QTimer.singleShot(0, self._reposition)
+        return super().event(event)
+
     def _reposition(self) -> None:
-        self.adjustSize()
-        h = max(self.sizeHint().height(), 1)
+        if not self._box.count():
+            return
+        # Ύψος ΓΙΑ ΤΟ ΣΥΓΚΕΚΡΙΜΕΝΟ πλάτος: τα κείμενα αναδιπλώνονται και το sizeHint() υπολογίζεται για το «φυσικό»
+        # πλάτος τους (μία μακριά γραμμή) — δίνει πολύ μικρότερο ύψος. Αυτό στρίμωχνε τα toasts (αναφορά χρήστη,
+        # 2026-10-22· επαληθεύτηκε σε πραγματικό παράθυρο: 56px αντί για 137 με δύο toasts).
+        self._box.activate()
+        if self._box.hasHeightForWidth():
+            h = self._box.totalHeightForWidth(self._WIDTH)
+        else:
+            h = self._box.totalSizeHint().height()
         x = self._host.width() - self._WIDTH - self._MARGIN
         y = self._MARGIN
-        self.setGeometry(max(0, x), y, self._WIDTH, h)
+        if self.geometry().getRect() != (max(0, x), y, self._WIDTH, max(h, 1)):
+            self.setGeometry(max(0, x), y, self._WIDTH, max(h, 1))
         self.raise_()
 
-    def add(self, message: str, level: str, ms: int) -> None:
-        item = _ToastItem(message, level)
+    def add(self, message: str, level: str, ms: int, progress: bool = False) -> _ToastItem:
+        item = _ToastItem(message, level, progress)
         self._box.addWidget(item)
         item.close_btn.clicked.connect(lambda: self._remove(item))
         self.show()
         self._reposition()
         if ms > 0:
-            timer = QTimer(item)
-            timer.setSingleShot(True)
-            timer.timeout.connect(lambda: self._remove(item))
-            timer.start(ms)
-            item._timer = timer  # noqa: SLF001 - κρατά τον timer ζωντανό μαζί με το item
+            self.expire(item, ms)
+        return item
+
+    def expire(self, item: _ToastItem, ms: int) -> None:
+        timer = QTimer(item)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._remove(item))
+        timer.start(ms)
+        item._timer = timer  # noqa: SLF001 - κρατά τον timer ζωντανό μαζί με το item
+
+    def contains(self, item: _ToastItem) -> bool:
+        return self._box.indexOf(item) >= 0
 
     def _remove(self, item: _ToastItem) -> None:
         if self._box.indexOf(item) < 0:
@@ -97,6 +135,14 @@ class ToastHost(QWidget):
             self._reposition()
 
 
+def _host_for(window: QWidget) -> ToastHost:
+    host = getattr(window, "_toast_host", None)
+    if host is None:
+        host = ToastHost(window)
+        window._toast_host = host  # noqa: SLF001
+    return host
+
+
 def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = None) -> None:
     """Δείχνει ένα πλευρικό μήνυμα πάνω στο `window` (`MainWindow` ή οποιοδήποτε `QDialog`).
 
@@ -104,8 +150,42 @@ def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = Non
     κλείνει και χειροκίνητα με το «×». `ms=0` το αφήνει μέχρι να κλείσει μόνο χειροκίνητα — δεν το χρησιμοποιούμε
     πια για σφάλματα (ο χρήστης θέλει να εξαφανίζονται μόνα τους), κρατιέται μόνο ως δυνατότητα.
     """
-    host = getattr(window, "_toast_host", None)
-    if host is None:
-        host = ToastHost(window)
-        window._toast_host = host  # noqa: SLF001
-    host.add(message, level, _DEFAULT_MS.get(level, 4200) if ms is None else ms)
+    _host_for(window).add(message, level, _DEFAULT_MS.get(level, 4200) if ms is None else ms)
+
+
+class ProgressToast:
+    """Μόνιμο toast με μπάρα προόδου: ποσοστό + σε ποιο στοιχείο βρίσκεται η εργασία (ρητό αίτημα χρήστη,
+    2026-10-22, για την ανάκτηση στοιχείων). Μένει όσο τρέχει η εργασία· το `finish()` το κάνει κανονικό toast που
+    κλείνει μόνο του. Το «×» απλώς το κρύβει — η εργασία συνεχίζει."""
+
+    def __init__(self, window: QWidget, message: str) -> None:
+        self._window = window
+        self._host = _host_for(window)
+        self._item = self._host.add(message, "info", 0, progress=True)
+
+    def _alive(self) -> bool:
+        try:
+            return self._host.contains(self._item)
+        except RuntimeError:                             # το παράθυρο έκλεισε στο μεταξύ
+            return False
+
+    def update(self, message: str, done: int | None = None, total: int | None = None) -> None:
+        if not self._alive():
+            return
+        self._item.label.setText(message)
+        if total and self._item.bar is not None:
+            self._item.bar.setRange(0, total)
+            self._item.bar.setValue(max(0, min(done or 0, total)))
+
+    def finish(self, message: str, level: str = "ok") -> None:
+        if not self._alive():
+            try:
+                toast(self._window, message, level)
+            except RuntimeError:
+                pass
+            return
+        self._item.set_level(level)
+        self._item.label.setText(message)
+        if self._item.bar is not None:
+            self._item.bar.hide()
+        self._host.expire(self._item, _DEFAULT_MS.get(level, 4200))

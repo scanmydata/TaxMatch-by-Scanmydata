@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from .. import db as dbmod
 from ..business_profiles import credentials as client_creds, service as clients, vies
 from ..identifiers import is_valid_afm, normalize_afm
+from . import excel_help
 from .icons import icon
 from .theme import CURRENT
 from .workers import run_task
@@ -79,9 +80,11 @@ class ClientDialog(QDialog):
         note.setObjectName("muted")
         bulk.addWidget(note)
         excel_btn = QPushButton(icon("excel", CURRENT.muted, 16), "  Εισαγωγή από Excel…")
-        excel_btn.setToolTip("Μαζική εισαγωγή πελατών (και προαιρετικά κωδικών TAXISnet) από αρχείο Excel/CSV")
+        excel_btn.setToolTip("Μαζική εισαγωγή πελατών (και προαιρετικά κωδικών TAXISnet / Γ.Ε.ΜΗ.) από αρχείο Excel/CSV")
         excel_btn.clicked.connect(self._pick_excel)
         bulk.addWidget(excel_btn)
+        # Το «από πού βγάζω αυτό το Excel;» είναι η πρώτη απορία — οι διαδρομές ζουν δίπλα στο κουμπί (όπως στο timologio).
+        bulk.addWidget(excel_help.help_button(self))
         bulk.addStretch()
         root.addLayout(bulk)
 

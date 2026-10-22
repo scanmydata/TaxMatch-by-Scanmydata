@@ -32,7 +32,11 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
         business = None
         if afm:
             row = conn.execute(_BUSINESS_SQL + " WHERE afm=?", (afm,)).fetchone()
-            business = dict(row) if row else None
+            if row:
+                from .mydata import analysis as mydata_analysis
+                business = {**dict(row), "mydata": mydata_analysis.month_flags(conn).get(afm, {})}
+            else:
+                business = None
         for oc in obligations.occurrences(start, end, business):
             if oc.conditional and not include_conditional:
                 continue
@@ -42,7 +46,7 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
                 continue                                   # το feed έχει ήδη το πραγματικό γεγονός
             events.append({"kind": "rule", "id": oc.rule_id, "title": oc.title, "date": oc.date.isoformat(),
                            "url": oc.source_url, "n_clients": None, "description": oc.description,
-                           "conditional": oc.conditional})
+                           "conditional": oc.conditional, "ref_month": oc.ref_month})
 
     if include_news:
         sql = ("SELECT a.id, a.title, a.deadline, a.url, COUNT(DISTINCT m.afm) AS n FROM articles a "
@@ -76,13 +80,16 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
 
 
 # ------------------------------------------------------------------ ποιους πελάτες αφορά ένα γεγονός
-_BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, books_category, activity_state, cease_date "
+_BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, books_category, activity_state, cease_date, "
+                 "employer, intrastat "
                  "FROM businesses")
 _RANK = {"yes": 0, "maybe": 1, "no": 2}
 
 
 def _businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    return [dict(r) for r in conn.execute(_BUSINESS_SQL + " ORDER BY name")]
+    from .mydata import analysis as mydata_analysis
+    flags = mydata_analysis.month_flags(conn)          # ανά μήνα: VIES / Intrastat / παρακράτηση από το myDATA
+    return [{**dict(r), "mydata": flags.get(r["afm"], {})} for r in conn.execute(_BUSINESS_SQL + " ORDER BY name")]
 
 
 def rules_for_event(ev: dict[str, Any]) -> list[str]:
@@ -110,9 +117,13 @@ def _liable(ev: dict[str, Any], businesses: list[dict[str, Any]]) -> Optional[li
     ids = rules_for_event(ev)
     if not ids:
         return None
+    # Μήνας αναφοράς ανά κανόνα: το γεγονός κανόνα τον φέρει· για γεγονός του γενικού ημερολογίου βγαίνει από την ημερομηνία.
+    due = date.fromisoformat(ev["date"])
+    refs = {i: ev.get("ref_month") or obligations.ref_month(due.year, due.month, obligations.RULES_BY_ID[i].ref_offset)
+            for i in ids}
     out = []
     for b in businesses:
-        status, reason = min((obligations.liability(i, b) for i in ids), key=lambda x: _RANK[x[0]])
+        status, reason = min((obligations.liability(i, b, refs[i]) for i in ids), key=lambda x: _RANK[x[0]])
         if status != "no":
             out.append({"afm": b["afm"], "name": b["name"] or b["afm"], "status": status, "reason": reason})
     out.sort(key=lambda c: (_RANK[c["status"]], c["name"]))

@@ -76,6 +76,7 @@ class Rule:
     applies: Callable[[Optional[dict[str, Any]]], tuple[bool, bool]] = lambda b: (True, False)  # (ισχύει, υπό προϋποθέσεις)
     hide_if_feed_terms: tuple[str, ...] = ()     # κρύψε αν το feed έχει ήδη ίδια μέρα γεγονός με αυτούς τους όρους
     period: Optional[Callable[[int, int], str]] = None
+    ref_offset: int = 1                          # μήνας αναφοράς = μήνας λήξης − ref_offset (για τα στοιχεία myDATA)
 
 
 def _prev_month(year: int, month: int) -> tuple[int, int]:
@@ -90,6 +91,18 @@ def _period_month(year: int, month: int) -> str:
 def _period_quarter(year: int, month: int) -> str:
     y, m = _prev_month(year, month)
     return f"{QUARTERS[(m - 1) // 3]} {y}"
+
+
+def _period_month2(year: int, month: int) -> str:
+    y, m = _prev_month(*_prev_month(year, month))
+    return f"{MONTHS_NOM[m - 1]} {y}"
+
+
+def ref_month(year: int, month: int, offset: int) -> str:
+    """'YYYY-MM' του μήνα αναφοράς μιας προθεσμίας που λήγει τον (year, month)."""
+    for _ in range(offset):
+        year, month = _prev_month(year, month)
+    return f"{year}-{month:02d}"
 
 
 def _vat_monthly(b):
@@ -162,6 +175,13 @@ RULES: list[Rule] = [
          "Παρατάσεις υποβολής ανακοινώνονται συχνά από τον e-ΕΦΚΑ (η πληρωμή συνήθως μένει ίδια).",
          "https://www.e-efka.gov.gr/el/deltia-typoy", "monthly", lambda y, m: last_business_day(y, m),
          applies=_conditional, hide_if_feed_terms=("απδ",), period=_period_month),
+    Rule("withholding_fees", "Παρακρατούμενος φόρος αμοιβών / εργολάβων — {period}",
+         "Δήλωση και απόδοση του φόρου που παρακράτησε ο πελάτης σε αμοιβές επιχειρηματικής δραστηριότητας (20%), "
+         "εργολάβους τεχνικών έργων (3%), τόκους/δικαιώματα κ.λπ., έως το τέλος του ΔΕΥΤΕΡΟΥ μήνα από την καταβολή "
+         "(άρθρο 60 ΚΦΕ). Η εφαρμογή το βρίσκει από τα παραστατικά myDATA με παρακράτηση (ημερομηνία έκδοσης).",
+         "https://www.taxheaven.gr/circulars/17952/arora-parakrathsh-foroy-me-ton-neo-kfe-allages-sthn-ypobolh-dhlwsewn-parakratoymenwn-forwn-enhmerwmeno",
+         "monthly", lambda y, m: last_business_day(y, m), applies=_conditional, hide_if_feed_terms=("παρακρατ", "αμοιβ"),
+         period=_period_month2, ref_offset=2),
     Rule("ergani_e4", "ΕΡΓΑΝΗ — Ετήσιος Πίνακας Προσωπικού (Ε4)",
          "Υποβολή του Ε4 από 1 έως 31 Οκτωβρίου κάθε έτους· η προθεσμία παρατείνεται συχνά με υπουργική απόφαση. "
          "Μόνο για εργοδότες.",
@@ -178,11 +198,18 @@ RULES_BY_ID = {r.id: r for r in RULES}
 
 # ------------------------------------------------------------------ ποιος πελάτης είναι υπόχρεος
 #: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
-_BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4"}
+_BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4",
+                  "withholding_fees"}
 _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
                  "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
                  "oss": "μόνο αν είναι εγγεγραμμένος στο OSS", "ioss": "μόνο αν είναι εγγεγραμμένος στο IOSS",
-                 "apd": "μόνο αν απασχολεί προσωπικό", "ergani_e4": "μόνο αν απασχολεί προσωπικό"}
+                 "apd": "μόνο αν απασχολεί προσωπικό", "ergani_e4": "μόνο αν απασχολεί προσωπικό",
+                 "withholding_fees": "μόνο αν παρακράτησε φόρο σε αμοιβές/εργολάβους (λείπουν στοιχεία myDATA)"}
+#: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
+_MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding"}
+_MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές στο myDATA", "καμία ενδοκοινοτική συναλλαγή στο myDATA"),
+                  "intrastat": ("υπέρβαση κατωφλίου Intrastat (myDATA)", "κάτω από τα κατώφλια Intrastat (myDATA)"),
+                  "withholding_fees": ("παραστατικά με παρακράτηση φόρου στο myDATA", "καμία παρακράτηση στο myDATA")}
 
 
 def vat_period(business: dict[str, Any]) -> str:
@@ -193,9 +220,9 @@ def vat_period(business: dict[str, Any]) -> str:
     return {"Γ": "monthly", "Β": "quarterly"}.get(business.get("books_category") or "", "")
 
 
-def liability(rule_id: str, business: Optional[dict[str, Any]]) -> tuple[str, str]:
+def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
     """('yes' | 'maybe' | 'no', αιτιολογία) για ΕΝΑΝ πελάτη, από ό,τι ήδη ξέρουμε (Μητρώο ΑΑΔΕ): κατάσταση δραστηριότητας,
-    υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
+    υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων — και εργοδότης/Intrastat από την εισαγωγή Excel. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
     if business is None:                              # γενική προβολή (χωρίς συγκεκριμένο πελάτη)
         return ("maybe", _MAYBE_REASON.get(rule_id, "")) if rule_id in _MAYBE_REASON or rule_id == "income_tax_return" else ("yes", "")
     state = business.get("activity_state") or ""
@@ -218,6 +245,22 @@ def liability(rule_id: str, business: Optional[dict[str, Any]]) -> tuple[str, st
         if business.get("vat_subject") is None:
             return "maybe", "άγνωστη υπαγωγή ΦΠΑ"
         return "yes", ("μηνιαία" if want == "monthly" else "τριμηνιαία") + " ΦΠΑ" + (f" · βιβλία {books}" if books else "")
+    # Στοιχεία myDATA του μήνα αναφοράς (ρητά ναι/όχι) — υπερισχύουν των σημαιών του Excel. Μόνο για μήνες που
+    # έχουν κατέβει· αλλιώς συνεχίζουμε όπως πριν.
+    flag_key = _MYDATA_FLAG.get(rule_id)
+    if flag_key and ref_month:
+        value = ((business.get("mydata") or {}).get(ref_month) or {}).get(flag_key)
+        if value is not None:
+            yes, no = _MYDATA_REASON[rule_id]
+            return ("yes", yes) if value else ("no", no)
+    # Σημαίες από την εισαγωγή Excel (db v11): «Μισθοδοσία» = εργοδότης· στοιχεία Intrastat = υποβάλλει Intrastat.
+    # NULL = άγνωστο -> μένει «υπό προϋποθέσεις». Ποτέ «όχι» για Intrastat από απουσία στοιχείων.
+    if rule_id in ("apd", "ergani_e4") and business.get("employer") is not None:
+        return ("yes", "εργοδότης (μισθοδοσία)") if business["employer"] else ("no", "χωρίς μισθοδοσία")
+    if rule_id == "intrastat" and business.get("intrastat"):
+        return "yes", "υποβάλλει Intrastat"
+    if rule_id == "vies" and business.get("intrastat"):
+        return "maybe", "υποβάλλει Intrastat — πιθανότατα έχει ενδοκοινοτικές συναλλαγές"
     if rule_id in _MAYBE_REASON:
         return "maybe", _MAYBE_REASON[rule_id]
     if rule_id == "income_tax_return":
@@ -245,27 +288,26 @@ class Occurrence:
     description: str
     source_url: str
     conditional: bool = False
+    ref_month: str = ""                          # 'YYYY-MM' που αφορά η προθεσμία
 
 
 def occurrences(start: date, end: date, business: Optional[dict[str, Any]] = None) -> list[Occurrence]:
     """Όλες οι προθεσμίες κανόνων με ημερομηνία στο [start, end]. `business`: dict με vat_subject, vat_period_type ή None (γενικό)."""
     out: list[Occurrence] = []
     for rule in RULES:
-        status, _reason = liability(rule.id, business)
-        if status == "no":
-            continue
-        conditional = status == "maybe"
         seen: set[date] = set()
         cy, cm = _prev_month(start.year, start.month)      # η προθεσμία ενός μήνα λήξης μπορεί να πέφτει νωρίτερα/αργότερα
         last = (end.year, end.month)
         while (cy, cm) <= last:
             if cm in rule.due_months:
                 d = rule.due(cy, cm)
-                if start <= d <= end and d not in seen:
+                ref = ref_month(cy, cm, rule.ref_offset)
+                status, _reason = liability(rule.id, business, ref)
+                if start <= d <= end and d not in seen and status != "no":
                     seen.add(d)
                     period = rule.period(cy, cm) if rule.period else ""
                     out.append(Occurrence(rule.id, rule.title.format(period=period), d, rule.description,
-                                          rule.source_url, conditional))
+                                          rule.source_url, status == "maybe", ref))
             cy, cm = (cy + 1, 1) if cm == 12 else (cy, cm + 1)
     out.sort(key=lambda o: (o.date, o.rule_id))
     return out

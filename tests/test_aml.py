@@ -352,9 +352,9 @@ def test_profile_keeps_rep_and_clean_ubos(conn):
     assert len(p["ubos"]) == 1 and p["ubos"][0]["pep"] == "" and p["ubos"][0]["country_risk"] == ""
 
 
-def _docx_text(data: bytes) -> str:
+def _docx_text(data: bytes, part: str = "word/document.xml") -> str:
     import html, io, re, zipfile
-    x = zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml").decode()
+    x = zipfile.ZipFile(io.BytesIO(data)).read(part).decode()
     return html.unescape(re.sub(r"<[^>]+>", " ", x))
 
 
@@ -390,7 +390,9 @@ def test_default_templates_have_only_known_fields_and_generate_by_audience(conn)
     data, unknown, slot = templating.generate(conn, "declaration", AFM)
     text = _docx_text(data)
     assert slot == "declaration:legal" and not unknown
-    assert "ΔΟΚΙΜΗ ΙΚΕ" in text and "ΕΚΠΡΟΣΩΠΟΣ Α" in text and "ΔΙΚΑΙΟΥΧΟΣ Β" in text and "ΓΡΑΦΕΙΟ Χ" in text
+    assert "ΔΟΚΙΜΗ ΙΚΕ" in text and "ΕΚΠΡΟΣΩΠΟΣ Α" in text and "ΔΙΚΑΙΟΥΧΟΣ Β" in text
+    assert "ΓΡΑΦΕΙΟ Χ" in _docx_text(data, "word/header1.xml")      # στοιχεία γραφείου στην κεφαλίδα κάθε σελίδας
+    assert "ΔΟΚΙΜΗ ΙΚΕ" in _docx_text(data, "word/footer1.xml")
     data, _u, slot = templating.generate(conn, "assessment", AFM)
     assert slot == "assessment:legal" and "ΧΑΜΗΛΟΣ" in _docx_text(data)
 
@@ -405,3 +407,40 @@ def test_uploaded_template_replaces_default_and_can_be_reset(conn):
     assert is_custom and name == "Δική μου δήλωση.docx" and data == custom
     templating.reset_template(conn, "declaration:natural")
     assert templating.get_template(conn, "declaration:natural")[2] is False
+
+
+def test_default_templates_drop_empty_beneficiary_and_transaction_rows(conn):
+    """Πίνακες δικαιούχων/συναλλαγών: μία γραμμή ανά εγγραφή, οι κενές αφαιρούνται κατά τη συμπλήρωση."""
+    import io, re, zipfile
+    from taxmatch.aml import templating
+    service.add(conn, AFM, "ΔΟΚΙΜΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ' WHERE afm=?", (AFM,))
+    store.save_profile(conn, AFM, pep_status="no", rep={"name": "ΕΚΠΡΟΣΩΠΟΣ Α"},
+                       ubos=[{"name": "ΔΙΚΑΙΟΥΧΟΣ Α", "percent": "60"}, {"name": "ΔΙΚΑΙΟΥΧΟΣ Β", "percent": "40"}],
+                       transactions=[{"amount": "15_50", "channel": "bank", "frequency": "monthly", "activity": "trade",
+                                      "country": "gr"}])
+    data, unknown, _slot = templating.generate(conn, "declaration", AFM)
+    xml = zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml").decode()
+    assert not unknown and "${" not in xml
+    tables = re.findall(r"<w:tbl>.*?</w:tbl>", xml, re.S)
+    ubo = next(t for t in tables if "ΔΙΚΑΙΟΥΧΟΣ Α" in t)
+    tx = next(t for t in tables if "Ποσό (ετήσιο)" in t)
+    rows = lambda t: len(re.findall(r"<w:tr[ >]", t))  # noqa: E731
+    assert rows(ubo) == 3 and rows(tx) == 2                            # επικεφαλίδα + 2 δικαιούχοι · + 1 συναλλαγή
+    text = _docx_text(data)
+    assert "Τηλέφωνο / email" in text and " · " not in text.split("Τηλέφωνο / email")[1][:40]   # χωρίς ξεκρέμαστο «·»
+
+
+def test_multiline_field_in_justified_paragraph_becomes_left_aligned():
+    import io, zipfile
+    from taxmatch.aml import templating
+    xml = ('<w:document xmlns:w="w"><w:body><w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t>${docs_list}</w:t></w:r></w:p>'
+           '<w:p><w:pPr><w:pStyle w:val="X"/><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>${docs_list}</w:t></w:r></w:p>'
+           '</w:body></w:document>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", xml)
+    out, _u = templating.render(buf.getvalue(), {"docs_list": "Α\nΒ"})
+    doc = zipfile.ZipFile(io.BytesIO(out)).read("word/document.xml").decode()
+    assert 'w:val="both"' not in doc and doc.count('<w:jc w:val="left"/>') == 2
+    assert '<w:pStyle w:val="X"/><w:jc w:val="left"/><w:rPr>' in doc          # σωστή σειρά στοιχείων OOXML

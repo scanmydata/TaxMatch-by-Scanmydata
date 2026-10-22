@@ -85,19 +85,17 @@ class FilterHeader(QHeaderView):
         if logical_index not in self._filterable:
             return
         active = logical_index in self._active
-        hovered = logical_index == self._hover
+        # Όπως στο timologio downloader: το χωνί φαίνεται μόνο σε hover ή όταν η στήλη είναι ήδη φιλτραρισμένη —
+        # μόνιμα ορατό «έτρωγε» το κείμενο στενών κεφαλίδων («Κατάστ▽η», «Βι▽α», αναφορά χρήστη 2026-10-22).
+        if not active and logical_index != self._hover:
+            return
         painter.save()
         # Καθαρή ζώνη κάτω από το χωνί ώστε να μην περνά από πίσω κείμενο.
         zone = QRect(rect.right() - _ARROW - _HOT, rect.top() + 1, _HOT,
                      rect.height() - 2)
         painter.fillRect(zone, QColor(CURRENT.bg))
-        # Το χωνί μένει πάντα ορατό (αχνό) στις φιλτραρίσιμες στήλες — αλλιώς ο χρήστης δεν ανακαλύπτει ποτέ ότι
-        # μπορεί να φιλτράρει εκτός αν περάσει τυχαία το ποντίκι από πάνω. Γίνεται πιο έντονο σε hover/ενεργό
-        # φίλτρο, ώστε να ξεχωρίζει ποια στήλη φιλτράρεται τώρα.
-        color = CURRENT.accent if active else (CURRENT.txt if hovered else CURRENT.muted)
+        color = CURRENT.accent if active else CURRENT.muted
         pixmap = icon("filter", color, _GLYPH).pixmap(QSize(_GLYPH, _GLYPH))
-        if not active and not hovered:
-            painter.setOpacity(0.45)
         painter.drawPixmap(self._funnel_rect(rect), pixmap)
         painter.restore()
 
@@ -231,6 +229,93 @@ def open_filter_popup(header: FilterHeader, col: int, title, values, selected,
     QTimer.singleShot(0, popup.show)
 
 
+def cell_menu_actions(menu, table: QTableWidget, pos, column_filter=None) -> None:
+    """Προσθέτει στο μενού δεξιού κλικ τις ενέργειες ΤΟΥ ΚΕΛΙΟΥ.
+
+    Δύο πράγματα που ο χρήστης τα δοκιμάζει ενστικτωδώς και δεν υπήρχαν:
+    **αντιγραφή** της τιμής (ένα ΑΦΜ, ένα ΜΑΡΚ, μια επωνυμία — για να πάει
+    αλλού) και **φίλτρο με αυτή την τιμή** (δείξε μου μόνο αυτά). Το φίλτρο
+    υπήρχε μόνο μέσα από το χωνί της κεφαλίδας, που πρέπει πρώτα να το βρεις.
+
+    Μπαίνει ως **προσθήκη** σε όποιο μενού έχει ήδη ο πίνακας: οι δικές του
+    ενέργειες (άνοιγμα, διαγραφή…) μένουν στην κορυφή, όπου τις ξέρει ο χρήστης.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    item = table.itemAt(pos)
+    if item is None:
+        return
+    row, col = item.row(), item.column()
+    value = (item.text() or "").strip()
+    if menu.actions():
+        menu.addSeparator()
+
+    def copy(text: str) -> None:
+        QGuiApplication.clipboard().setText(text)
+
+    if value:
+        short = value if len(value) <= 38 else value[:36] + "…"
+        act = menu.addAction(f"Αντιγραφή «{short}»")
+        act.setToolTip("Αντιγράφει το περιεχόμενο του κελιού")
+        act.triggered.connect(lambda _=False, v=value: copy(v))
+
+    cells = [
+        (table.item(row, c).text() or "").strip() if table.item(row, c) else ""
+        for c in range(table.columnCount())
+    ]
+    line = "\t".join(c for c in cells if c)
+    if line:
+        act = menu.addAction("Αντιγραφή ολόκληρης της γραμμής")
+        act.setToolTip("Οι τιμές χωρισμένες με tab — επικολλώνται σε Excel")
+        act.triggered.connect(lambda _=False, v=line: copy(v))
+
+    if column_filter is None:
+        return
+    header = table.horizontalHeaderItem(col)
+    name = (header.text() if header else "") or "στήλη"
+    if column_filter.can_filter(col) and value:
+        act = menu.addAction(f"Φίλτρο: {name} = «{value}»")
+        act.setToolTip("Δείχνει μόνο τις γραμμές με αυτή την τιμή")
+        act.triggered.connect(
+            lambda _=False, c=col, v=value: column_filter.filter_by(c, v)
+        )
+    if column_filter.filters.get(col):
+        act = menu.addAction(f"Καθάρισμα φίλτρου «{name}»")
+        act.triggered.connect(lambda _=False, c=col: column_filter.filter_by(c, None))
+    if column_filter.has_filters():
+        menu.addAction("Καθάρισμα όλων των φίλτρων").triggered.connect(
+            column_filter.clear
+        )
+
+
+def install_cell_menu(table: QTableWidget, column_filter=None) -> None:
+    """Δεξί κλικ σε πίνακα **χωρίς** δικό του μενού: αντιγραφή και φίλτρο."""
+    from PySide6.QtWidgets import QMenu
+
+    def show(pos) -> None:
+        menu = QMenu(table)
+        cell_menu_actions(menu, table, pos, column_filter)
+        if menu.actions():
+            menu.exec(table.viewport().mapToGlobal(pos))
+
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.customContextMenuRequested.connect(show)
+
+
+def install_cell_menu(table: QTableWidget, column_filter=None) -> None:
+    """Δεξί κλικ σε πίνακα **χωρίς** δικό του μενού: αντιγραφή και φίλτρο."""
+    from PySide6.QtWidgets import QMenu
+
+    def show(pos) -> None:
+        menu = QMenu(table)
+        cell_menu_actions(menu, table, pos, column_filter)
+        if menu.actions():
+            menu.exec(table.viewport().mapToGlobal(pos))
+
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.customContextMenuRequested.connect(show)
+
+
 class TableColumnFilter(QObject):
     """Γρήγορο φίλτρο στηλών για οποιονδήποτε ``QTableWidget``.
 
@@ -300,6 +385,22 @@ class TableColumnFilter(QObject):
 
     def has_filters(self) -> bool:
         return any(self.filters.values())
+
+    def can_filter(self, col: int) -> bool:
+        """Δέχεται φίλτρο αυτή η στήλη;"""
+        return col in self._header._filterable  # noqa: SLF001
+
+    def filter_by(self, col: int, value: str | None) -> None:
+        """Φίλτρο με **μία** τιμή (δεξί κλικ σε κελί) — ή καθάρισμα της στήλης με ``None``."""
+        if not self.can_filter(col):
+            return
+        if value is None:
+            self.filters.pop(col, None)
+        else:
+            self.filters[col] = {value}
+        self._update_header_active()
+        self._apply_fn()
+        self.filtersChanged.emit()
 
     def _schedule(self) -> None:
         # Συγχώνευση: πολλά σήματα (ανά γραμμή στο γέμισμα) -> μία εφαρμογή.

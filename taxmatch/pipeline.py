@@ -19,7 +19,7 @@ from . import config, db, settings_store
 from .business_profiles import service as clients
 from .extraction import llm_extract
 from .ingestion import rss_fetch, sources
-from .matching import engine
+from .matching import engine, ml
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +91,16 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
                 except Exception as exc:
                     log.exception("enrich απέτυχε")
                     errors.append(f"Εμπλουτισμός πελατών: {exc}")
+
+                # ML (στο πρότυπο του paperless-ngx): σειρά ανάλυσης κατά πιθανότητα σχετικότητας και παράκαμψη LLM για
+                # τα σχεδόν σίγουρα άσχετα — ΑΝ το μοντέλο έχει αποδείξει ότι τα πάει καλά (matching/ml.py). Ποτέ δεν
+                # σταματά τον έλεγχο: σε σφάλμα απλώς συνεχίζουμε όπως πριν.
+                try:
+                    progress("Ταξινόμηση άρθρων (ML)…")
+                    stats["ml"] = ml.prioritize_and_gate(conn, ml.train_if_needed(conn))
+                except Exception as exc:
+                    log.exception("ML απέτυχε")
+                    stats["ml"] = {"error": str(exc)[:200]}
 
                 stats["extract"] = _extract_step(conn, session, progress, errors)
 

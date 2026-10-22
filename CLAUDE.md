@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # 346 tests, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # ~387 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -40,7 +40,7 @@ taxmatch/
     toast.py                    `toast(window, msg, level, ms)` — «side flash message» πάνω-δεξιά (2026-09-23: μετακινήθηκε εκεί από
                                κάτω-δεξιά, ρητό αίτημα χρήστη· το παλιό web UI παραμένει κάτω-δεξιά)· ΓΙ' ΑΥΤΟ αντί για
                                `QMessageBox.information/warning` σε κάθε νέο κώδικα (βλ. §Κανόνες)
-    theme.py, icons.py, widgets.py, table_filter.py, tour.py, unlock.py, busy.py, tray.py, i18n.py, side_menu.py, manual.py
+    theme.py, icons.py, widgets.py, table_filter.py, tour.py, unlock.py, busy.py, tray.py, i18n.py, side_menu.py, manual.py, excel_help.py
                                ΑΝΤΙΓΡΑΦΗ+προσαρμογή από `mydata-etimologio-bridge/desktop/src/timologio/gui/` — ίδιο θέμα/εικονίδια/
                                φίλτρα στηλών (χωνί, στυλ Excel)/page tour/εγχειρίδιο PDF (QTextDocument+QPdfWriter, όχι εξωτερική βιβλιοθήκη)·
                                `i18n.install(app)` καλείται στο `app.py` (Qt Yes/No/OK ελληνικά + QLocale)· ΠΡΟΣΟΧΗ: το δικό μας
@@ -82,6 +82,16 @@ taxmatch/
                               gemi_browser.py: σύνδεση Γ.Ε.ΜΗ. μέσα στον ΤΟΠΙΚΟ Chrome/Edge (ξεχωριστό προφίλ, CDP με δικό
                               μας ελάχιστο WebSocket client — καμία εξάρτηση)· μετά ο χρήστης συνεχίζει μόνος.
                               GUI: gui/aml_page.py, aml_dialog.py, aml_case_dialog.py
+  office.py                   παράμετροι γραφείου (settings `office_*`), τιμοκατάλογος (`office_services`), αμοιβές ανά
+                              πελάτη (`client_fees`) → καρτέλα πελάτη «Αμοιβές», στήλη «Αμοιβή/μήνα», πεδία `fee_*` προτύπων
+  easycheck.py                έλεγχος ΟΛΟΚΛΗΡΩΣΗΣ υποχρεώσεων από την ΑΑΔΕ (port του runner `lib/easycheck-obligations.js`):
+                              displayLiabilitiesForYear → υποβλήθηκε/εκκρεμεί/όχι ανά περίοδο → `obligation_checks`
+  matching/ml.py              ταξινομητής στο πρότυπο του paperless-ngx (n-grams, εκπαίδευση από αποφάσεις LLM + 👍/👎,
+                              επανεκπαίδευση μόνο σε αλλαγή δεδομένων) — Naive Bayes σε καθαρή Python, ΟΧΙ scikit-learn
+  mydata/                     myDATA ανά πελάτη — port του Timologio Downloader: client.py (RequestDocs/RequestTransmittedDocs,
+                              pagination, 429· το κλειδί ΜΟΝΟ προς mydatapi.aade.gr), parse.py (+ γραμμές παρακράτησης, χώρες),
+                              credentials.py (enc:1:), store.py (`mydata_docs`/`mydata_sync`), pdfs.py (PDF παρόχου, ZIP),
+                              analysis.py (παρακρατούμενοι φόροι, VIES, Intrastat ανά μήνα). GUI: gui/mydata_tab.py, gui/printing.py
   daily.py, scheduler_win.py  headless entry + Windows Task Scheduler (StartWhenAvailable, per-user, χωρίς admin)
 packaging/                    entry.py (PyInstaller entry — μπαίνει στο taxmatch.gui.app.main), taxmatch.spec (PySide6, ΟΧΙ webview),
                               installer.iss, build.ps1, make_icons.py
@@ -101,7 +111,7 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 ## Schema (db.py — πηγή αλήθειας)
 `businesses`, `business_kad`, `articles`, `matches` (UNIQUE article_id+afm, `user_feedback` 1/-1/NULL), `obligations_general`,
 `aml_profile`/`aml_assessments`/`aml_office`/`aml_register`/`aml_cases`/`aml_templates`/`aml_files`/`aml_screenings` +
-κωδικοί `aml_rep_credentials`/`aml_gemi_credentials` (enc:1:) (δέουσα επιμέλεια — ΣΚΟΠΙΜΑ χωρίς FK/CASCADE: διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό, τήρηση 5ετίας άρθρο 30), `settings` (`encrypted` flag· και κατάσταση: `aade_office_status`, `llm_last_error`), `runs`, `client_credentials` (κωδικοί TAXISnet ανά πελάτη, `enc:1:`, χωριστά από το `businesses` ώστε
+κωδικοί `aml_rep_credentials`/`aml_gemi_credentials` (enc:1:) (δέουσα επιμέλεια — ΣΚΟΠΙΜΑ χωρίς FK/CASCADE: διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό, τήρηση 5ετίας άρθρο 30), `office_services`/`client_fees` (τιμοκατάλογος/αμοιβές), `obligation_checks` (EasyCheck), `mydata_credentials`/`mydata_docs`/`mydata_sync` (myDATA), `businesses.employer`/`intrastat` (σημαίες από Excel/προφίλ), `articles.ml_score`, `settings` (`encrypted` flag· και κατάσταση: `aade_office_status`, `llm_last_error`), `runs`, `client_credentials` (κωδικοί TAXISnet ανά πελάτη, `enc:1:`, χωριστά από το `businesses` ώστε
 να μη διαρρέουν σε ερωτήματα λίστας), `calendar_sync` (ποιοι μήνες του πλήρους ημερολογίου έχουν κατέβει). Άρθρα: `extraction_status` = pending | done | failed | irrelevant | **skipped** (prefilter) |
 **duplicate** (`duplicate_of`). `businesses`: `activity_state` (active|ceased|none), `cease_date`, `cease_reason`, `start_date`. Νέα αλλαγή schema = νέο στοιχείο στο `MIGRATIONS` (ποτέ επεξεργασία υπάρχοντος).
 
@@ -378,3 +388,79 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    `<data>/aml_templates/` και παρακολουθεί τον ΦΑΚΕΛΟ (`QFileSystemWatcher` — το Word αποθηκεύει με μετονομασία).
    **Εγχειρίδιο:** το `build.ps1` (βήμα 3c) χτίζει πλέον `packaging/manual.pdf` και το spec το βάζει στο πακέτο· πριν
    ΔΕΝ υπήρχε έτοιμο PDF στο bundle (το `_bundled_manual` έψαχνε κάτι που δεν πακεταριζόταν ποτέ).
+14. **Διορθώσεις UI 2026-10-22 (αναφορά χρήστη, επαληθεύτηκαν σε ΠΡΑΓΜΑΤΙΚΟ «windows» platform με `widget.grab()`):**
+   - **Toasts «στριμώχνονταν»:** το `ToastHost` έπαιρνε ύψος από `adjustSize()`/`sizeHint()` = φυσικό πλάτος κειμένου σε
+     ΜΙΑ γραμμή, ενώ τα μηνύματα αναδιπλώνονται στα 340px (μετρήθηκε: 56px αντί για 137 με δύο toasts). Τώρα
+     `totalHeightForWidth(_WIDTH)` + επανυπολογισμός σε κάθε `LayoutRequest`. Μακριές εργασίες: `toast.ProgressToast`
+     (μόνιμο, μπάρα + ποσοστό + τρέχων πελάτης, `finish()` → κανονικό toast) — χρησιμοποιείται στο `_start_lookup`.
+   - **Ζωντανός πίνακας πελατών:** κατά την ανάκτηση, `_client_refresh_timer` (1,5", συγχωνευμένο) → `reload_clients()`,
+     που ΚΡΑΤΑ τσεκαρισμένους/τρέχουσα γραμμή/κύλιση. Κουμπί ⟳ (`_reload_button`) σε Πελάτες/Νέα.
+   - **Στήλες όπως στο timologio:** το χωνί φαίνεται μόνο σε hover/ενεργό φίλτρο (μόνιμα ορατό «έτρωγε» στενές
+     επικεφαλίδες)· δεξί κλικ σε κελί = `table_filter.install_cell_menu` (αντιγραφή/φίλτρο με την τιμή) — port από το
+     timologio. Υποθέσεις/Μητρώα/Πρότυπα της Δέουσας επιμέλειας περνούν πλέον κι αυτά από `setup_columns`.
+   - **Οι προτιμήσεις οθόνης (QSettings) πήγαιναν ΠΑΝΤΑ στο μητρώο** (`HKCU\Software\scanmydata\TaxMatch`) — και από τα
+     tests/σκριπτ με `TAXMATCH_DATA_DIR`, άρα τα αποθηκευμένα πλάτη στηλών του χρήστη μπορεί να ήταν των tests. Τώρα με
+     `TAXMATCH_DATA_DIR` → `<data>/ui_prefs.ini`· και η ρίζα έγινε `header2` (`widgets._HEADER_PREFS`) ώστε όλοι να
+     ξεκινήσουν μία φορά από τα προεπιλεγμένα πλάτη.
+   - **Ημερολόγιο «πιεσμένο»:** τα chips των γεγονότων (QLabel χωρίς wrap) επέβαλλαν ως ελάχιστο πλάτος τον τίτλο τους,
+     οπότε οι στήλες με γεγονότα φούσκωναν και οι κενές (Τετάρτη/Κυριακή) στρίμωχναν. `QSizePolicy.Ignored` οριζόντια.
+   - **Καρτέλες / radio στο σκοτεινό θέμα:** το `theme.py` δεν είχε ΚΑΘΟΛΟΥ κανόνες `QTabBar`/`QTabWidget`/`QRadioButton`
+     (ούτε το timologio) — ενεργή καρτέλα ανοιχτόχρωμη native, radio σχεδόν αόρατα. Προστέθηκαν και για τα δύο θέματα.
+     Ετικέτα «KYC & φάκελος» → «&&» (σκέτο & = συντόμευση πληκτρολογίου, χανόταν). Οι 7 καρτέλες της Δέουσας
+     επιμέλειας πήραν σύντομα ονόματα (Πελάτες/Αυτοδιάγνωση/Φάκελος γραφείου/Υποθέσεις/Μητρώα/Πρότυπα/Μεθοδολογία).
+   - **Excel → κωδικοί Γ.Ε.ΜΗ.:** `import_excel` διαβάζει «Όνομα χρήστη/Συνθηματικό χρήστη Γ.Ε.Μ.Η.» (πίνακας) και τη
+     γραμμή «Γ.Ε.ΜΗ.» (μπλοκ) → `gemi_browser.set_credentials` (enc:1:). Επαληθεύτηκε σε πραγματικό αρχείο (μόνο
+     επικεφαλίδες/πλήθη: 108/160). Το «i» δίπλα στην εισαγωγή = `gui/excel_help.py` (port του timologio + κενό πρότυπο).
+   - **Πρότυπα Word ξαναγράφτηκαν** (`templating.default_template`): στυλ Title/Heading1/2, κεφαλίδα γραφείου και
+     «Σελίδα Χ από Υ» (header1/footer1.xml), πίνακες ετικέτας/τιμής, πίνακες δικαιούχων (`ubo{N}_*`) και συναλλαγών
+     (νέα πεδία `tx{N}_*`, `docs_checklist`), μπλοκ υπογραφών. Στη συμπλήρωση: γραμμές πίνακα με ΜΟΝΟ κενά πεδία
+     `ubo/txN_` αφαιρούνται (`_drop_empty_rows`, και για πρότυπα taxis), λίστες πολλών γραμμών γίνονται αριστερή
+     στοίχιση (`_align_left` — αλλιώς το Word «τεντώνει» κάθε γραμμή), ξεκρέμαστα « · » σβήνονται. Επαληθεύτηκε
+     οπτικά: Word COM → PDF → PNG (QtPdf). Ο επανέλεγχος του taxis στον browser εκκρεμεί (θέλει σύνδεση χρήστη, TODO.md).
+15. **Γραφείο, αμοιβές, EasyCheck, ML, ταχύτητα (2026-10-22, ρητό αίτημα χρήστη).**
+   - **Excel Hyper/Extra («Κωδικοί Υπηρεσιών μέσω Internet», πραγματικό αρχείο 289 πελατών):** το openpyxl ΑΡΝΕΙΤΑΙ το
+     αρχείο («Colors must be aRGB hex values» στο styles.xml) — `import_excel._raw_xlsx_rows` διαβάζει απευθείας
+     sharedStrings/sheet XML. Μπλοκ μέχρι 15 γραμμές (`_BLOCK_SPAN=40`, σταματά στο επόμενο μπλοκ)· ο ίδιος ΑΦΜ σε δύο
+     μπλοκ συμπληρώνει κωδικούς που έλειπαν. «Δηλώσεων Intrastat» → `intrastat=1` (ποτέ οι κωδικοί). Στήλη
+     «Μισθοδοσία» (TaxSystem) → `employer` → `obligations.liability` απαντά ναι/όχι για ΑΠΔ/Ε4.
+   - **Ταχύτητα ανάκτησης:** (α) `_HyperHttp` με `requests.Session` (keep-alive· πριν κάθε αίτημα = νέο TLS, 10-25 ανά
+     πελάτη) — τα cookies ΜΟΝΟ στο δικό μας jar (policy που τα απορρίπτει στο Session)· (β) `service.lookup_many`:
+     ThreadPoolExecutor 6 workers, ΔΙΚΗ σύνδεση sqlite ανά πελάτη (sqlite objects δεν περνούν σε άλλο thread). Δεν έχει
+     μετρηθεί ζωντανά — αναμένεται ~5x+ για 100+ πελάτες· αν η ΑΑΔΕ αρχίσει να απορρίπτει, μείωσε `LOOKUP_WORKERS`.
+   - **EasyCheck ΔΕΝ έχει δοκιμαστεί ζωντανά από την εφαρμογή** (ούτε στο runner υπάρχει σημείωση ζωντανής επαλήθευσης)·
+     tests με ψεύτικες σελίδες της δομής του runner. Περίοδος «δεν υποβλήθηκε» μπορεί να μην έχει λήξει ακόμη. Δεν
+     συνδέθηκε ακόμη με το Ημερολόγιο (υπόχρεος + υπέβαλε ανά προθεσμία) — TODO.md.
+   - **ML:** ο χρήστης ζήτησε «το σύστημα ML του paperless-ngx». Κρατήθηκε η ροή του (προεπεξεργασία, n-grams 1-2, min_df,
+     εκπαίδευση από τις αποφάσεις του χρήστη, hash δεδομένων), αλλά Bernoulli NB σε καθαρή Python αντί MLPClassifier:
+     το scikit-learn θα έφερνε numpy+scipy (~100MB στον installer). Παράκαμψη LLM ΜΟΝΟ αν στο δείγμα ελέγχου η ακρίβεια
+     ≥92% ΚΑΙ η «ακρίβεια παράκαμψης» ≥98% σε ≥10 άρθρα· τα παρακαμφθέντα (`extraction_error` «ML:…») δεν μπαίνουν
+     ποτέ στην εκπαίδευση. Δεν έχει δοκιμαστεί σε πραγματικά άρθρα του χρήστη.
+   - **SQL migration:** σχόλιο `--` ΜΕΣΑ σε `ALTER TABLE … ADD COLUMN` γράφεται στο σχήμα και το σπάει («incomplete
+     input») — τα σχόλια μόνο ΠΡΙΝ από τις εντολές.
+   - **Tests-ωρολογιακές βόμβες:** `tests/test_extraction.add_article` είχε σταθερή ημερομηνία (2026-09-20)· μόλις βγήκε
+     από το παράθυρο 30 ημερών του `extract_pending` απέτυχαν 8 tests χωρίς αλλαγή κώδικα. Ημερομηνίες σε tests = σχετικές.
+16. **myDATA ανά πελάτη (2026-10-22, ρητό αίτημα χρήστη — «όλα τα στοιχεία από το timologio downloader»).**
+   - **Κωδικοί από Excel ΟΠΩΣ στο timologio** (`excel/aliases.py` εκεί): «Όνομα χρήστη myData» + «Api myData» (whole-string),
+     μπλοκ «Ηλεκτρονικά Βιβλία Α.Α.Δ.Ε. (myDATA)» θεσιακά· ΠΟΤΕ «Subscription key e-timologio» (άλλο προϊόν — παλιό bug
+     substring → 403 σε όλους) ούτε «Συνθηματικό myData» (κωδικός ιστοσελίδας) — εκτός αν λείπει το «Api myData» ΚΑΙ η
+     τιμή είναι 32 hex. Πραγματικά αρχεία: 72/160 (TaxSystem), 251/289 (Hyper/Extra). ΠΡΟΣΟΧΗ: πριν (CLAUDE.md §8b, tests)
+     το myDATA σκόπιμα ΔΕΝ διαβαζόταν — άλλαξε με ρητό αίτημα.
+   - **Παρακρατούμενοι φόροι:** από `withheldPercentCategory` γραμμών (ή `taxesTotals` taxType=1) στα ΛΗΦΘΕΝΤΑ του πελάτη·
+     πληρωτής αποδίδει κατ. 1–7,16,17 (όχι 8/9/10 = προκαταβλητέος του ίδιου του επαγγελματία, όχι 11–15 μισθοδοσία).
+     Προθεσμία: τέλος 2ου μήνα από την ΚΑΤΑΒΟΛΗ (άρθρο 60 ΚΦΕ)· το myDATA δεν έχει ημ/νία πληρωμής → ημερομηνία έκδοσης
+     (όπως ζήτησε ο χρήστης)· «τελευταία εργάσιμη» όπως ο ΦΠΑ (ίδια αβεβαιότητα, §6b). Κανόνας Ημερολογίου
+     `withholding_fees` (ref_offset=2). Πίνακας κατηγοριών: επαληθεύτηκε μέσω τρίτης πηγής (wrapp.ai), όχι από το PDF ΑΑΔΕ.
+     Σύνδεση με EasyCheck: οι κατηγορίες του έτους προσθέτουν ΦΜΥ_ΕΠΙΧ / ΕΡΓΟΛΑΒΩΝ / ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ / ΦΜΥ_ΤΟΚΟΙ στον
+     έλεγχο υποβολών, και η καρτέλα myDATA δείχνει «ΑΑΔΕ: Υποβλήθηκε / ΔΕΝ υποβλήθηκε» δίπλα σε κάθε παρακράτηση.
+     TaxSystem (Hyper.Server.Tax ~γρ. 15190) ανακτά ΚΑΙ την ταυτότητα οφειλής (`PaymentID_TypeInUrl=fmyTempDeclType`) — δεν
+     μεταφέρθηκε (TODO).
+   - **VIES/Intrastat:** τύποι 1.2/2.2 (εκδοθέντα) και 14.1/14.3 (καταχωρήσεις λήπτη — έρχονται από το
+     RequestTransmittedDocs). VIES = οποιαδήποτε από τις 4 τον μήνα (η Ελλάδα ζητά και αποκτήσεις/λήψεις υπηρεσιών).
+     Intrastat = ΜΟΝΟ αγαθά, ανά ρεύμα, κατώφλια `analysis.INTRASTAT_THRESHOLDS` (2026: 250.000/90.000 — από τον χρήστη)·
+     προηγούμενο έτος ή σωρευτικά από τον μήνα υπέρβασης· «όχι» ΜΟΝΟ αν έχουν κατέβει όλοι οι σχετικοί μήνες. Το
+     `obligations.liability(rule, business, ref_month)` διαβάζει `business["mydata"][ym]` (deadlines._businesses).
+   - **PDF:** όπως timologio (`/pdf` suffix, Epsilon getfile, eskap = μόνο online)· ΔΕΝ μεταφέρθηκε ο headless browser
+     για τα «μόνο online» — κουμπί «Άνοιγμα στον πάροχο». Αρχεία: `<data>/invoices/<ΑΦΜ>/<YYYY-MM>/`. Αντισυμβαλλόμενος:
+     `pdfs.other_party` (στα 14.x ο ΕΚΔΟΤΗΣ, παρότι είναι «διαβιβασμένα»).
+   - **ΔΕΝ έχει δοκιμαστεί ζωντανά από το TaxMatch** (μόνο ψεύτικο XML)· ο κώδικας του timologio είναι επαληθευμένος εκεί.
+

@@ -407,7 +407,9 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = conn.execute(
         "SELECT * FROM articles WHERE extraction_status IN ('pending','failed') AND extraction_tries < ? "
-        "AND COALESCE(published_at, fetched_at) >= ? ORDER BY COALESCE(published_at, fetched_at) DESC LIMIT ?",
+        # ml_score (matching/ml.py): πρώτα όσα είναι πιθανότερο να αφορούν πελάτες — τα matches φαίνονται νωρίτερα.
+        "AND COALESCE(published_at, fetched_at) >= ? "
+        "ORDER BY COALESCE(ml_score, 0.5) DESC, COALESCE(published_at, fetched_at) DESC LIMIT ?",
         (MAX_TRIES, cutoff, limit),
     ).fetchall()
     system = system_prompt()

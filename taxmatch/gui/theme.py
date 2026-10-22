@@ -266,6 +266,53 @@ QCheckBox::indicator:checked {{
 }}
 QCheckBox::indicator:disabled {{ background: {p.panel_alt}; border-color: {p.line}; }}
 
+/* Κουμπιά επιλογής (ΝΑΙ/ΟΧΙ στα ερωτήματα της Δέουσας επιμέλειας κ.λπ.): χωρίς κανόνα έμεναν στο προεπιλεγμένο
+   του Qt — σκούρος κύκλος πάνω σε σκούρο φόντο, σχεδόν αόρατος (αναφορά χρήστη 2026-10-22). */
+QRadioButton {{ spacing: 7px; background: transparent; }}
+QRadioButton::indicator {{
+    width: 14px; height: 14px;
+    border: 2px solid {p.muted};
+    border-radius: 9px;
+    background: {p.panel};
+}}
+QRadioButton::indicator:hover {{ border-color: {p.accent}; }}
+QRadioButton::indicator:checked {{
+    border-color: {p.accent};
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                                stop:0 {p.accent_deep}, stop:0.55 {p.accent_deep}, stop:0.62 {p.panel}, stop:1 {p.panel});
+}}
+QRadioButton::indicator:disabled {{ background: {p.panel_alt}; border-color: {p.line}; }}
+
+/* Καρτέλες (καρτέλα πελάτη, Δέουσα επιμέλεια, Ρυθμίσεις): χωρίς κανόνα η ενεργή καρτέλα ζωγραφιζόταν με το
+   ανοιχτόχρωμο native στυλ — γκρι κουτί με γκρι γράμματα πάνω στο σκοτεινό θέμα (αναφορά χρήστη 2026-10-22). */
+QTabWidget::pane {{
+    border: 1px solid {p.line};
+    border-radius: {RADIUS};
+    top: -1px;
+    background: transparent;
+}}
+QTabBar {{ background: transparent; qproperty-drawBase: 0; }}
+QTabBar::tab {{
+    background: transparent;
+    color: {p.muted};
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 14px;
+    margin-right: 2px;
+    font-weight: 600;
+}}
+QTabBar::tab:hover {{ color: {p.txt}; background: {p.tile_hover}; border-top-left-radius: 7px; border-top-right-radius: 7px; }}
+QTabBar::tab:selected {{
+    color: {p.accent};
+    background: {p.panel};
+    border-bottom: 2px solid {p.accent};
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+}}
+QTabBar::tab:disabled {{ color: {p.line}; }}
+QTabBar::scroller {{ width: 26px; }}
+QTabBar QToolButton {{ background: {p.panel}; border: 1px solid {p.line}; border-radius: 6px; }}
+
 QTableWidget {{
     background: {p.panel};
     alternate-background-color: {p.panel_alt};

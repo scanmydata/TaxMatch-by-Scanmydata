@@ -1,10 +1,10 @@
 """Σελίδα «Δέουσα επιμέλεια» (ν. 4557/2018, όπως ισχύει μετά τον ν. 5313/2026):
-* Κατάσταση πελατών — κατάταξη κινδύνου, επόμενη επανεξέταση, ΠΕΠ, KYC· αξιολόγηση/εξαγωγή.
+* Πελάτες — κατάταξη κινδύνου, επόμενη επανεξέταση, ΠΕΠ, KYC· αξιολόγηση/εξαγωγή.
 * Αυτοδιάγνωση — τα 23 σημεία του ερωτηματολογίου ελέγχου της ΑΑΔΕ, με «τι κάνω» για κάθε ΟΧΙ.
-* Φάκελος συμμόρφωσης — η πορεία των 15 βημάτων και τα έγγραφα του φακέλου.
+* Φάκελος γραφείου — ο φάκελος συμμόρφωσης: η πορεία των 15 βημάτων και τα έγγραφα του φακέλου.
 * Υποθέσεις — εσωτερικές αναφορές ύποπτων συναλλαγών (→ απόφαση για την Αρχή) και εσωτερικές καταγγελίες
   (ν. 4990/2022), με προθεσμίες και «φάκελο υπόθεσης» σε PDF.
-* Πρότυπα εγγράφων — Δήλωση/Συμφωνητικό/Αξιολόγηση × φυσικά/νομικά πρόσωπα σε Word, με ανέβασμα δικών σας.
+* Πρότυπα — Δήλωση/Συμφωνητικό/Αξιολόγηση × φυσικά/νομικά πρόσωπα σε Word, με ανέβασμα δικών σας.
 * Μητρώα — εκπαίδευση, αναφορές/εξετάσεις ύποπτων συναλλαγών, απορρίψεις, καταγγελίες, εσωτερικοί έλεγχοι.
 * Μεθοδολογία — ρυθμίσεις γραφείου (μοντέλο, διαστήματα, υπεύθυνος) και το νομικό πλαίσιο.
 Όλα τοπικά (SQLite, πίνακες `aml_*`)· δίκτυο ΜΟΝΟ στην «Αυτόματη λήψη εγγράφων» (aml/retrieval.py, background thread)."""
@@ -34,7 +34,7 @@ from .aml_dialog import AmlAssessmentDialog, category_colour
 from .icons import icon
 from .theme import CURRENT
 from .toast import toast
-from .table_filter import TableColumnFilter
+from .table_filter import TableColumnFilter, install_cell_menu
 from .tour import Step, Tour
 from .widgets import GrDateEdit, due_badge, resort, setup_columns
 
@@ -77,13 +77,13 @@ class AmlPage(QWidget):
         root.addWidget(intro)
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._clients_tab(), icon("clients", CURRENT.muted, 16), "Κατάσταση πελατών")
-        self.tabs.addTab(self._self_check_tab(), icon("check", CURRENT.muted, 16), "Αυτοδιάγνωση (ΑΑΔΕ)")
-        self.tabs.addTab(self._folder_tab(), icon("folder", CURRENT.muted, 16), "Φάκελος συμμόρφωσης")
+        self.tabs.addTab(self._clients_tab(), icon("clients", CURRENT.muted, 16), "Πελάτες")
+        self.tabs.addTab(self._self_check_tab(), icon("check", CURRENT.muted, 16), "Αυτοδιάγνωση")
+        self.tabs.addTab(self._folder_tab(), icon("folder", CURRENT.muted, 16), "Φάκελος γραφείου")
         self.tabs.addTab(self._cases_tab(), icon("bell", CURRENT.muted, 16), "Υποθέσεις")
         self.tabs.addTab(self._registers_tab(), icon("edit", CURRENT.muted, 16), "Μητρώα")
-        self.tabs.addTab(self._templates_tab(), icon("csv", CURRENT.muted, 16), "Πρότυπα εγγράφων")
-        self.tabs.addTab(self._method_tab(), icon("info", CURRENT.muted, 16), "Μεθοδολογία & ρυθμίσεις")
+        self.tabs.addTab(self._templates_tab(), icon("csv", CURRENT.muted, 16), "Πρότυπα")
+        self.tabs.addTab(self._method_tab(), icon("info", CURRENT.muted, 16), "Μεθοδολογία")
 
     @property
     def conn(self):
@@ -232,12 +232,16 @@ class AmlPage(QWidget):
             name = r["name"] or "—"
             if not r["is_client"]:
                 name += "  (πρώην πελάτης)"
-            cells = [r["afm"], name, model.CATEGORY_LABEL.get(r["category"], "χωρίς αξιολόγηση"), score,
-                     model.DD_SHORT.get(r["category"], ""), model.PEP_LABEL.get(r["pep_status"], ""),
+            # Σύντομα κείμενα: σε 1280–1400px οι 11 στήλες είναι στενές και «χωρίς αξιολόγηση»/«Δεν έχει ελεγχθεί»
+            # έβγαιναν «χωρίς …» — το πλήρες κείμενο μένει στο tooltip.
+            pep = "Μη ελεγμένο" if r["pep_status"] in ("", "unknown") else model.PEP_LABEL.get(r["pep_status"], "")
+            cells = [r["afm"], name, model.CATEGORY_LABEL.get(r["category"], "Εκκρεμεί"), score,
+                     model.DD_SHORT.get(r["category"], ""), pep,
                      _gr(a["assessed_on"]) if a else "", review, f"{r['kyc_done']}/{r['kyc_total']}",
-                     f"{r['docs_done']}/{r['docs_total']}", content.FILE_STATUS_LABEL.get(r["file_status"], "")]
+                     f"{r['docs_done']}/{r['docs_total']}", content.FILE_STATUS_LABEL.get(r["file_status"], "") if r["file_status"] else "—"]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
+                item.setToolTip("Χωρίς αξιολόγηση κινδύνου" if col == 2 and not r["category"] else text)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, r["afm"])
                 if col == 2:
@@ -299,7 +303,7 @@ class AmlPage(QWidget):
                  lambda: self.assess_btn, first),
             Step("4. Έγγραφα πελάτη", "Δήλωση παροχής στοιχείων, Ερωτηματολόγιο KYC, Έκθεση αξιολόγησης και Ρήτρες σύμβασης "
                  "σε PDF — ή Word από τα πρότυπα του γραφείου σας.", lambda: self.docs_btn, first),
-            Step("5. Πρότυπα εγγράφων", "Τα έξι πρότυπα Word (Δήλωση, Συμφωνητικό, Αξιολόγηση × φυσικά/νομικά). "
+            Step("5. Πρότυπα", "Τα έξι πρότυπα Word (Δήλωση, Συμφωνητικό, Αξιολόγηση × φυσικά/νομικά). "
                  "«Επεξεργασία στο Word» ανοίγει το πρότυπο· μόλις το αποθηκεύσετε, η εφαρμογή κρατά τη νέα εκδοχή.",
                  lambda: self.tpl_table, lambda: self.tabs.setCurrentIndex(5)),
             Step("6. Γραφείο", "Αυτοδιάγνωση με τα 23 σημεία της ΑΑΔΕ, φάκελος συμμόρφωσης, υποθέσεις (αναφορές ύποπτων "
@@ -478,9 +482,8 @@ class AmlPage(QWidget):
         self.tpl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tpl_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tpl_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tpl_table.setColumnWidth(0, 360)
-        self.tpl_table.setColumnWidth(1, 300)
-        self.tpl_table.horizontalHeader().setStretchLastSection(True)
+        setup_columns(self.tpl_table, [("Πρότυπο", 0, "Διπλό κλικ: επεξεργασία στο Word"), ("Πηγή", 300, ""),
+                                       ("Ενημέρωση", 160, "")], self.main._prefs, "aml_templates")
         self.tpl_table.setFixedHeight(232)
         box.addWidget(self.tpl_table)
         row = QHBoxLayout()
@@ -692,9 +695,12 @@ class AmlPage(QWidget):
         self.case_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.case_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.case_table.setAlternatingRowColors(True)
-        for col, width in enumerate((40, 150, 85, 190, 260, 120, 200)):
-            self.case_table.setColumnWidth(col, width)
-        self.case_table.horizontalHeader().setStretchLastSection(True)
+        self.case_table.setSortingEnabled(True)
+        setup_columns(self.case_table, [("#", 44, ""), ("Είδος", 150, ""), ("Παραλαβή", 90, ""), ("Πελάτης", 180, ""),
+                                        ("Περιγραφή", 0, "Διπλό κλικ: άνοιγμα υπόθεσης"), ("Κατάσταση", 120, ""),
+                                        ("Απόφαση / αποτέλεσμα", 180, ""), ("Εκκρεμότητα", 110, "")],
+                      self.main._prefs, "aml_cases")
+        install_cell_menu(self.case_table)
         self.case_table.doubleClicked.connect(lambda *_: self._open_case())
         box.addWidget(self.case_table, 1)
         return page
@@ -974,9 +980,10 @@ class AmlPage(QWidget):
         self.reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.reg_table.setAlternatingRowColors(True)
-        self.reg_table.horizontalHeader().setStretchLastSection(True)
-        for col, width in enumerate((90, 190, 260, 90, 260)):
-            self.reg_table.setColumnWidth(col, width)
+        self.reg_table.setSortingEnabled(True)
+        setup_columns(self.reg_table, [(c, w, "") for c, w in zip(_REG_COLS, (96, 180, 0, 96, 300))],
+                      self.main._prefs, "aml_registers")
+        install_cell_menu(self.reg_table)
         box.addWidget(self.reg_table, 1)
         return page
 

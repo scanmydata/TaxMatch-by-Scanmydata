@@ -6,6 +6,7 @@ from __future__ import annotations
 import calendar as pycal
 import json
 import logging
+import os
 import sqlite3
 import webbrowser
 from datetime import date, datetime, timedelta
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .. import APP_TITLE, __version__, config, crypto, deadlines, logs, notices as notices_mod, pipeline, scheduler_win, settings_store
+from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, logs, notices as notices_mod, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
 from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
@@ -30,7 +31,7 @@ from ..extraction import llm_extract
 from ..http import make_session
 from ..identifiers import is_valid_afm, kad_digits, normalize_afm
 from ..ingestion import sources, taxheaven_calendar
-from ..matching import engine
+from ..matching import engine, ml
 from . import i18n
 from .aml_page import AmlPage
 from .busy import BusyOverlay
@@ -40,12 +41,13 @@ from .icons import dot_icon, icon, logo_pixmap
 from .manual import ensure_manual
 from .news_dialog import NewsDialog
 from .side_menu import SideMenu
-from .table_filter import TableColumnFilter
+from .table_filter import TableColumnFilter, install_cell_menu
 from .theme import CURRENT, apply_theme, paint_title_bar
-from .toast import toast
+from .toast import ProgressToast, toast
 from .tour import Step, Tour
+from .office_widgets import OfficeSettingsBox, ServicesBox
 from .tray import Tray
-from . import unlock
+from . import excel_help, unlock
 from .widgets import ToggleSwitch, due_badge, kind_colour, resort, setup_columns
 from .workers import run_task
 
@@ -55,8 +57,10 @@ _CLIENT_COLS = [
     ("", 30, "Επιλέξτε για μαζικές ενέργειες"), ("ΑΦΜ", 90, ""), ("Επωνυμία", 0, "Διπλό κλικ για την καρτέλα"),
     ("Είδος", 130, ""), ("Κατάσταση", 90, ""), ("Κύριος ΚΑΔ", 110, ""), ("Βιβλία", 55, ""), ("ΦΠΑ", 70, ""),
     ("Στοιχεία", 80, "Πληρότητα ανάκτησης"), ("TAXISnet", 80, ""), ("Matches", 65, ""),
+    ("Αμοιβή/μήνα", 100, "Μηνιαία επαναλαμβανόμενη αμοιβή, προ ΦΠΑ (καρτέλα πελάτη → Αμοιβές)"),
+    ("Υποβολές", 90, "Κατάσταση υποβολών του τρέχοντος έτους από την ΑΑΔΕ (✓ υποβλήθηκαν · ✗ δεν υποβλήθηκαν)"),
 ]
-_C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS, _C_MATCHES = range(11)
+_C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS, _C_MATCHES, _C_FEE, _C_CHECKS = range(13)
 
 _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτλος", 0, "Διπλό κλικ για προεπισκόπηση"),
              ("Κατάσταση", 110, ""), ("Πελάτες", 60, "")]
@@ -67,6 +71,17 @@ _WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
 
 
 _CELL_CHIPS = 3  # πόσα events δείχνονται πλήρη μέσα στο κελί πριν το «+N ακόμη» — όπως στο παλιό .cal .ev του web UI
+
+
+class _NumItem(QTableWidgetItem):
+    """Κελί που ταξινομείται αριθμητικά («1.200,00 €» μετά το «90,00 €», όχι αλφαβητικά)."""
+
+    def __init__(self, text: str, value: float) -> None:
+        super().__init__(text)
+        self._value = value
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        return self._value < getattr(other, "_value", 0.0)
 
 
 class _DayCell(QFrame):
@@ -97,11 +112,15 @@ class _DayCell(QFrame):
             f"background:transparent; border:none; font-weight:700; "
             f"color:{CURRENT.txt if in_month else CURRENT.muted};"
         )
+        num.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         box.addWidget(num)
 
         for ev in events[:_CELL_CHIPS]:
             chip = QLabel(ev["title"])
             chip.setToolTip(ev["title"])
+            # Ignored: ο τίτλος ΔΕΝ επιβάλλει πλάτος στη στήλη. Πριν, ένας μακρύς τίτλος «φούσκωνε» τη στήλη της ημέρας
+            # του και οι στήλες χωρίς γεγονότα (π.χ. Τετάρτη/Κυριακή) στρίμωχναν (αναφορά χρήστη 2026-10-22).
+            chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             chip.setStyleSheet(
                 f"background:{CURRENT.panel_alt}; color:{CURRENT.txt}; font-size:10px; "
                 f"border:none; border-left:3px solid {kind_colour(ev['kind'])}; border-radius:3px; padding:1px 4px;"
@@ -112,6 +131,7 @@ class _DayCell(QFrame):
             more = QLabel(f"+{extra} ακόμη")
             more.setStyleSheet(f"background:transparent; border:none; color:{CURRENT.muted}; font-size:10px;")
             more.setToolTip("\n".join(ev["title"] for ev in events[_CELL_CHIPS:]))
+            more.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             box.addWidget(more)
         box.addStretch()
 
@@ -172,7 +192,13 @@ class MainWindow(QMainWindow):
             self.resize(1340, 840)
 
         self.conn = dbmod.connect()
-        self._prefs = QSettings("scanmydata", "TaxMatch")
+        # Προτιμήσεις οθόνης (θέμα, πλάτη/σειρά στηλών). Με `TAXMATCH_DATA_DIR` (tests, δοκιμές με προσωρινά δεδομένα)
+        # γράφονται ΔΙΠΛΑ στη βάση — πριν πήγαιναν πάντα στο μητρώο του χρήστη και κάθε test «πατούσε» τα πλάτη
+        # στηλών/το θέμα της πραγματικής εγκατάστασης.
+        if os.getenv("TAXMATCH_DATA_DIR"):
+            self._prefs = QSettings(str(config.data_dir() / "ui_prefs.ini"), QSettings.Format.IniFormat)
+        else:
+            self._prefs = QSettings("scanmydata", "TaxMatch")
         self._tasks: list[Any] = []                        # κρατά ζωντανά τα background tasks (βλ. workers.run_task)
         self._tour: Optional[Tour] = None
         self._title_bar_done = False
@@ -489,8 +515,10 @@ class MainWindow(QMainWindow):
         add_btn.clicked.connect(self.on_add_client)
         top.addWidget(add_btn)
         import_btn = QPushButton("  Εισαγωγή από Excel")
+        import_btn.setToolTip("Πελάτες + κωδικοί TAXISnet / Γ.Ε.ΜΗ. από «Κωδικοί Υπόχρεων» ή «Κωδικοί Υπηρεσιών μέσω Internet»")
         import_btn.clicked.connect(self.on_import_excel)
         top.addWidget(import_btn)
+        top.addWidget(excel_help.help_button(self))
         export_btn = QPushButton("  Εξαγωγή CSV")
         export_btn.clicked.connect(self.on_export_csv)
         top.addWidget(export_btn)
@@ -520,8 +548,21 @@ class MainWindow(QMainWindow):
         del_btn.clicked.connect(self.on_delete_selected_clients)
         selbar.addWidget(del_btn)
         lookup_btn = QPushButton("  Ανανέωση στοιχείων")
+        lookup_btn.setToolTip("Ανάκτηση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για τους επιλεγμένους — ή για όλους αν δεν έχει "
+                              "επιλεγεί κανείς")
         lookup_btn.clicked.connect(self.on_refresh_selected_clients)
         selbar.addWidget(lookup_btn)
+        check_btn = QPushButton("  Έλεγχος υποβολών")
+        check_btn.setToolTip("Ρωτά την ΑΑΔΕ αν έχουν υποβληθεί οι δηλώσεις του τρέχοντος έτους (Φ2, ΦΜΥ, εισοδήματος, "
+                             "ΜΥΦ…) για τους επιλεγμένους — ή για όλους με κωδικούς TAXISnet. Μόνο ανάγνωση.")
+        check_btn.clicked.connect(self.on_check_submissions)
+        selbar.addWidget(check_btn)
+        mydata_btn = QPushButton("  Λήψη myDATA")
+        mydata_btn.setToolTip("Παραστατικά των 3 τελευταίων μηνών από το myDATA (χωρίς PDF) για τους επιλεγμένους — ή για "
+                              "όλους με κωδικούς myDATA. Ενημερώνει παρακρατήσεις, VIES και Intrastat στο Ημερολόγιο.")
+        mydata_btn.clicked.connect(self.on_fetch_mydata)
+        selbar.addWidget(mydata_btn)
+        selbar.addWidget(self._reload_button(lambda: self.reload_clients(), "Ξαναδιαβάζει τον πίνακα πελατών"))
         root.addLayout(selbar)
 
         self.client_table = QTableWidget(0, len(_CLIENT_COLS))
@@ -541,16 +582,39 @@ class MainWindow(QMainWindow):
                                                     apply_fn=lambda: self._apply_client_filter())
         self._client_col_filter.filtersChanged.connect(self._apply_client_filter)
         setup_columns(self.client_table, _CLIENT_COLS, self._prefs, "clients")
+        install_cell_menu(self.client_table, self._client_col_filter)   # δεξί κλικ: αντιγραφή / φίλτρο με την τιμή
+        # Ζωντανή ενημέρωση του πίνακα όσο τρέχει η ανάκτηση στοιχείων — συγχωνευμένη (μία ανανέωση το πολύ ανά
+        # ~1,5"), ώστε 160 πελάτες να μη σημαίνουν 160 πλήρη ξαναγεμίσματα.
+        self._client_refresh_timer = QTimer(self)
+        self._client_refresh_timer.setSingleShot(True)
+        self._client_refresh_timer.setInterval(1500)
+        self._client_refresh_timer.timeout.connect(self.reload_clients)
         self.client_table.itemChanged.connect(lambda _i: self._sync_client_selection_label())
         self.quick_search.textChanged.connect(lambda _t: self._apply_client_filter())   # η ΜΙΑ γραμμή αναζήτησης (πάνω-δεξιά)
         root.addWidget(self.client_table, 1)
         return page
 
+    def _reload_button(self, handler, tip: str) -> QPushButton:
+        btn = QPushButton(icon("refresh", CURRENT.txt, 16), "")
+        btn.setFixedWidth(38)
+        btn.setToolTip(tip)
+        btn.clicked.connect(lambda: handler())
+        return btn
+
     def reload_clients(self) -> None:
         rows = clients.list_all(self.conn)
         creds = client_creds.status_map(self.conn)
         counts = {r["afm"]: r["n"] for r in self.conn.execute("SELECT afm, COUNT(*) AS n FROM matches GROUP BY afm")}
+        fees = office.monthly_totals(self.conn)
+        checks = easycheck.summary(self.conn, date.today().year)
         table = self.client_table
+        # Τσεκαρισμένοι πελάτες, επιλεγμένη γραμμή και θέση κύλισης επιβιώνουν από το ξαναγέμισμα — ο πίνακας
+        # ανανεώνεται πλέον και μόνος του όσο τρέχει η ανάκτηση στοιχείων (αναφορά χρήστη 2026-10-22).
+        checked = {table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole) for r in range(table.rowCount())
+                   if table.item(r, _C_CHK) and table.item(r, _C_CHK).checkState() == Qt.CheckState.Checked}
+        current = table.currentRow()
+        current_afm = table.item(current, _C_AFM).text() if current >= 0 and table.item(current, _C_AFM) else ""
+        scroll = table.verticalScrollBar().value()
         table.blockSignals(True)
         table.setSortingEnabled(False)
         table.setRowCount(len(rows))
@@ -558,7 +622,7 @@ class MainWindow(QMainWindow):
             c = creds.get(r["afm"])
             check = QTableWidgetItem()
             check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            check.setCheckState(Qt.CheckState.Unchecked)
+            check.setCheckState(Qt.CheckState.Checked if r["afm"] in checked else Qt.CheckState.Unchecked)
             check.setData(Qt.ItemDataRole.UserRole, r["afm"])
             table.setItem(i, _C_CHK, check)
             state_label = {"active": "Ενεργή", "ceased": "Διακοπή", "none": "Ιδιώτης", "": "—"}.get(r["activity_state"] or "", r["activity_state"])
@@ -581,10 +645,26 @@ class MainWindow(QMainWindow):
                 if col == _C_CREDS and creds_label == "Πρόβλημα":
                     item.setForeground(QColor(CURRENT.bad))
                 table.setItem(i, col, item)
+            fee = fees.get(r["afm"])
+            fee_item = _NumItem(office.money(fee) if fee else "—", fee or 0.0)
+            fee_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(i, _C_FEE, fee_item)
+            c = checks.get(r["afm"], {})
+            missing = c.get("not_submitted", 0)
+            check_item = _NumItem(f"✓{c.get('submitted', 0)} ✗{missing}" if c else "—", missing if c else -1)
+            if missing:
+                check_item.setForeground(QColor(CURRENT.bad))
+            table.setItem(i, _C_CHECKS, check_item)
         table.setSortingEnabled(True)
         resort(table, _C_NAME)
         table.blockSignals(False)
         self._apply_client_filter()
+        if current_afm:
+            for i in range(table.rowCount()):
+                if table.item(i, _C_AFM).text() == current_afm:
+                    table.setCurrentCell(i, table.currentColumn() if table.currentColumn() >= 0 else _C_AFM)
+                    break
+        table.verticalScrollBar().setValue(scroll)
 
     def _apply_client_filter(self) -> None:
         """Συνδυάζει αναζήτηση κειμένου + φίλτρα στηλών σε ΕΝΑ πέρασμα — δεν καλεί `TableColumnFilter.apply()`
@@ -692,6 +772,90 @@ class MainWindow(QMainWindow):
         afms = self._selected_client_afms() or [self.client_table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole) for r in range(self.client_table.rowCount())]
         self._start_lookup(afms)
 
+    def on_check_submissions(self) -> None:
+        """EasyCheck για πολλούς πελάτες, παράλληλα (ίδιος μηχανισμός με την ανάκτηση στοιχείων)."""
+        with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
+        afms = [a for a in (self._selected_client_afms() or sorted(with_creds)) if a in with_creds]
+        if not afms:
+            toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
+            return
+        year, total = date.today().year, len(afms)
+        bar = ProgressToast(self, f"Ξεκίνησε ο έλεγχος υποβολών {year} για {total} {'πελάτη' if total == 1 else 'πελάτες'}…")
+        state = {"done": 0, "missing": 0, "failed": 0}
+
+        def work(progress):
+            def one(conn, afm):
+                return easycheck.check_client(conn, afm, year)
+
+            def each(_afm, n, result):
+                state["done"] = n
+                if not result.get("ok"):
+                    state["failed"] += 1
+                state["missing"] += sum(1 for e in result.get("entries", []) for p in e["periods"]
+                                        if p["status"] == "not_submitted")
+                progress(f"Έλεγχος υποβολών {n}/{total}")
+
+            clients.lookup_many(afms, on_each=each, fetch=one)
+            return total
+
+        def on_progress(msg: str) -> None:
+            bar.update(msg, state["done"], total)
+            self._client_refresh_timer.start()
+
+        def done(_n):
+            self._client_refresh_timer.stop()
+            msg = f"Ο έλεγχος υποβολών ολοκληρώθηκε: {state['missing']} περίοδοι χωρίς υποβολή"
+            msg += f", {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
+            bar.finish(msg, "warn" if state["missing"] or state["failed"] else "ok")
+            self.reload_clients()
+
+        def failed(m: str) -> None:
+            self._client_refresh_timer.stop()
+            bar.finish(f"Σφάλμα ελέγχου υποβολών: {m}", "danger")
+
+        self._tasks.append(run_task(self, work, on_progress=on_progress, on_done=done, on_error=failed))
+
+    def on_fetch_mydata(self) -> None:
+        """Μαζική λήψη myDATA (στοιχεία, όχι PDF) — παράλληλα, ο καθένας με τα δικά του κλειδιά."""
+        from ..mydata import credentials as mydata_creds, store as mydata_store
+        have = mydata_creds.with_credentials(self.conn)
+        afms = [a for a in (self._selected_client_afms() or sorted(have)) if a in have]
+        if not afms:
+            toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς myDATA.", "warn")
+            return
+        today = date.today()
+        months = mydata_store.previous_months(f"{today.year}-{today.month:02d}", 4)[1:]   # 3 κλειστοί μήνες
+        total = len(afms)
+        bar = ProgressToast(self, f"Ξεκίνησε η λήψη myDATA ({len(months)} μήνες) για {total} "
+                                  f"{'πελάτη' if total == 1 else 'πελάτες'}…")
+        state = {"done": 0, "failed": 0}
+
+        def work(progress):
+            def one(conn, afm):
+                for ym in months:
+                    out = mydata_store.sync_month(conn, afm, ym)
+                    if not out["ok"]:
+                        return {"ok": False}
+                return {"ok": True}
+
+            def each(_afm, n, result):
+                state["done"] = n
+                state["failed"] += 0 if result.get("ok") else 1
+                progress(f"Λήψη myDATA {n}/{total}")
+
+            clients.lookup_many(afms, on_each=each, fetch=one, workers=4)
+            return total
+
+        def done(_n):
+            msg = "Η λήψη myDATA ολοκληρώθηκε" + (f" — {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)."
+                                                 if state["failed"] else ".")
+            bar.finish(msg, "warn" if state["failed"] else "ok")
+            self._render_calendar_from_db()
+            self.reload_dashboard()
+
+        self._tasks.append(run_task(self, work, on_progress=lambda m: bar.update(m, state["done"], total), on_done=done,
+                                    on_error=lambda m: bar.finish(f"Σφάλμα λήψης myDATA: {m}", "danger")))
+
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Εισαγωγή από Excel", "", "Excel/CSV (*.xlsx *.xlsm *.csv *.txt)")
         if path:
@@ -706,6 +870,8 @@ class MainWindow(QMainWindow):
         with_creds = [r.afm for r in res.rows if r.has_credentials]
         lookup_afms = with_creds or [r.afm for r in res.rows]
         msg = (f"Βρέθηκαν {len(res.rows)} πελάτες" + (f", {res.credential_count} με κωδικούς TAXISnet" if res.credential_count else "")
+              + (f", {res.gemi_count} με κωδικούς Γ.Ε.ΜΗ." if res.gemi_count else "")
+              + (f", {res.mydata_count} με κωδικούς myDATA" if res.mydata_count else "")
               + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ".\n\n"
               f"Να γίνει ΤΩΡΑ και ενημέρωση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για {len(lookup_afms)} "
               f"{'πελάτες με κωδικούς TAXISnet' if with_creds else 'πελάτες'}; Μπορεί να πάρει λίγα λεπτά — "
@@ -722,7 +888,10 @@ class MainWindow(QMainWindow):
         backup_mod.create_backup(config.db_path(), reason="import")
         out = clients.import_result(self.conn, res)
         engine.rematch(self.conn)
-        toast(self, f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}.", "ok")
+        toast(self, f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}."
+                    + (f" Κωδικοί TAXISnet: {out['credentials']}." if out["credentials"] else "")
+                    + (f" Κωδικοί Γ.Ε.ΜΗ.: {out['gemi']}." if out["gemi"] else "")
+                    + (f" Κωδικοί myDATA: {out['mydata']}." if out["mydata"] else ""), "ok")
         self.reload_clients()
         self._refresh_status_bar()
         if clicked is btn_both:
@@ -745,37 +914,55 @@ class MainWindow(QMainWindow):
         afms = [a for a in afms if a]
         if not afms:
             return
-        self.run_status.setText(f"Ανάκτηση στοιχείων για {len(afms)} πελάτες…")
-        toast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {len(afms)} "
-                    f"{'πελάτη' if len(afms) == 1 else 'πελάτες'}…", "info")
+        total = len(afms)
+        names = {r["afm"]: r["name"] or r["afm"] for r in self.conn.execute(
+            f"SELECT afm, name FROM businesses WHERE afm IN ({','.join('?' * total)})", afms)}
+        self.run_status.setText(f"Ανάκτηση στοιχείων για {total} πελάτες…")
+        # Μόνιμο toast με ποσοστό και τον πελάτη που επεξεργάζεται τώρα (ρητό αίτημα χρήστη, 2026-10-22) — κλείνει
+        # μόνο του όταν τελειώσει η ανάκτηση.
+        bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…")
+        state = {"done": 0}
 
         def work(progress):
-            # Νέα σύνδεση εδώ, ΠΟΤΕ self.conn — δημιουργήθηκε στο UI thread, το sqlite3 απαγορεύει χρήση από
-            # άλλο thread («SQLite objects created in a thread can only be used in that same thread»).
+            # Παράλληλα (clients.lookup_many: 6 πελάτες τη φορά, ο καθένας με ΔΙΚΗ του σύνδεση βάσης — ΠΟΤΕ self.conn,
+            # που ανήκει στο UI thread). Το progress() είναι σήμα Qt, ασφαλές από οποιοδήποτε thread.
+            progress(f"Ανάκτηση στοιχείων 0/{total}…")
+
+            def each(afm, n, _result):
+                state["done"] = n
+                progress(f"Ανάκτηση στοιχείων {n}/{total} — {names.get(afm, afm)}")
+
+            clients.lookup_many(afms, on_each=each)
+            progress(f"Αντιστοίχιση νέων με τους πελάτες ({total}/{total})…")
             conn = dbmod.connect()
             try:
-                for i, afm in enumerate(afms, 1):
-                    progress(f"Ανάκτηση στοιχείων {i}/{len(afms)}")
-                    try:
-                        clients.lookup_and_store(conn, afm)
-                    except KeyError:
-                        pass
                 engine.rematch(conn)
-                return len(afms)
             finally:
                 conn.close()
+            return total
+
+        def on_progress(msg: str) -> None:
+            self.run_status.setText(msg)
+            bar.update(msg, state["done"], total)
+            if state["done"]:
+                self._client_refresh_timer.start()      # ό,τι ολοκληρώθηκε φαίνεται ήδη στον πίνακα
 
         def done(_n):
+            self._client_refresh_timer.stop()
             self.run_status.setText("Η ανάκτηση στοιχείων ολοκληρώθηκε.")
-            toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
+            bar.finish(f"Η ανάκτηση στοιχείων ολοκληρώθηκε ({total} {'πελάτης' if total == 1 else 'πελάτες'}).", "ok")
             self.reload_clients()
             self.reload_dashboard()
             self._reload_notices()
             self._refresh_status_bar()
 
-        self._tasks.append(run_task(self, work, on_progress=self.run_status.setText, on_done=done,
-                                    on_error=lambda m: (self.run_status.setText(f"Σφάλμα ανάκτησης: {m}"),
-                                                          toast(self, f"Σφάλμα ανάκτησης: {m}", "danger"))))
+        def failed(m: str) -> None:
+            self._client_refresh_timer.stop()
+            self.run_status.setText(f"Σφάλμα ανάκτησης: {m}")
+            bar.finish(f"Σφάλμα ανάκτησης: {m}", "danger")
+            self.reload_clients()
+
+        self._tasks.append(run_task(self, work, on_progress=on_progress, on_done=done, on_error=failed))
 
     def open_client_detail(self, afm: str) -> None:
         dlg = ClientDetailDialog(self, afm)
@@ -1123,6 +1310,7 @@ class MainWindow(QMainWindow):
             self.news_only.addItem(label, value)
         self.news_only.currentIndexChanged.connect(self.reload_news)
         top.addWidget(self.news_only)
+        top.addWidget(self._reload_button(self.reload_news, "Ξαναδιαβάζει τη λίστα νέων"))
         root.addLayout(top)
 
         self.news_table = QTableWidget(0, len(_NEWS_COLS))
@@ -1135,6 +1323,7 @@ class MainWindow(QMainWindow):
         self.news_table.doubleClicked.connect(self._open_selected_news)
         self._news_col_filter = TableColumnFilter(self.news_table, (0, 3))  # Πηγή, Κατάσταση
         setup_columns(self.news_table, _NEWS_COLS, self._prefs, "news")
+        install_cell_menu(self.news_table, self._news_col_filter)
         root.addWidget(self.news_table, 1)
         return page
 
@@ -1189,6 +1378,9 @@ class MainWindow(QMainWindow):
         a = self.news_table.item(row, 2).data(Qt.ItemDataRole.UserRole)
         summary, action = self._article_preview(a)
         people = deadlines.clients_for_article(self.conn, a["id"]) if a["n_matches"] else None
+        if people is None and a["extraction_status"] in ("pending", "failed"):
+            # Δεν έχει αναλυθεί ακόμη από το LLM: πιθανοί πελάτες από τον ταξινομητή ML (πάντα «υπό προϋποθέσεις»).
+            people = ml.suggest_for_article(self.conn, a) or None
         NewsDialog(a["title"], a["url"], meta=f"{a['source']} · {(a['published_at'] or '')[:10]}",
                   summary=summary, action=action, parent=self, clients=people,
                   on_client=self.open_client_detail).exec()
@@ -1202,8 +1394,12 @@ class MainWindow(QMainWindow):
         title = QLabel("Ρυθμίσεις")
         title.setObjectName("h1")
         root.addWidget(title)
+        self.office_box = OfficeSettingsBox(self.conn, self)
+        root.addWidget(self.office_box)
+        self.services_box = ServicesBox(self.conn, self)
+        root.addWidget(self.services_box)
 
-        keys_box = QGroupBox("Κλειδιά & credentials")
+        keys_box = QGroupBox("Κλειδιά && credentials")
         kf = QFormLayout(keys_box)
         self._settings_fields: dict[str, QLineEdit] = {}
         self._settings_status: dict[str, QLabel] = {}
@@ -1262,6 +1458,12 @@ class MainWindow(QMainWindow):
         save_llm.clicked.connect(self._save_llm_settings)
         lf.addRow("", save_llm)
         root.addWidget(llm_box)
+        ml_box = QGroupBox("Μηχανική μάθηση (όπως στο paperless-ngx)")
+        ml_lay = QVBoxLayout(ml_box)
+        self.ml_status_label = QLabel("")
+        self.ml_status_label.setWordWrap(True)
+        ml_lay.addWidget(self.ml_status_label)
+        root.addWidget(ml_box)
 
         src_box = QGroupBox("Πηγές ειδήσεων")
         sf = QVBoxLayout(src_box)
@@ -1318,6 +1520,21 @@ class MainWindow(QMainWindow):
         return outer
 
     def reload_settings(self) -> None:
+        try:
+            st = json.loads(settings_store.get(self.conn, "ml_status") or "{}")
+        except ValueError:
+            st = {}
+        if st:
+            gate = ("ενεργή" if ml.gate_ok(st) else
+                    f"ανενεργή μέχρι να δείξει ακρίβεια ≥{ml.GATE_MIN_PRECISION:.0%} σε αρκετά άρθρα")
+            self.ml_status_label.setText(
+                f"Μαθαίνει από τις αποφάσεις της ανάλυσης και τα 👍/👎 σας: {st.get('n_relevance', 0)} άρθρα "
+                f"({st.get('n_pos', 0)} σχετικά) · μοντέλα για {st.get('n_clients', 0)} πελάτες · ακρίβεια "
+                f"{st.get('accuracy', 0):.0%} σε δείγμα ελέγχου · τελευταία εκπαίδευση {str(st.get('trained_at', ''))[:10]}.\n"
+                f"Τα άρθρα σε αναμονή αναλύονται με σειρά πιθανότητας να αφορούν πελάτες· παράκαμψη LLM για τα σχεδόν "
+                f"σίγουρα άσχετα: {gate}.")
+        else:
+            self.ml_status_label.setText("Θα εκπαιδευτεί στον επόμενο «Έλεγχο τώρα», από τα άρθρα που έχει ήδη αναλύσει το LLM.")
         self.llm_provider.setCurrentIndex(self.llm_provider.findData(settings_store.get(self.conn, "llm_provider")))
         self._sync_model_combo(self.llm_model_groq, "groq", settings_store.get(self.conn, "llm_model_groq"))
         self._sync_model_combo(self.llm_model_openrouter, "openrouter", settings_store.get(self.conn, "llm_model_openrouter"))

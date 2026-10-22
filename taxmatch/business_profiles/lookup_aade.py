@@ -10,6 +10,7 @@ tags (`all_tags`) ώστε να διορθωθεί χωρίς νέα ζωντα�
 """
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import logging
 import re
@@ -44,6 +45,12 @@ class _HyperHttp:
     def __init__(self, timeout: float = 60.0):
         self.jar: Dict[str, Dict[str, str]] = {}
         self.timeout = timeout
+        # Keep-alive: ένα login + Μητρώο = 10-25 αιτήματα (με τις ανακατευθύνσεις του OAM) στους ίδιους 2-3 hosts·
+        # χωρίς Session κάθε αίτημα άνοιγε νέα σύνδεση TLS — το μεγαλύτερο μέρος του χρόνου της «Ανανέωσης
+        # στοιχείων» (αναφορά χρήστη 2026-10-22). Τα cookies τα κρατά ΜΟΝΟ το δικό μας jar (ίδια συμπεριφορά με τα
+        # JS scripts του runner), γι' αυτό το Session δεν αποθηκεύει κανένα.
+        self.session = requests.Session()
+        self.session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
 
     @staticmethod
     def _host(url: str) -> str:
@@ -84,7 +91,7 @@ class _HyperHttp:
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
             data = urlencode(form).encode("utf-8")
-        resp = requests.request(method, url, headers=headers, data=data, allow_redirects=False, timeout=self.timeout)
+        resp = self.session.request(method, url, headers=headers, data=data, allow_redirects=False, timeout=self.timeout)
         self._store(url, resp)
         return resp
 

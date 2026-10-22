@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db as dbmod
+from .. import easycheck
 from .. import deadlines
 from ..aml import model as aml_model, store as aml_store
 from ..aml.content import ASSESSMENT_LABEL
@@ -21,6 +22,8 @@ from ..matching.match import ALL_SCOPE_REASON
 from .busy import BusyOverlay
 from .icons import dot_icon, icon
 from .news_dialog import NewsDialog
+from .mydata_tab import MydataTab
+from .office_widgets import ClientFeesWidget
 from .theme import CURRENT
 from .toast import toast
 from .widgets import due_badge, kind_colour
@@ -38,7 +41,7 @@ class ClientDetailDialog(QDialog):
         self.afm = afm
         b = clients.get(self.conn, afm)
         self.setWindowTitle(b["name"] or afm)
-        self.resize(720, 640)
+        self.resize(1180, 760)                               # 7 καρτέλες: σε 720px εμφανίζονταν βέλη κύλισης
         self._tasks: list = []
         self.busy = BusyOverlay(self)
 
@@ -66,9 +69,13 @@ class ClientDetailDialog(QDialog):
         root.addWidget(tabs, 1)
         tabs.addTab(self._profile_tab(), icon("edit", CURRENT.muted, 16), "Προφίλ")
         tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet")
-        tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προσεχείς προθεσμίες")
+        tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προθεσμίες && υποβολές")
         news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
         tabs.addTab(self._aml_tab(), icon("aml", CURRENT.muted, 16), "Δέουσα επιμέλεια")
+        self.fees = ClientFeesWidget(self.conn, afm, self, on_change=self.main.reload_clients)
+        tabs.addTab(self.fees, icon("stats", CURRENT.muted, 16), "Αμοιβές")
+        self.mydata = MydataTab(self.conn, afm, self)
+        tabs.addTab(self.mydata, icon("etimologio", CURRENT.muted, 16), "myDATA")
         if b["lookup_status"] == "ok":
             # Τα στοιχεία του πελάτη είναι ήδη πλήρη· αυτό που θα κοιτάξει πρώτα ο λογιστής είναι τι νέο τον αφορά,
             # όχι το προφίλ που δεν έχει αλλάξει.
@@ -104,6 +111,14 @@ class ClientDetailDialog(QDialog):
         self.f_vat.addItem("Υπόχρεος ΦΠΑ", "1")
         self.f_vat.addItem("Μη υπόχρεος / απαλλασσόμενος", "0")
         form.addRow("Καθεστώς ΦΠΑ", self.f_vat)
+        self.f_employer = QComboBox()
+        for label, value in (("— άγνωστο —", ""), ("Ναι — απασχολεί προσωπικό (ΑΠΔ, Ε4)", "1"), ("Όχι", "0")):
+            self.f_employer.addItem(label, value)
+        form.addRow("Εργοδότης", self.f_employer)
+        self.f_intrastat = QComboBox()
+        for label, value in (("— άγνωστο —", ""), ("Ναι — υποβάλλει Intrastat", "1"), ("Όχι", "0")):
+            self.f_intrastat.addItem(label, value)
+        form.addRow("Intrastat", self.f_intrastat)
         self.f_status = QLineEdit()
         form.addRow("Κατάσταση", self.f_status)
         self.f_kads = QTextEdit()
@@ -127,6 +142,9 @@ class ClientDetailDialog(QDialog):
             "books_category": self.f_books.currentData(), "status": self.f_status.text().strip(),
             "notes": self.f_notes.toPlainText().strip(),
         }, vat_subject={"1": True, "0": False}.get(vat, None))
+        flags = {"1": 1, "0": 0}
+        self.conn.execute("UPDATE businesses SET employer=?, intrastat=? WHERE afm=?",
+                          (flags.get(self.f_employer.currentData()), flags.get(self.f_intrastat.currentData()), self.afm))
         kads = []
         for line in self.f_kads.toPlainText().splitlines():
             line = line.strip()
@@ -217,8 +235,85 @@ class ClientDetailDialog(QDialog):
         box = QVBoxLayout(page)
         self.deadlines_list = QListWidget()
         self.deadlines_list.itemActivated.connect(self._open_deadline)
-        box.addWidget(self.deadlines_list)
+        box.addWidget(self.deadlines_list, 1)
+
+        # Κατάσταση υποβολών από την ΑΑΔΕ (EasyCheck): ΥΠΟΒΛΗΘΗΚΑΝ οι δηλώσεις; — με τους κωδικούς του πελάτη.
+        head = QHBoxLayout()
+        title = QLabel("Κατάσταση υποβολών (ΑΑΔΕ)")
+        title.setObjectName("h2")
+        head.addWidget(title)
+        head.addStretch()
+        self.check_year = QComboBox()
+        for y in range(date.today().year, date.today().year - 4, -1):
+            self.check_year.addItem(str(y), y)
+        self.check_year.currentIndexChanged.connect(lambda _i: self._reload_checks())
+        head.addWidget(self.check_year)
+        self.check_btn = QPushButton(icon("check", CURRENT.txt, 16), "  Έλεγχος υποβολών")
+        self.check_btn.setToolTip("Ρωτά την ΑΑΔΕ (με τους κωδικούς TAXISnet του πελάτη) αν έχουν υποβληθεί Φ2, ΦΜΥ, "
+                                  "δήλωση εισοδήματος, ΜΥΦ κ.λπ. — μόνο ανάγνωση, καμία υποβολή")
+        self.check_btn.clicked.connect(self._run_easycheck)
+        head.addWidget(self.check_btn)
+        box.addLayout(head)
+        self.checks_list = QListWidget()
+        box.addWidget(self.checks_list, 1)
         return page
+
+    def _reload_checks(self) -> None:
+        year = self.check_year.currentData() or date.today().year
+        rows = easycheck.results(self.conn, self.afm, year)
+        self.checks_list.clear()
+        if not rows:
+            item = QListWidgetItem("Δεν έχει γίνει έλεγχος για το " + str(year) + " — πατήστε «Έλεγχος υποβολών»."
+                                   if client_creds.get(self.conn, self.afm)
+                                   else "Χρειάζονται οι κωδικοί TAXISnet του πελάτη (καρτέλα «Κωδικοί TAXISnet»).")
+            item.setForeground(QColor(CURRENT.muted))
+            self.checks_list.addItem(item)
+            return
+        colours = {"submitted": CURRENT.ok, "pending": CURRENT.warn, "not_submitted": CURRENT.bad, "error": CURRENT.bad}
+        checked = max(r["checked_at"] for r in rows)
+        for r in rows:
+            o = easycheck.OBLIGATIONS.get(r["obligation"])
+            label = o.label if o else r["obligation"]
+            text = f"{easycheck.STATUS_LABEL.get(r['status'], r['status'])} — {label}" + (f" · {r['period']}" if r["period"] else "")
+            item = QListWidgetItem(dot_icon(colours.get(r["status"], CURRENT.muted)), text)
+            item.setToolTip((r["detail"] or "") + ("\n(η προθεσμία της περιόδου μπορεί να μην έχει λήξει ακόμη)"
+                                                   if r["status"] == "not_submitted" else ""))
+            self.checks_list.addItem(item)
+        foot = QListWidgetItem(f"Τελευταίος έλεγχος: {checked[:10]}")
+        foot.setForeground(QColor(CURRENT.muted))
+        self.checks_list.addItem(foot)
+
+    def _run_easycheck(self) -> None:
+        if not client_creds.get(self.conn, self.afm):
+            toast(self, "Χρειάζονται οι κωδικοί TAXISnet του πελάτη.", "warn")
+            return
+        year = self.check_year.currentData() or date.today().year
+
+        def work(_progress):
+            conn = dbmod.connect()  # δικό του thread — το self.conn δημιουργήθηκε στο UI thread
+            try:
+                return easycheck.check_client(conn, self.afm, year)
+            finally:
+                conn.close()
+
+        def done(result):
+            self.busy.stop()
+            if not result["ok"]:
+                toast(self, result["reason"], "danger")
+                return
+            missing = sum(1 for e in result["entries"] for p in e["periods"] if p["status"] == "not_submitted")
+            toast(self, f"Ο έλεγχος ολοκληρώθηκε — {missing} περίοδοι χωρίς υποβολή." if missing
+                  else "Ο έλεγχος ολοκληρώθηκε — όλες οι δηλώσεις έχουν υποβληθεί.", "warn" if missing else "ok")
+            self._reload_checks()
+            self.main.reload_clients()
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, f"Ο έλεγχος απέτυχε: {m}", "danger")
+
+        toast(self, f"Ξεκίνησε ο έλεγχος υποβολών {year} στην ΑΑΔΕ…", "info")
+        self.busy.start("Έλεγχος υποβολών στην ΑΑΔΕ…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _matches_tab(self) -> QWidget:
         page = QWidget()
@@ -351,8 +446,12 @@ class ClientDetailDialog(QDialog):
         self.f_books.setCurrentIndex(max(0, self.f_books.findData(b["books_category"] or "")))
         vat_value = "" if b["vat_subject"] is None else str(int(b["vat_subject"]))
         self.f_vat.setCurrentIndex(max(0, self.f_vat.findData(vat_value)))
+        flags = self.conn.execute("SELECT employer, intrastat FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        for box, value in ((self.f_employer, flags["employer"]), (self.f_intrastat, flags["intrastat"])):
+            box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
         self.f_status.setText(b["status"])
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
+        self._reload_checks()
         self.f_notes.setPlainText(b["notes"])
 
         cred = client_creds.status_map(self.conn).get(self.afm)

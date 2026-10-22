@@ -300,6 +300,94 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     )
     """,
+    # v11 — (α) τιμοκατάλογος υπηρεσιών του γραφείου και αμοιβές ανά πελάτη· (β) έλεγχος ολοκλήρωσης υποχρεώσεων
+    # απευθείας από την ΑΑΔΕ (EasyCheck: Φ2/Φ4/ΦΜΥ/Ε1/Ν… «έχει υποβληθεί;»)· (γ) «εργοδότης» / «Intrastat» από την
+    # εισαγωγή Excel (στήλη «Μισθοδοσία», κωδικοί Intrastat) — λύνουν τα «υπό προϋποθέσεις» των ΑΠΔ/Ε4/Intrastat·
+    # (δ) βαθμός σχετικότητας ML ανά άρθρο (paperless-ngx-style ταξινομητής, matching/ml.py).
+    """
+    CREATE TABLE office_services (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        name           TEXT NOT NULL,
+        default_amount REAL NOT NULL DEFAULT 0,             -- προ ΦΠΑ
+        period         TEXT NOT NULL DEFAULT 'monthly',     -- monthly | quarterly | yearly | once
+        active         INTEGER NOT NULL DEFAULT 1,
+        sort           INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE client_fees (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        afm         TEXT NOT NULL,
+        service_id  INTEGER,                                 -- από τον τιμοκατάλογο (προαιρετικό)
+        description TEXT NOT NULL DEFAULT '',
+        amount      REAL NOT NULL DEFAULT 0,                 -- προ ΦΠΑ
+        period      TEXT NOT NULL DEFAULT 'monthly',
+        start_date  TEXT NOT NULL DEFAULT '',
+        end_date    TEXT NOT NULL DEFAULT '',
+        notes       TEXT NOT NULL DEFAULT '',
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_client_fees_afm ON client_fees(afm);
+    CREATE TABLE obligation_checks (
+        afm         TEXT NOT NULL,
+        year        INTEGER NOT NULL,
+        obligation  TEXT NOT NULL,                           -- κλειδί του easycheck.OBLIGATIONS (Φ2, ΦΜΥ, E1…)
+        period      TEXT NOT NULL DEFAULT '',                -- «1ο Τρίμηνο 2026», «Μάρτιος 2026», «» για ετήσιες
+        period_end  TEXT NOT NULL DEFAULT '',                -- ISO, για ταξινόμηση/αντιστοίχιση με προθεσμίες
+        status      TEXT NOT NULL,                           -- submitted | pending | not_submitted | not_obligated
+        detail      TEXT NOT NULL DEFAULT '',
+        checked_at  TEXT NOT NULL,
+        PRIMARY KEY (afm, year, obligation, period)
+    );
+    -- ΠΡΟΣΟΧΗ: σχόλιο ΜΕΣΑ σε ALTER … ADD COLUMN γράφεται στο σχήμα του πίνακα και το χαλάει («incomplete input»).
+    -- employer: NULL = άγνωστο · 1/0 (στήλη «Μισθοδοσία» του Excel) · intrastat: NULL = άγνωστο · 1 = κωδικοί Intrastat
+    -- ml_score: P(σχετικό) από matching/ml.py — σειρά ανάλυσης LLM
+    -- myDATA ανά πελάτη (port του Timologio Downloader): κωδικοί API (enc:1:), παραστατικά (ένα ανά MARK), ποιοι μήνες
+    -- έχουν κατέβει (ώστε «κανένα ενδοκοινοτικό» να σημαίνει «όχι» και όχι «άγνωστο»).
+    CREATE TABLE mydata_credentials (
+        afm         TEXT PRIMARY KEY,
+        mydata_user TEXT NOT NULL DEFAULT '',
+        mydata_key  TEXT NOT NULL DEFAULT '',
+        check_status TEXT NOT NULL DEFAULT '',
+        updated_at  TEXT NOT NULL
+    );
+    CREATE TABLE mydata_docs (
+        afm           TEXT NOT NULL,
+        mark          TEXT NOT NULL,
+        direction     TEXT NOT NULL,
+        invoice_type  TEXT NOT NULL DEFAULT '',
+        series        TEXT NOT NULL DEFAULT '',
+        aa            TEXT NOT NULL DEFAULT '',
+        issue_date    TEXT NOT NULL DEFAULT '',
+        issuer_vat    TEXT NOT NULL DEFAULT '',
+        issuer_name   TEXT NOT NULL DEFAULT '',
+        issuer_country TEXT NOT NULL DEFAULT '',
+        counter_vat   TEXT NOT NULL DEFAULT '',
+        counter_name  TEXT NOT NULL DEFAULT '',
+        counter_country TEXT NOT NULL DEFAULT '',
+        net           REAL NOT NULL DEFAULT 0,
+        vat           REAL NOT NULL DEFAULT 0,
+        total         REAL NOT NULL DEFAULT 0,
+        withheld      REAL NOT NULL DEFAULT 0,
+        withheld_json TEXT NOT NULL DEFAULT '{}',
+        cancelled     INTEGER NOT NULL DEFAULT 0,
+        url           TEXT NOT NULL DEFAULT '',
+        provider      TEXT NOT NULL DEFAULT '',
+        pdf_path      TEXT NOT NULL DEFAULT '',
+        pdf_status    TEXT NOT NULL DEFAULT '',
+        fetched_at    TEXT NOT NULL,
+        PRIMARY KEY (afm, mark)
+    );
+    CREATE INDEX idx_mydata_docs_month ON mydata_docs(afm, issue_date);
+    CREATE TABLE mydata_sync (
+        afm       TEXT NOT NULL,
+        ym        TEXT NOT NULL,
+        synced_at TEXT NOT NULL,
+        n_docs    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (afm, ym)
+    );
+    ALTER TABLE businesses ADD COLUMN employer INTEGER;
+    ALTER TABLE businesses ADD COLUMN intrastat INTEGER;
+    ALTER TABLE articles ADD COLUMN ml_score REAL
+    """,
 ]
 
 

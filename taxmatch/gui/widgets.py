@@ -323,6 +323,12 @@ class GrDateEdit(QDateEdit):
             self.setDate(parsed)
 
 
+#: Ρίζα των αποθηκευμένων πλατών/σειράς στηλών. «header2» (2026-10-22): μέχρι τότε τα GUI tests έγραφαν στο ΙΔΙΟ
+#: μητρώο με την πραγματική εγκατάσταση, άρα τα αποθηκευμένα πλάτη μπορεί να ήταν των tests — όλοι ξεκινούν μία φορά
+#: από τα προεπιλεγμένα πλάτη.
+_HEADER_PREFS = "header2"
+
+
 def persist_header(table: QTableWidget, prefs: QSettings, key: str):
     """Κάνει τις στήλες μετακινήσιμες και θυμάται πλάτη, σειρά και ταξινόμηση.
 
@@ -336,7 +342,7 @@ def persist_header(table: QTableWidget, prefs: QSettings, key: str):
     header = table.horizontalHeader()
     header.setSectionsMovable(True)
     header.setFirstSectionMovable(False)  # το checkbox μένει πρώτο
-    setting = f"header/{key}/{table.columnCount()}"
+    setting = f"{_HEADER_PREFS}/{key}/{table.columnCount()}"
 
     state = prefs.value(setting)
     table._sort_chosen = bool(state) and header.restoreState(state)  # type: ignore[attr-defined]
@@ -392,7 +398,7 @@ class _FillColumn(QObject):
         self._column = column
         self._prefs = prefs
         self._save_state = save_state
-        self._setting = f"header/{key}/{table.columnCount()}/manual"
+        self._setting = f"{_HEADER_PREFS}/{key}/{table.columnCount()}/manual"
         self._manual = bool(prefs.value(self._setting, False, type=bool))
         self._guard = False
 

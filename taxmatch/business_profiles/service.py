@@ -138,8 +138,10 @@ def _is_better_name(current: str, new: str) -> bool:
 
 def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]:
     """Αποθηκεύει τις γραμμές του import. Υπάρχοντες πελάτες δεν αντικαθίστανται (συμπληρώνεται μόνο κενή επωνυμία)·
-    οι κωδικοί TAXISnet όμως ΕΝΗΜΕΡΩΝΟΝΤΑΙ και σε υπάρχοντες (η μαζική ρύθμιση κωδικών είναι βασική χρήση)."""
-    added = updated = creds = 0
+    οι κωδικοί TAXISnet (και Γ.Ε.ΜΗ.) όμως ΕΝΗΜΕΡΩΝΟΝΤΑΙ και σε υπάρχοντες (η μαζική ρύθμιση κωδικών είναι βασική χρήση)."""
+    from ..aml import gemi_browser              # τοπικά: το aml/ εξαρτάται ήδη από το business_profiles, όχι το αντίστροφο
+    from ..mydata import credentials as mydata_creds
+    added = updated = creds = gemi = mydata = 0
     for r in res.rows:
         if add(conn, r.afm, r.name, source="excel", kads=r.kads):
             added += 1
@@ -150,8 +152,16 @@ def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]
                 updated += 1
         if r.has_credentials and credentials.set_(conn, r.afm, r.taxis_user, r.taxis_pass):
             creds += 1
+        if r.has_gemi and gemi_browser.set_credentials(conn, r.afm, r.gemi_user, r.gemi_pass):
+            gemi += 1
+        if r.has_mydata and mydata_creds.set_(conn, r.afm, r.mydata_user, r.mydata_key):
+            mydata += 1
+        if r.employer is not None:
+            conn.execute("UPDATE businesses SET employer=? WHERE afm=?", (int(r.employer), r.afm))
+        if r.intrastat:
+            conn.execute("UPDATE businesses SET intrastat=1 WHERE afm=?", (r.afm,))
     return {"added": added, "updated": updated, "invalid": len(res.invalid), "duplicates": res.duplicates,
-            "credentials": creds}
+            "credentials": creds, "gemi": gemi, "mydata": mydata}
 
 
 # ------------------------------------------------------------------ lookups
@@ -176,6 +186,46 @@ def _aade_status_label(a: dict[str, Any]) -> str:
     if state == "none":
         return "ΙΔΙΩΤΗΣ (χωρίς επιχείρηση)"
     return "ΕΝΕΡΓΗ"
+
+
+#: Παράλληλες ανακτήσεις. Κάθε πελάτης έχει δικό του login TAXISnet (άλλοι κωδικοί), άρα δεν μοιράζονται τίποτα·
+#: 6 ταυτόχρονες συνδέσεις είναι συντηρητικό για την ΑΑΔΕ και κόβουν τον χρόνο ~5x για 100+ πελάτες.
+LOOKUP_WORKERS = 6
+
+
+def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str, Any]], None]] = None,
+                workers: int = LOOKUP_WORKERS, fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> int:
+    """Ανάκτηση για πολλούς πελάτες ΠΑΡΑΛΛΗΛΑ. Κάθε thread ανοίγει ΔΙΚΗ του σύνδεση βάσης (το sqlite3 δεν επιτρέπει
+    κοινή χρήση ανάμεσα σε threads· WAL + busy_timeout σειριοποιούν τις λίγες γραφές). `on_each(afm, done, result)`
+    καλείται από το thread του worker μετά από κάθε πελάτη. Επιστρέφει πόσοι ολοκληρώθηκαν."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    fetch = fetch or lookup_and_store
+    lock = threading.Lock()
+    done = 0
+
+    def one(afm: str) -> None:
+        nonlocal done
+        conn = db.connect()                               # ανά πελάτη: ένα sqlite3 object δεν περνά σε άλλο thread
+        try:
+            result = fetch(conn, afm)
+        except KeyError:                                  # σβήστηκε στο μεταξύ
+            result = {"status": "missing", "errors": [], "sources": [], "issues": []}
+        except Exception as exc:                          # ένας πελάτης δεν ρίχνει όλο το batch
+            log.exception("lookup απέτυχε για %s", afm)
+            result = {"status": "failed", "errors": [str(exc)[:200]], "sources": [], "issues": []}
+        finally:
+            conn.close()
+        with lock:
+            done += 1
+            n = done
+        if on_each:
+            on_each(afm, n, result)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(afms) or 1)), thread_name_prefix="lookup") as pool:
+        list(pool.map(one, afms))
+    return done
 
 
 def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[requests.Session] = None,
