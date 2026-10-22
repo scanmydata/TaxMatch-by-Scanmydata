@@ -7,9 +7,10 @@
 
 Το ταίριασμα επικεφαλίδων είναι whole-string (ποτέ substring): μια στήλη «Κλειδί myDATA» δεν πρέπει ποτέ να
 διαβαστεί ως κωδικός TAXISnet. Διαβάζονται ΜΟΝΟ οι κωδικοί TAXISnet, Γ.Ε.ΜΗ. (σύνδεση στο businessportal για τη
-Δέουσα επιμέλεια) και myDATA REST API (όνομα χρήστη + κλειδί «Api myData», όπως στο Timologio Downloader — ΠΟΤΕ το
-«Συνθηματικό myData», που είναι ο κωδικός της ιστοσελίδας, ούτε το κλειδί του e-timologio, άλλο προϊόν)· όσοι άλλων
-υπηρεσιών (ΕΦΚΑ, ΙΚΑ, ΟΑΕΔ, Κτηματολόγιο…) δεν διαβάζονται ποτέ.
+Δέουσα επιμέλεια), myDATA REST API (όνομα χρήστη + κλειδί «Api myData», όπως στο Timologio Downloader — ΠΟΤΕ το
+«Συνθηματικό myData», που είναι ο κωδικός της ιστοσελίδας, ούτε το κλειδί του e-timologio, άλλο προϊόν) και — ρητό
+αίτημα χρήστη 2026-10-22, για τον έλεγχο ΑΠΔ — κωδικοί **ΙΚΑ εργοδότη** + **ΑΜΕ**· όσοι άλλων υπηρεσιών (ΙΚΑ
+ασφαλισμένου, ΣΕΠΕ, ΟΑΕΔ, Κτηματολόγιο…) δεν διαβάζονται ποτέ.
 """
 from __future__ import annotations
 
@@ -52,6 +53,22 @@ FIELD_ALIASES: dict[str, set[str]] = {
     "mydata_key": {"api mydata", "api my data", "ocp apim subscription key", "subscription key mydata",
                    "κλειδι api mydata"},
     "intrastat_user": {"email intrastat", "ονομα χρηστη intrastat", "χρηστης intrastat"},
+    # Κωδικοί ΙΚΑ ΕΡΓΟΔΟΤΗ (όχι ασφαλισμένου): «Όνομα χρήστη/Συνθηματικό εργοδότη Ι.Κ.Α.» της εξαγωγής «Κωδικοί Υπόχρεων»
+    # του TaxSystem (επαληθεύτηκε σε πραγματικό αρχείο 2026-10-22, μόνο οι επικεφαλίδες)· ίδια με το ScanMyData Tax
+    # Center (`ColumnAliases.kt`). ΑΜΕ: δεν υπάρχει σε εκείνο το αρχείο — δεκτός αν κάποιο τον έχει.
+    "ika_user": {"ονομα χρηστη εργοδοτη ι κ α", "ονομα χρηστη εργοδοτη ικα", "χρηστης εργοδοτη ικα",
+                 "ονομα χρηστη ικα εργοδοτη", "ονομα χρηστη ι κ α εργοδοτη", "ika employer user"},
+    "ika_pass": {"συνθηματικο εργοδοτη ι κ α", "συνθηματικο εργοδοτη ικα", "κωδικος εργοδοτη ικα",
+                 "συνθηματικο χρηστη εργοδοτη ι κ α", "συνθηματικο ικα εργοδοτη", "ika employer password"},
+    "ame": {"αμε", "α μ ε", "αριθμος μητρωου εργοδοτη", "αρ μητρωου εργοδοτη", "αμ εργοδοτη", "αμε εργοδοτη",
+            "α μ εργοδοτη"},
+    # ΑΜΚΑ (ΚΕΑΟ / τρέχουσες εισφορές e-ΕΦΚΑ φυσικών προσώπων — Tax Center ColumnAliases)
+    "amka": {"αμκα", "α μ κ α", "amka"},
+    # Μέλη εταιρειών (members.py): στη γραμμή του μέλους ο ΑΦΜ της εταιρείας του, ή στη γραμμή της εταιρείας οι ΑΦΜ
+    # των μελών (λίστα). ΔΕΝ έχει επαληθευτεί με πραγματικό αρχείο — αν ένα πρόγραμμα το γράφει αλλιώς, alias εδώ.
+    "member_of": {"αφμ εταιρειας", "εταιρεια αφμ", "αφμ νομικου προσωπου", "μελος της εταιρειας", "μελος εταιρειας",
+                  "αφμ εταιρειας μελους"},
+    "member_afms": {"μελη", "αφμ μελων", "εταιροι", "εταιροι αφμ", "μετοχοι", "μελη αφμ", "διαχειριστες"},
 }
 #: Γενικές στήλες: δεκτές ΜΟΝΟ σε απλό αρχείο χωρίς ρητές στήλες TAXISnet (ώστε να δουλεύει το πρότυπό μας
 #: «ΑΦΜ | Επωνυμία | Όνομα χρήστη | Κωδικός»), όχι μέσα σε πλατύ πίνακα με δεκάδες κωδικούς διαφορετικών υπηρεσιών.
@@ -62,6 +79,7 @@ SIMPLE_SHEET_MAX_COLS = 8
 BLOCK = re.compile(r"^(\d{3,6})\s+(.+?)\s+(\d{9})$")
 _TAXIS_LABELS = ("taxis net", "taxisnet", "taxis")
 _GEMI_LABELS = ("γ ε μ η", "γ ε μη", "γεμη", "gemi")
+_IKA_LABELS = ("ι κ α", "ικα", "εφκα")
 _BLOCK_SPAN = 40                    # μέχρι το επόμενο μπλοκ· στο Hyper/Extra ένα μπλοκ φτάνει τις 15 γραμμές
 _HEADER_SCAN = 15
 
@@ -91,6 +109,12 @@ class ImportRow:
     gemi_pass: str = ""
     mydata_user: str = ""
     mydata_key: str = ""
+    ika_user: str = ""
+    ika_pass: str = ""
+    ame: str = ""
+    amka: str = ""
+    member_of: list[str] = field(default_factory=list)
+    member_afms: list[str] = field(default_factory=list)
     employer: Optional[bool] = None                  # None = άγνωστο (δεν υπάρχει στήλη / κενό κελί)
     intrastat: Optional[bool] = None                 # True μόνο όταν υπάρχουν στοιχεία Intrastat· ποτέ False από απουσία
 
@@ -105,6 +129,10 @@ class ImportRow:
     @property
     def has_mydata(self) -> bool:
         return bool(self.mydata_user and self.mydata_key)
+
+    @property
+    def has_ika(self) -> bool:
+        return bool(self.ika_user and self.ika_pass)
 
 
 @dataclass
@@ -126,6 +154,10 @@ class ImportResult:
     @property
     def mydata_count(self) -> int:
         return sum(1 for r in self.rows if r.has_mydata)
+
+    @property
+    def ika_count(self) -> int:
+        return sum(1 for r in self.rows if r.has_ika or r.ame)
 
 
 def full_name(surname: str, first_name: str) -> str:
@@ -166,6 +198,15 @@ def _mydata_key(row: tuple, mapping: dict[str, int], heads: list[str]) -> str:
         if h in _SECONDARY_KEY_HEADERS and j < len(row) and _MYDATA_KEY_SHAPE.match(_cell(row[j])):
             return _cell(row[j])
     return ""
+
+
+def _afm_list(v: object) -> list[str]:
+    out = []
+    for part in re.split(r"[,;/\n\s]+", str(v or "")):
+        afm = normalize_afm(part)
+        if afm and afm not in out:
+            out.append(afm)
+    return out
 
 
 def _split_kads(v: object) -> list[str]:
@@ -215,7 +256,7 @@ def _parse_blocks(rows: list[tuple]) -> Optional[ImportResult]:
             continue
         _code, name, raw_afm = m.groups()
         afm = normalize_afm(raw_afm)
-        user = pwd = g_user = g_pwd = m_user = m_key = ""
+        user = pwd = g_user = g_pwd = m_user = m_key = i_user = i_pwd = ame = ""
         intrastat: Optional[bool] = None
         j = i + 1
         while j < min(i + _BLOCK_SPAN, len(rows)):
@@ -230,6 +271,15 @@ def _parse_blocks(rows: list[tuple]) -> Optional[ImportResult]:
                 vals = [_cell(c) for c in rows[j] if _cell(c)]
                 if len(vals) >= 3:
                     m_user, m_key = vals[1], vals[2]          # «Ηλεκτρονικά Βιβλία Α.Α.Δ.Ε. (myDATA)»: χρήστης, κλειδί API
+            elif "εργοδοτ" in norm_header(texts[j]) and any(lbl in norm_header(texts[j]) for lbl in _IKA_LABELS) \
+                    and "ασφαλισμεν" not in low:
+                vals = [_cell(c) for c in rows[j] if _cell(c)]
+                if len(vals) >= 3:
+                    i_user, i_pwd = vals[1], vals[2]              # «Ι.Κ.Α. Εργοδότη»: χρήστης, συνθηματικό
+            elif re.match(r"^(α μ ε|αμε)( |$)", norm_header(texts[j])):
+                vals = [_cell(c) for c in rows[j] if _cell(c)]
+                if len(vals) >= 2 and re.fullmatch(r"\d{6,10}", vals[1]):
+                    ame = vals[1]
             elif "intrastat" in low and len([c for c in rows[j] if _cell(c)]) >= 2:
                 intrastat = True                         # γραμμή «Δηλώσεων Intrastat» με στοιχεία σύνδεσης
             elif any(lbl in norm_header(texts[j]) for lbl in _GEMI_LABELS):
@@ -252,11 +302,15 @@ def _parse_blocks(rows: list[tuple]) -> Optional[ImportResult]:
                 first.gemi_user, first.gemi_pass = g_user, g_pwd
             if not first.has_mydata and m_user and m_key:
                 first.mydata_user, first.mydata_key = m_user, m_key
+            if not first.has_ika and i_user and i_pwd:
+                first.ika_user, first.ika_pass = i_user, i_pwd
+            first.ame = first.ame or ame
             continue
         seen.add(afm)
         res.rows.append(ImportRow(afm=afm, name=" ".join(name.split()), checksum_ok=is_valid_afm(afm),
                                   taxis_user=user, taxis_pass=pwd, gemi_user=g_user, gemi_pass=g_pwd,
-                                  intrastat=intrastat, mydata_user=m_user, mydata_key=m_key))
+                                  intrastat=intrastat, mydata_user=m_user, mydata_key=m_key,
+                                  ika_user=i_user, ika_pass=i_pwd, ame=ame))
     return res
 
 
@@ -300,7 +354,10 @@ def parse_rows(table: Iterable[tuple]) -> ImportResult:
                                      employer=_flag(row[mapping["employer"]]) if mapping.get("employer") is not None
                                      and mapping["employer"] < len(row) else None,
                                      intrastat=True if get(row, "intrastat_user") else None,
-                                     mydata_user=get(row, "mydata_user"), mydata_key=_mydata_key(row, mapping, heads)))
+                                     mydata_user=get(row, "mydata_user"), mydata_key=_mydata_key(row, mapping, heads),
+                                     ika_user=get(row, "ika_user"), ika_pass=get(row, "ika_pass"), ame=get(row, "ame"),
+                                     amka=get(row, "amka"), member_of=_afm_list(get(row, "member_of")),
+                                     member_afms=_afm_list(get(row, "member_afms"))))
     _finish(result)
     return result
 
@@ -321,6 +378,12 @@ def _finish(result: ImportResult) -> None:
         for r in result.rows:
             if r.afm in half:
                 r.mydata_user = r.mydata_key = ""
+    half = [r.afm for r in result.rows if bool(r.ika_user) != bool(r.ika_pass)]
+    if half:
+        result.warnings.append(f"{len(half)} πελάτες έχουν μόνο χρήστη ή μόνο κωδικό ΙΚΑ εργοδότη — αγνοούνται.")
+        for r in result.rows:
+            if r.afm in half:
+                r.ika_user = r.ika_pass = ""
     half = [r.afm for r in result.rows if bool(r.gemi_user) != bool(r.gemi_pass)]
     if half:
         result.warnings.append(f"{len(half)} πελάτες έχουν μόνο χρήστη ή μόνο κωδικό Γ.Ε.ΜΗ. — οι κωδικοί τους αγνοούνται.")

@@ -648,16 +648,19 @@ def _write_clients_xlsx(path):
                                                                           ("Μόνο εισαγωγή", False, True), ("Άκυρο", False, False)])
 def test_excel_import_popup_asks_whether_to_update_details_now(window, conn, monkeypatch, tmp_path,
                                                                button_text, expect_lookup, expect_import):
-    """Μαζική εισαγωγή Excel -> ΕΝΑ popup με τρεις επιλογές: «Εισαγωγή & ενημέρωση στοιχείων» / «Μόνο εισαγωγή» /
-    «Άκυρο». Η ανάκτηση (ΑΑΔΕ/ΓΕΜΗ/VIES) ξεκινά ΜΟΝΟ στην πρώτη."""
-    from PySide6.QtWidgets import QMessageBox
+    """Μαζική εισαγωγή Excel -> ΕΝΑ παράθυρο προεπισκόπησης με τρεις επιλογές: «Εισαγωγή & ενημέρωση στοιχείων» /
+    «Μόνο εισαγωγή» / «Άκυρο». Η ανάκτηση (ΑΑΔΕ/ΓΕΜΗ/VIES) ξεκινά ΜΟΝΟ στην πρώτη."""
+    from PySide6.QtWidgets import QPushButton
+    from taxmatch.gui import import_dialog
     xlsx = tmp_path / "clients.xlsx"
     _write_clients_xlsx(xlsx)
     looked_up = []
     monkeypatch.setattr(window, "_start_lookup", lambda afms: looked_up.append(list(afms)))
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
-    monkeypatch.setattr(QMessageBox, "clickedButton",
-                        lambda self: next(b for b in self.buttons() if b.text() == button_text))
+
+    def fake_exec(dlg):
+        next(b for b in dlg.findChildren(QPushButton) if b.text() == button_text).click()
+        return dlg.result()
+    monkeypatch.setattr(import_dialog.ImportPreviewDialog, "exec", fake_exec)
 
     window._import_excel_from_path(xlsx)
 
@@ -665,6 +668,25 @@ def test_excel_import_popup_asks_whether_to_update_details_now(window, conn, mon
     if expect_import:
         assert service.get(conn, "094259216")["name"] == "ΔΟΚΙΜΑΣΤΙΚΟΣ ΓΙΩΡΓΟΣ"
     assert looked_up == ([["094259216"]] if expect_lookup else [])
+
+
+def test_excel_import_preview_tells_which_clients_already_exist(window, conn, monkeypatch, tmp_path):
+    """Όπως το Timologio Downloader: ο χρήστης βλέπει ΠΡΙΝ την εισαγωγή ότι ο πελάτης υπάρχει ήδη και τι θα αλλάξει."""
+    from taxmatch.gui import import_dialog
+    service.add(conn, "094259216", "ΔΟΚΙΜΑΣΤΙΚΟΣ")
+    xlsx = tmp_path / "clients.xlsx"
+    _write_clients_xlsx(xlsx)
+    seen = {}
+
+    def fake_exec(dlg):
+        seen["rows"] = [[dlg.table.item(r, c).text() for c in range(dlg.table.columnCount())]
+                        for r in range(dlg.table.rowCount())]
+        return 0
+    monkeypatch.setattr(import_dialog.ImportPreviewDialog, "exec", fake_exec)
+    window._import_excel_from_path(xlsx)
+    (row,) = seen["rows"]
+    assert row[3] == "Υπάρχει ήδη — θα ενημερωθεί" and "επωνυμία" in row[4]
+    assert service.get(conn, "094259216")["name"] == "ΔΟΚΙΜΑΣΤΙΚΟΣ"          # ακυρώθηκε: τίποτα δεν γράφτηκε
 
 
 def test_run_check_announces_start_and_result_with_flash_messages(window, conn, monkeypatch):
@@ -1005,6 +1027,39 @@ def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
     dlg.deleteLater()
 
 
+def test_mydata_tab_whole_year_income_expense_and_green_when_submitted(window, conn):
+    """«Όλη η χρήση» στο φίλτρο, στήλη Έσοδο (πράσινο)/Έξοδο (κόκκινο), και ο τίτλος της υποχρέωσης γίνεται πράσινος ✓
+    όταν ολοκληρωθεί (ρητά αιτήματα χρήστη 2026-10-22)."""
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.gui.theme import CURRENT
+    from taxmatch import deadlines
+    service.add(conn, AFM, "ΑΛΦΑ")
+    dlg = ClientDetailDialog(window, AFM)
+    tab = dlg.mydata
+    ym = tab.month.currentData()
+    other = f"{ym[:4]}-01" if ym[5:7] != "01" else f"{ym[:4]}-02"
+    for mark, direction, typ, day in (("1", "incoming", "2.1", f"{ym}-05"), ("2", "outgoing", "2.1", f"{other}-10")):
+        conn.execute("INSERT INTO mydata_docs(afm, mark, direction, invoice_type, issue_date, issuer_vat, net, total, "
+                     "withheld, withheld_json, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (AFM, mark, direction, typ, day, "111111111", 100, 100, 20 if mark == "1" else 0,
+                      '{"3": 20}' if mark == "1" else "{}", "x"))
+    for m in {ym, other}:
+        conn.execute("INSERT INTO mydata_sync(afm, ym, synced_at, n_docs) VALUES (?,?,?,1)", (AFM, m, "x"))
+    tab.reload()
+    assert tab.table.rowCount() == 1 and tab.table.item(0, 2).text() == "Έξοδο"
+    assert tab.table.item(0, 2).foreground().color().name().lower() == CURRENT.bad.lower()
+    assert f"color:{CURRENT.warn}'>Παρακρατούμενοι φόροι" in tab.summary.text()
+    deadlines.mark_done(conn, AFM, "withholding_fees", ym, True)
+    tab.reload()
+    assert f"color:{CURRENT.ok}'>✓ Παρακρατούμενοι φόροι" in tab.summary.text()
+    tab.month.setCurrentIndex(0)                                     # «Όλη η χρήση»
+    assert tab.month.currentText().startswith("Όλη η χρήση") and tab.table.rowCount() == 2
+    assert {tab.table.item(r, 2).text() for r in range(2)} == {"Έσοδο", "Έξοδο"}
+    assert "Έσοδα χρήσης" in tab.summary.text() and tab.fetch_btn.text().strip() == "Λήψη χρήσης"
+    assert tab.year_btn.isHidden()
+    dlg.deleteLater()
+
+
 def test_job_queue_runs_in_order_cancels_after_current_and_moves_toast_to_main(window, conn):
     """Μακριές εργασίες: η δεύτερη περιμένει την πρώτη· «Διακοπή μετά τον τρέχοντα πελάτη» σταματά ανάμεσα στους
     πελάτες· το μήνυμα προόδου μιας εργασίας από διάλογο περνά στο κύριο παράθυρο όταν ο διάλογος κλείσει."""
@@ -1040,3 +1095,57 @@ def test_job_queue_runs_in_order_cancels_after_current_and_moves_toast_to_main(w
     assert len(processed) <= 2                               # δεν έτρεξαν και οι 5
     assert any("Διακόπηκε" in t for t in _toast_texts(window))
     assert job2.toast is not None
+
+
+def test_client_debts_tab_lists_debts_and_sends_email_via_dialog(window, conn, monkeypatch, tmp_path):
+    """Καρτέλα πελάτη → «Οφειλές & email»: οφειλές με RF/PDF, email με προεπισκόπηση (ρητό αίτημα χρήστη 2026-10-22)."""
+    from taxmatch import debts, mailer, settings_store
+    from taxmatch.gui import email_dialog
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΑΛΦΑ")
+    conn.execute("UPDATE businesses SET email='client@example.test' WHERE afm=?", (AFM,))
+    settings_store.set_value(conn, "smtp_host", "smtp.example.test")
+    settings_store.set_value(conn, "smtp_from", "office@example.test")
+    debts.store(conn, AFM, {"overdue": 200.0, "non_overdue": 50.0, "debts": [
+        {"kind": "debt", "ref": "r1", "title": "ΕΝΦΙΑ 2026", "overdue": 200.0, "non_overdue": 50.0, "total": 250.0,
+         "code": "RF12", "pdf_path": "", "details": {"fields": {"Είδος φόρου": "ΕΝΦΙΑ 2026"}}}]})
+    dlg = ClientDetailDialog(window, AFM)
+    tab = dlg.debts_tab
+    assert tab.table.rowCount() == 1 and tab.table.item(0, 7).text() == "RF12" and "200,00 €" in tab.info.text()
+    assert tab.table.item(0, 0).text() == "ΑΑΔΕ"
+    assert dlg.f_email.text() == "client@example.test"
+    sent = []
+    monkeypatch.setattr(mailer, "_smtp_send", lambda c, m: sent.append(m))
+
+    def fake_exec(d):
+        assert d.to.text() == "client@example.test" and "RF12" in d.body.toPlainText()
+        d._send()                                                   # noqa: SLF001
+        assert _pump_until(lambda: bool(sent))
+        return 1
+    monkeypatch.setattr(email_dialog.EmailDialog, "exec", fake_exec)
+    tab._email("debts")                                             # noqa: SLF001
+    assert _pump_until(lambda: tab.history.count() and tab.history.item(0).text().startswith("✓"))
+    dlg.deleteLater()
+
+
+def test_client_card_has_requests_and_members_tabs(window, conn):
+    """Αιτήματα ΑΑΔΕ (με αθέατες αλλαγές) και Μέλη εταιρείας (με ποιο μέλος είναι πελάτης) στην καρτέλα πελάτη."""
+    from taxmatch import db as dbm, members
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ' WHERE afm=?", (AFM,))
+    conn.execute("INSERT INTO aade_requests(afm, id, case_no, status, process, answer, change, seen, fetched_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (AFM, "555", "Α-1", "Απαντημένο", "Διόρθωση Μητρώου", "Έγινε.", "answered",
+                                                0, dbm.utcnow()))
+    members.store(conn, AFM, [{"afm": "123456783", "name": "ΠΑΠΑΣ", "role": "ΔΙΑΧΕΙΡΙΣΤΗΣ"}], "aade")
+    dlg = ClientDetailDialog(window, AFM)
+    assert dlg.requests_tab.table.rowCount() == 1 and dlg.requests_tab.table.item(0, 0).text() == "●"
+    dlg.requests_tab.table.selectRow(0)
+    assert "Έγινε." in dlg.requests_tab.detail.text()
+    assert conn.execute("SELECT seen FROM aade_requests WHERE id='555'").fetchone()["seen"] == 1
+    mt = dlg.members_tab
+    assert mt.table.rowCount() == 1 and mt.table.item(0, 6).text() == "όχι" and "Μέλη/εκπρόσωποι" in mt.hint.text()
+    mt.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    mt._as_clients()                                                # noqa: SLF001
+    assert service.get(conn, "123456783") is not None and mt.table.item(0, 6).text() == "ναι, χωρίς κωδικούς"
+    dlg.deleteLater()

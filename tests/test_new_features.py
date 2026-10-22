@@ -378,13 +378,14 @@ def test_vies_is_26th_moved_to_next_business_day():
 
 def test_vat_rules_follow_client_period_type():
     def ids(biz):
-        return {o.rule_id for o in obligations.occurrences(date(2026, 10, 1), date(2026, 10, 31), biz) if o.rule_id.startswith("vat")}
+        return {o.rule_id for o in obligations.occurrences(date(2026, 10, 1), date(2026, 10, 31), biz)
+                if o.rule_id in ("vat_monthly", "vat_quarterly")}
     assert ids({"vat_subject": 1, "vat_period_type": "monthly"}) == {"vat_monthly"}
     assert ids({"vat_subject": 1, "vat_period_type": "quarterly"}) == {"vat_quarterly"}
     assert ids({"vat_subject": 0, "vat_period_type": "monthly"}) == set()      # μη υπόχρεος
     assert ids(None) == {"vat_monthly", "vat_quarterly"}                        # γενικό
     unknown = [o for o in obligations.occurrences(date(2026, 10, 1), date(2026, 10, 31), {"vat_subject": None, "vat_period_type": ""})
-               if o.rule_id.startswith("vat")]
+               if o.rule_id in ("vat_monthly", "vat_quarterly")]
     assert len(unknown) == 2 and all(o.conditional for o in unknown)            # άγνωστο: και τα δύο, υπό προϋποθέσεις
 
 
@@ -457,7 +458,8 @@ def test_clients_for_event_rule_and_general_calendar(conn):
 
 # ---------------------------------------------------------------- Excel: κωδικοί Γ.Ε.ΜΗ. (2026-10-22)
 def test_wide_sheet_reads_gemi_credentials_but_no_other_service():
-    """Επικεφαλίδες όπως στην εξαγωγή «Κωδικοί Υπόχρεων» (TaxSystem): TAXISnet + Γ.Ε.ΜΗ. διαβάζονται, οι υπόλοιποι ποτέ."""
+    """Επικεφαλίδες όπως στην εξαγωγή «Κωδικοί Υπόχρεων» (TaxSystem): TAXISnet + Γ.Ε.ΜΗ. + ΙΚΑ ΕΡΓΟΔΟΤΗ (για τον
+    έλεγχο ΑΠΔ, ρητό αίτημα 2026-10-22) διαβάζονται· ο κωδικός ιστοσελίδας myDATA ποτέ."""
     head = ("Κωδικός", "Α.Φ.Μ.", "Επωνυμία/Επώνυμο", "Όνομα χρήστη TAXISNET", "Συνθηματικό TAXISNET",
             "Όνομα χρήστη (Εργοδότη) Ι.Κ.Α.", "Συνθηματικό (Εργοδότη) Ι.Κ.Α.", "Όνομα χρήστη Γ.Ε.Μ.Η.",
             "Συνθηματικό χρήστη Γ.Ε.Μ.Η.", "Όνομα χρήστη myData", "Συνθηματικό myData")
@@ -466,7 +468,8 @@ def test_wide_sheet_reads_gemi_credentials_but_no_other_service():
     a, b = res.rows
     assert (a.gemi_user, a.gemi_pass, a.has_gemi) == ("gu", "gp", True) and a.has_credentials
     assert not b.has_gemi and res.gemi_count == 1 and any("Γ.Ε.ΜΗ." in w for w in res.warnings)
-    assert "ika_SECRET" not in repr(res) and "md_SECRET" not in repr(res)
+    assert (a.ika_user, a.ika_pass, b.has_ika) == ("ika_u", "ika_SECRET", False) and res.ika_count == 1
+    assert "md_SECRET" not in repr(res)
 
 
 def test_block_format_reads_gemi_row():

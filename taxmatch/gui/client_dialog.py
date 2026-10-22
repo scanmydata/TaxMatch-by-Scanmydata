@@ -30,6 +30,7 @@ class ClientDialog(QDialog):
         super().__init__(parent)
         self._conn = conn
         self.result_afm = ""
+        self.existed = False              # ο ΑΦΜ υπήρχε ήδη (ενημερώθηκαν μόνο οι κωδικοί) — ο καλών το λέει στον χρήστη
         self.excel_path = ""  # ο καλών ελέγχει αυτό ΠΡΩΤΑ μετά το exec() — βλ. _pick_excel
         self._last_looked = ""
         self._vies_task = None
@@ -166,4 +167,5 @@ class ClientDialog(QDialog):
             self._say("Ο πελάτης υπάρχει ήδη.", bad=True)
             return
         self.result_afm = afm
+        self.existed = not created
         self.accept()

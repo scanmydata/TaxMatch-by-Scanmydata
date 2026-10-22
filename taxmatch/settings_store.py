@@ -55,6 +55,26 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     # Κεφαλίδα γραφείου στα έγγραφα (έως 4 γραμμές: επωνυμία, διεύθυνση, δραστηριότητα, ΑΦΜ/ΔΟΥ/τηλέφωνο)
     SettingDef("aml_office_info", "Στοιχεία γραφείου για τα έγγραφα"),
     SettingDef("aml_office_city", "Τόπος υπογραφής εγγράφων"),
+    # Email προς πελάτες (taxmatch/mailer.py) — SMTP του γραφείου· ο κωδικός κρυπτογραφημένος
+    SettingDef("smtp_host", "Διακομιστής SMTP"),
+    SettingDef("smtp_port", "Θύρα SMTP", default="587"),
+    SettingDef("smtp_security", "Ασφάλεια SMTP (starttls|ssl|none)", default="starttls"),
+    SettingDef("smtp_user", "Χρήστης SMTP"),
+    SettingDef("smtp_pass", "Κωδικός SMTP", secret=True, env="TAXMATCH_SMTP_PASS"),
+    SettingDef("smtp_from", "Αποστολέας (email)"),
+    SettingDef("email_bcc", "Κρυφή κοινοποίηση (Bcc) στο γραφείο"),
+    SettingDef("email_signature", "Υπογραφή email"),
+    # Αυτόματα email στον καθημερινό έλεγχο: οφειλές μόνο όταν αλλάξουν, νέα μόνο όσα δεν έχουν σταλεί
+    SettingDef("auto_email_debts", "Αυτόματο email οφειλών", default="0"),
+    SettingDef("auto_email_news", "Αυτόματο email νέων", default="0"),
+    SettingDef("auto_email_news_freq", "Συχνότητα email νέων (daily|weekly)", default="weekly"),
+    SettingDef("auto_email_weekday", "Ημέρα εβδομαδιαίου email (1=Δευτέρα)", default="1"),
+    SettingDef("auto_email_news_days", "Νέα των τελευταίων N ημερών", default="14"),
+    SettingDef("daily_debts", "Λήψη οφειλών ΑΑΔΕ στον καθημερινό έλεγχο", default="0"),
+    # Μέλη/εκπρόσωποι εταιρειών από το Μητρώο ΑΑΔΕ με την ανάκτηση στοιχείων (members.py) — επιλογή του χρήστη
+    SettingDef("fetch_members", "Άντληση μελών εταιρειών", default="0"),
+    # «Τα Αιτήματά μου» της ΑΑΔΕ στον καθημερινό έλεγχο (requests_aade.py) — ειδοποίηση για απαντήσεις/αλλαγές
+    SettingDef("daily_requests", "Έλεγχος αιτημάτων ΑΑΔΕ στον καθημερινό έλεγχο", default="0"),
 ]}
 
 

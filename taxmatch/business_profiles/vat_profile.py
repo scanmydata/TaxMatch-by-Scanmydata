@@ -6,7 +6,8 @@ Port της λογικής `_ar_detect_vat_profile_for_afm` + `_ar_books_categor
 """
 from __future__ import annotations
 
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Optional
 
 from ..textutil import strip_accents
 
@@ -57,6 +58,38 @@ def interpret_vat_profile(all_tags: dict) -> dict:
             period = "quarterly"
         elif "ΜΗΝΙΑ" in upper:
             period = "monthly"
+        elif letter == "Β" and b_monthly_by_law(all_tags.get("hmenarxhs")):
+            period = "monthly"
+        elif not letter and keeps_no_books(raw):
+            period = "quarterly"
         else:
             period = _BOOKS_TO_PERIOD.get(letter, "")
     return {"vat_subject": vat_subject, "books_category": letter, "books_category_raw": raw, "vat_period_type": period}
+
+
+def keeps_no_books(raw: Optional[str]) -> bool:
+    """Κατηγορία βιβλίων που ΔΕΝ είναι Β/Γ: μη εγκατεστημένοι στην Ελλάδα («ΜΗ ΕΓΚΑΤΕΣΤΗΜΕΝΟΙ ΤΗΣ ΕΕ», ζωντανά 2026-10-22
+    σε δύο κυπριακές LTD), «χωρίς βιβλία». Άρθρο 38 ΚΦΠΑ: όσοι δεν υποχρεούνται σε τήρηση βιβλίων υποβάλλουν ΤΡΙΜΗΝΙΑΙΑ."""
+    u = _up(raw)
+    return bool(u) and ("ΕΓΚΑΤΕΣΤΗΜ" in u or "ΧΩΡΙΣ ΒΙΒΛΙ" in u or "ΜΗ ΤΗΡ" in u or "ΑΝΕΥ ΒΙΒΛΙ" in u)
+
+
+#: Α.1049/2025 (ΦΕΚ Β' 1638/2025): απλογραφικά με έναρξη από 1.1.2024 υποβάλλουν ΜΗΝΙΑΙΑ δήλωση ΦΠΑ (έναρξη έως 31.3.2025:
+#: από 1.7.2025). Επιστροφή στο τρίμηνο με δήλωση επιλογής μόνο όταν συμπληρωθούν 24 μήνες από την έναρξη.
+B_MONTHLY_SINCE = date(2024, 1, 1)
+
+
+def parse_start(value: Any) -> Optional[date]:
+    """'22/11/2018' ή '2018-11-22' -> date."""
+    text = str(value or "").strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def b_monthly_by_law(start: Any) -> bool:
+    d = parse_start(start)
+    return d is not None and d >= B_MONTHLY_SINCE

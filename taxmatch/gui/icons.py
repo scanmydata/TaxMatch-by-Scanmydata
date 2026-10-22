@@ -198,6 +198,10 @@ _SVG: dict[str, str] = {
         '<polyline points="12 7 12 12 15.5 14"/>'
     ),
     # Καμπανάκι — ειδοποιήσεις.
+    "send": (                                         # φάκελος email (lucide «mail»)
+        '<rect x="3" y="5" width="18" height="14" rx="2"/>'
+        '<path d="m3 7 9 6 9-6"/>'
+    ),
     "bell": (
         '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/>'
         '<path d="M10.3 21a2 2 0 0 0 3.4 0"/>'

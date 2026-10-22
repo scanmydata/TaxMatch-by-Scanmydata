@@ -26,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urljoin
 
 from . import db
 from .business_profiles import credentials, lookup_aade
@@ -166,8 +166,9 @@ def income_submission(menu_text: str, o: Obligation, raw: str = "") -> tuple[boo
 
 # ------------------------------------------------------------------ μηχανή (με τη σύνδεση του lookup_aade)
 class _Ctx:
-    def __init__(self, http) -> None:
+    def __init__(self, http, afm: str = "") -> None:
         self.http = http
+        self.afm = afm                     # για την αποθήκευση PDF ταυτοτήτων οφειλής (κενό = χωρίς PDF)
 
     def get(self, url: str) -> str:
         return self.http.follow("GET", url)["text"]
@@ -299,9 +300,38 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> 
             debt = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
             if debt:
                 out["debt_id"] = debt.group(0).strip()
+            # Περισσότερες λεπτομέρειες χρεωστικής (ρητό αίτημα χρήστη 2026-10-22, όπως το Tax Center aade-vat-http.js)
+            dose = next((k for k in m if re.search(r"Ποσό δόσης", k)), "")
+            if dose:
+                out["installment"] = to_num(m[dose])
+                when = re.search(r"(\d{2}/\d{2}/\d{4})", dose)
+                if when:
+                    out["pay_by"] = when.group(1)
+            for key, pattern in (("doy", r"^ΔΟΥ$|Δ\.?Ο\.?Υ"), ("tax_kind", r"Είδος Φόρου"), ("issued_at", r"Ημ/νία Έκδοσης")):
+                value = _find(m, pattern)
+                if value:
+                    out[key] = value
+            if ctx.afm:
+                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, db_id)
+                out["pdf_checked"] = True              # δεν ξαναζητείται σε κάθε έλεγχο αν η σελίδα δεν έχει εκτύπωση
     except Exception as exc:                            # noqa: BLE001
         log.info("easycheck debtCode %s: %s", o.key, exc)
     return out
+
+
+def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str) -> str:
+    """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — κουμπί «Εκτύπωση» της σελίδας (`debts.print_form`, ίδιος
+    μηχανισμός με τις οφειλές του Tax Center). '' αν η σελίδα δεν έχει εκτύπωση ή δεν ήρθε PDF."""
+    from . import debts
+    if not ctx.afm or not hasattr(ctx.http, "follow"):
+        return ""
+    pf = debts.print_form(page)
+    if not pf:
+        return ""
+    res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
+    if not res.get("is_pdf"):
+        return ""
+    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
 
 
 def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optional[dict] = None
@@ -317,8 +347,9 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
     effective = (finals or mine or [None])[-1]           # τροποποιητική υπερισχύει της αρχικής (τελευταία οριστική)
     if o.key not in AMOUNT_KEYS or not effective or not effective["db_id"]:
         return submitted, {}
-    if known and known.get("registration_no") == effective["db_id"]:
-        return submitted, known
+    if known and known.get("registration_no") == effective["db_id"] and (
+            known.get("pdf_checked") or known.get("result") != "Χρεωστική" or not ctx.afm):
+        return submitted, known                         # χρεωστική χωρίς PDF ταυτότητας: ξαναδιαβάζεται μία φορά
     amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
     amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
     return submitted, amounts
@@ -390,7 +421,11 @@ def default_keys(business: dict[str, Any], withheld_keys: Optional[set[str]] = N
     state = business.get("activity_state") or ""
     if state != "none" and business.get("vat_subject") != 0:
         keys.append("Φ2")
-    if business.get("intrastat"):
+        # Φ4 (ανακεφαλαιωτικός VIES) για ΚΑΘΕ υπόχρεο ΦΠΑ — πριν μόνο με σημαία Intrastat από το Excel, οπότε ο έλεγχος
+        # «ενδοκοινοτικών» δεν γινόταν σχεδόν ποτέ (αναφορά χρήστη 2026-10-22). Όποιος δεν έχει, η ΑΑΔΕ απαντά «Δεν έχετε
+        # υποχρεώσεις υποβολής» → «δεν είναι υπόχρεος».
+        keys.append("Φ4")
+    elif business.get("intrastat"):
         keys.append("Φ4")
     if business.get("employer") != 0 and state != "none":
         keys.append("ΦΜΥ")                       # άγνωστο ή εργοδότης: ο έλεγχος το ξεκαθαρίζει («δεν είναι υπόχρεος»)
@@ -429,7 +464,7 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
     if not login.get("ok"):
         return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet."),
                 "entries": []}
-    ctx, cache, entries = _Ctx(login["http"]), {}, []
+    ctx, cache, entries = _Ctx(login["http"], afm), {}, []
     stored: dict[str, dict[str, dict]] = {}
     for r in conn.execute("SELECT obligation, period, amounts_json FROM obligation_checks WHERE afm=? AND year=? "
                           "AND status='submitted'", (afm, year)):

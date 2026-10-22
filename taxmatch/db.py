@@ -418,6 +418,129 @@ MIGRATIONS: list[str] = [
     ALTER TABLE obligation_checks ADD COLUMN period_type TEXT NOT NULL DEFAULT '';
     ALTER TABLE businesses ADD COLUMN vat_period_source TEXT NOT NULL DEFAULT ''
     """,
+    # v13 — e-ΕΦΚΑ εργοδότη: ΑΜΕ (Αριθμός Μητρώου Εργοδότη — από Excel ή ανάκτηση ePistErg) και κωδικοί ΙΚΑ εργοδότη
+    # (enc:1:) για τον έλεγχο υποβολής ΑΠΔ από την οικονομική καρτέλα εργοδότη. Χωριστά από το businesses, όπως οι
+    # κωδικοί TAXISnet, ώστε να μη διαρρέουν σε ερωτήματα λίστας.
+    """
+    CREATE TABLE efka_credentials (
+        afm           TEXT PRIMARY KEY,
+        ame           TEXT NOT NULL DEFAULT '',
+        ame_source    TEXT NOT NULL DEFAULT '',
+        ika_user      TEXT NOT NULL DEFAULT '',
+        ika_pass      TEXT NOT NULL DEFAULT '',
+        check_status  TEXT NOT NULL DEFAULT '',
+        check_message TEXT NOT NULL DEFAULT '',
+        checked_at    TEXT,
+        updated_at    TEXT NOT NULL
+    )
+    """,
+    # v14 — (α) mydata_docs.rent: παραστατικό ενοικίου (8.1 ή ψηφιακό τέλος 3,6%) — το ψηφιακό τέλος των μισθώσεων
+    # αποδίδεται με τη δήλωση φορολογίας εισοδήματος, όχι μηνιαία· (β) στοιχεία επικοινωνίας από το Μητρώο ΑΑΔΕ
+    # (getLdapInfo) — contact_source 'manual' = τα άλλαξε ο χρήστης, η ανάκτηση δεν τα πατά· (γ) οφειλές ΑΑΔΕ
+    # (εκτός/σε ρύθμιση, με ταυτότητα οφειλής και PDF — port του Tax Center aade-debts.js)· (δ) ιστορικό email.
+    """
+    ALTER TABLE mydata_docs ADD COLUMN rent INTEGER NOT NULL DEFAULT 0;
+    UPDATE mydata_docs SET rent=1 WHERE invoice_type='8.1' OR (stamp>0 AND net>0 AND abs(stamp/net-0.036)<0.0015);
+    ALTER TABLE businesses ADD COLUMN email TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN mobile TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN phone TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN contact_source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN email_auto INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE aade_debts (
+        afm          TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        ref          TEXT NOT NULL,
+        title        TEXT NOT NULL DEFAULT '',
+        overdue      REAL NOT NULL DEFAULT 0,
+        non_overdue  REAL NOT NULL DEFAULT 0,
+        total        REAL NOT NULL DEFAULT 0,
+        code         TEXT NOT NULL DEFAULT '',
+        pdf_path     TEXT NOT NULL DEFAULT '',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        fetched_at   TEXT NOT NULL,
+        PRIMARY KEY (afm, kind, ref)
+    );
+    CREATE TABLE debt_sync (
+        afm         TEXT PRIMARY KEY,
+        synced_at   TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT '',
+        message     TEXT NOT NULL DEFAULT '',
+        overdue     REAL NOT NULL DEFAULT 0,
+        non_overdue REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE email_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        afm         TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        recipient   TEXT NOT NULL,
+        subject     TEXT NOT NULL,
+        fingerprint TEXT NOT NULL DEFAULT '',
+        auto        INTEGER NOT NULL DEFAULT 0,
+        status      TEXT NOT NULL,
+        error       TEXT NOT NULL DEFAULT '',
+        sent_at     TEXT NOT NULL
+    )
+    """,
+    # v15 — όλη η λογική οφειλών/αιτημάτων του ScanMyData Tax Center (ρητό αίτημα χρήστη 2026-10-22): οφειλές ανά πύλη
+    # (ΑΑΔΕ / ΚΕΑΟ / τρέχουσες εισφορές ΕΦΚΑ) με επόμενη δόση· ΑΜΚΑ (enc:1:) για ΚΕΑΟ/ΕΦΚΑ φυσικών προσώπων· από ποιο
+    # πεδίο του Μητρώου ήρθε το email (mail2 = του υπόχρεου, mailemep = εκπροσώπου/λογιστή, mail = παλιό TAXISnet) και
+    # πότε· μέλη/εκπρόσωποι εταιρειών (ΑΑΔΕ getMelh/getSxeseisEpixeirhshs ή Excel)· «Τα Αιτήματά μου» της ΑΑΔΕ.
+    """
+    ALTER TABLE aade_debts ADD COLUMN source TEXT NOT NULL DEFAULT 'aade';
+    ALTER TABLE aade_debts ADD COLUMN next_due TEXT NOT NULL DEFAULT '';
+    ALTER TABLE aade_debts ADD COLUMN next_amount REAL NOT NULL DEFAULT 0;
+    ALTER TABLE aade_debts ADD COLUMN instalments INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE aade_debts ADD COLUMN unpaid INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE debt_source_sync (
+        afm       TEXT NOT NULL,
+        source    TEXT NOT NULL,
+        synced_at TEXT NOT NULL,
+        status    TEXT NOT NULL DEFAULT '',
+        message   TEXT NOT NULL DEFAULT '',
+        total     REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (afm, source)
+    );
+    ALTER TABLE efka_credentials ADD COLUMN amka TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN email_origin TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN contact_at TEXT NOT NULL DEFAULT '';
+    CREATE TABLE company_members (
+        company_afm TEXT NOT NULL,
+        member_afm  TEXT NOT NULL,
+        name        TEXT NOT NULL DEFAULT '',
+        role        TEXT NOT NULL DEFAULT '',
+        share       TEXT NOT NULL DEFAULT '',
+        since       TEXT NOT NULL DEFAULT '',
+        source      TEXT NOT NULL DEFAULT '',
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (company_afm, member_afm)
+    );
+    CREATE TABLE aade_requests (
+        afm         TEXT NOT NULL,
+        id          TEXT NOT NULL,
+        case_no     TEXT NOT NULL DEFAULT '',
+        submitted   TEXT NOT NULL DEFAULT '',
+        updated     TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT '',
+        topic       TEXT NOT NULL DEFAULT '',
+        process     TEXT NOT NULL DEFAULT '',
+        service     TEXT NOT NULL DEFAULT '',
+        text        TEXT NOT NULL DEFAULT '',
+        answer      TEXT NOT NULL DEFAULT '',
+        rejected    INTEGER NOT NULL DEFAULT 0,
+        stamp       TEXT NOT NULL DEFAULT '',
+        change      TEXT NOT NULL DEFAULT '',
+        seen        INTEGER NOT NULL DEFAULT 1,
+        files_json  TEXT NOT NULL DEFAULT '[]',
+        fetched_at  TEXT NOT NULL,
+        PRIMARY KEY (afm, id)
+    );
+    CREATE TABLE request_sync (
+        afm       TEXT PRIMARY KEY,
+        synced_at TEXT NOT NULL,
+        status    TEXT NOT NULL DEFAULT '',
+        message   TEXT NOT NULL DEFAULT ''
+    )
+    """,
 ]
 
 

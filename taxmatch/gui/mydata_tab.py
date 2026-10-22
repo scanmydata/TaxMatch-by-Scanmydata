@@ -27,13 +27,27 @@ from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
 
-_COLS = ["Ημ/νία", "Τύπος", "Λ/Ε", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
+_COLS = ["Ημ/νία", "Τύπος", "Έσοδο/Έξοδο", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
 HISTORY_MONTHS = 24                     # για Intrastat χρειάζεται όλο το προηγούμενο έτος + το τρέχον
 
 
 def _months(n: int = 36) -> list[str]:
     today = date.today()
     return store.previous_months(f"{today.year}-{today.month:02d}", n)
+
+
+class _SortItem(QTableWidgetItem):
+    """Κελί με δικό του κλειδί ταξινόμησης (ημερομηνία ISO, ποσό) — το κείμενο «05/03» ή «1.200,00 €» δεν ταξινομείται σωστά."""
+
+    def __init__(self, text: str, key: Any) -> None:
+        super().__init__(text)
+        self._key = key
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        mine, theirs = self._key, getattr(other, "_key", None)
+        if theirs is None or type(mine) is not type(theirs):
+            return super().__lt__(other)
+        return mine < theirs
 
 
 def year_months(year: int) -> list[str]:
@@ -82,16 +96,17 @@ class MydataTab(QWidget):
         bar.addWidget(self.year)
         bar.addWidget(QLabel("Μήνας:"))
         self.month = QComboBox()
-        self.month.currentIndexChanged.connect(lambda _i: self.reload())
+        self.month.currentIndexChanged.connect(lambda _i: (self._sync_fetch_label(), self.reload()))
         bar.addWidget(self.month)
         self.fetch_btn = QPushButton(icon("download", CURRENT.txt, 16), "  Λήψη μήνα")
         self.fetch_btn.setObjectName("primary")
         self.fetch_btn.setToolTip("Παραστατικά του μήνα από το myDATA (λήψεις και εκδοθέντα) και τα PDF τους από τον πάροχο")
-        self.fetch_btn.clicked.connect(lambda: self._fetch([self.month.currentData()], pdf=True))
+        self.fetch_btn.clicked.connect(lambda: self._fetch(self._period_months(), pdf=True))
         bar.addWidget(self.fetch_btn)
-        year_btn = QPushButton("  Λήψη χρήσης")
-        year_btn.setToolTip("Όλοι οι μήνες της επιλεγμένης χρήσης — μόνο στοιχεία, χωρίς PDF, με ΕΝΑ αίτημα ανά κατεύθυνση")
-        year_btn.clicked.connect(lambda: self._fetch(year_months(self.year.currentData()), pdf=False))
+        self.year_btn = year_btn = QPushButton("  Λήψη χρήσης")
+        year_btn.setToolTip("Όλοι οι μήνες της επιλεγμένης χρήσης με ΕΝΑ αίτημα ανά κατεύθυνση, και τα PDF τους από τον πάροχο "
+                            "(όσα δεν έχουν ήδη κατέβει)")
+        year_btn.clicked.connect(lambda: self._fetch(year_months(self.year.currentData()), pdf=True))
         bar.addWidget(year_btn)
         history = QPushButton("  Λήψη 24 μηνών")
         history.setToolTip("Μόνο στοιχεία των τελευταίων 24 μηνών (όσοι λείπουν + οι δύο πιο πρόσφατοι) — χρειάζονται για "
@@ -126,7 +141,7 @@ class MydataTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((64, 48, 40, 0, 90, 90, 80, 90, 80, 90)):
+        for col, width in enumerate((64, 48, 92, 0, 90, 90, 80, 90, 80, 90)):
             if width:
                 self.table.setColumnWidth(col, width)
         self.table.itemSelectionChanged.connect(self._selection_note)
@@ -181,16 +196,32 @@ class MydataTab(QWidget):
         self._tasks.append(run_task(self, work, on_done=done, on_error=lambda _m: None))
 
     def _fill_months(self, select_previous: bool = False) -> None:
+        """Μήνες της χρήσης + «Όλη η χρήση» (data = '2026': τα παραστατικά όλων των μηνών μαζί — ρητό αίτημα χρήστη)."""
+        year = self.year.currentData()
         self.month.blockSignals(True)
         self.month.clear()
-        for ym in year_months(self.year.currentData()):
+        self.month.addItem(f"Όλη η χρήση {year}", str(year))
+        for ym in year_months(year):
             self.month.addItem(analysis.month_label(ym), ym)
-        if select_previous and self.month.count() > 1:
-            self.month.setCurrentIndex(1)                 # προηγούμενος μήνας: ο τελευταίος «κλειστός»
+        if select_previous and self.month.count() > 2:
+            self.month.setCurrentIndex(2)                 # προηγούμενος μήνας: ο τελευταίος «κλειστός»
+        elif select_previous and self.month.count() > 1:
+            self.month.setCurrentIndex(1)                 # Ιανουάριος: μόνο ο τρέχων μήνας
         self.month.blockSignals(False)
-        if self.month.count() == 0:                       # Ιανουάριος: η τρέχουσα χρήση έχει μόνο τον τρέχοντα μήνα
-            self.month.addItem(analysis.month_label(_months(1)[0]), _months(1)[0])
+        self._sync_fetch_label()
         self.reload()
+
+    def _whole_year(self) -> bool:
+        return len(self.month.currentData() or "") == 4
+
+    def _period_months(self) -> list[str]:
+        period = self.month.currentData() or ""
+        return year_months(int(period)) if len(period) == 4 else [period]
+
+    def _sync_fetch_label(self) -> None:
+        self.fetch_btn.setText("  Λήψη χρήσης" if self._whole_year() else "  Λήψη μήνα")
+        if hasattr(self, "year_btn"):
+            self.year_btn.setVisible(not self._whole_year())    # αλλιώς δύο ίδια κουμπιά «Λήψη χρήσης»
 
     # ------------------------------------------------------------------ κωδικοί
     def _save_creds(self) -> None:
@@ -276,27 +307,37 @@ class MydataTab(QWidget):
         t = self.table
         t.setSortingEnabled(False)
         t.setRowCount(len(self._docs))
+        non_vat = self._non_vat()
+        pdf_colour = {"ok": CURRENT.ok, "viewer": CURRENT.accent, "failed": CURRENT.bad, "no_url": CURRENT.muted,
+                      "": CURRENT.muted}
         for i, d in enumerate(self._docs):
             incoming = d["direction"] == "incoming"
+            income = analysis.is_income(d)
             other_name, other_vat = names.display_name(d, party, self.afm)
-            cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], d["invoice_type"], "Λ" if incoming else "Ε",
+            cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], d["invoice_type"], "Έσοδο" if income else "Έξοδο",
                      other_name or "—", other_vat or "—", office.money(d["net"]), office.money(d["vat"]),
                      office.money(d["total"]), office.money(d["withheld"]) if d["withheld"] else "",
-                     pdfs.STATUS_LABEL.get(d["pdf_status"], "")]
+                     pdfs.STATUS_LABEL.get(d["pdf_status"], "—")]
+            keys = {0: d["issue_date"] + d["mark"], 5: d["net"], 6: d["vat"], 7: d["total"], 8: d["withheld"] or 0.0}
             tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other_name or '—'} · ΑΦΜ {other_vat or '—'}\n"
                    f"{d['series']} {d['aa']} · {d['issue_date']} · τύπος {d['invoice_type']} · MARK {d['mark']}\n"
                    f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}"
                    + (f" · ψηφιακό τέλος {office.money(d['stamp'])}" if d.get("stamp") else ""))
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = _SortItem(text, keys[col]) if col in keys else QTableWidgetItem(text)
                 item.setToolTip(tip)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
                 if col in (5, 6, 7, 8):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col == 2:                                   # έσοδα πράσινα, έξοδα κόκκινα (ρητό αίτημα χρήστη)
+                    item.setForeground(QColor(CURRENT.ok if income else CURRENT.bad))
+                if col == 9:
+                    item.setForeground(QColor(pdf_colour.get(d["pdf_status"] or "", CURRENT.muted)))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col == 8 and d["withheld"] and incoming:
                     item.setForeground(QColor(CURRENT.warn))
-                if d.get("vat_class") and self._non_vat():
+                if d.get("vat_class") and non_vat:
                     item.setForeground(QColor(CURRENT.bad))
                 if d["cancelled"]:
                     item.setForeground(QColor(CURRENT.muted))
@@ -326,80 +367,142 @@ class MydataTab(QWidget):
             "του πελάτη σε ΦΠΑ. Οι γραμμές εμφανίζονται με κόκκινο.")
         self.warning.show()
 
+    def _row(self, title: str, body: str, state: str) -> str:
+        """Μία γραμμή της σύνοψης: τίτλος σε σταθερή στήλη (πορτοκαλί = εκκρεμεί, ΠΡΑΣΙΝΟ με ✓ = ολοκληρώθηκε, γκρι = δεν
+        αφορά) και περιεχόμενο δεξιά — ρητό αίτημα χρήστη 2026-10-22 για καλύτερη στοίχιση."""
+        colour = {"done": CURRENT.ok, "open": CURRENT.warn}.get(state, CURRENT.muted)
+        mark = "✓ " if state == "done" else ""
+        return (f"<tr><td width='200' valign='top' style='padding:4px 12px 4px 0'><b style='color:{colour}'>{mark}{title}</b>"
+                f"</td><td valign='top' style='padding:4px 0'>{body}</td></tr>")
+
+    @staticmethod
+    def _table(rows: list[str]) -> str:
+        return "<table cellspacing='0' cellpadding='0' width='100%'>" + "".join(rows) + "</table>"
+
     def _render_summary(self, ym: str) -> None:
+        if len(ym) == 4:
+            self._render_year_summary(ym)
+            return
         s = analysis.month_summary(self.conn, self.afm, ym)
         if not s["synced"]:
             self.summary.setText(f"<span style='color:{CURRENT.muted}'>Ο μήνας δεν έχει κατέβει από το myDATA — "
                                  "πατήστε «Λήψη μήνα».</span>")
             return
         business = self._business()
-        parts = []
+        rows = []
         if s["withholding"]:
-            rows = "".join(
-                f"<li><b>{office.money(w['amount'])}</b> — {html.escape(w['label'])} ({w['n_docs']} παραστατικά, "
-                f"βάση {office.money(w['base'])}) → <b>{html.escape(w['declaration'])}</b> έως "
-                f"<b>{date.fromisoformat(w['due']).strftime('%d/%m/%Y')}</b>"
-                f"{self._status_html('withholding_fees', ym, business, w['amount'])}</li>" for w in s["withholding"])
-            parts.append(f"<b style='color:{CURRENT.warn}'>Παρακρατούμενοι φόροι προς απόδοση</b><ul>{rows}</ul>")
+            lines, states = [], []
+            for w in s["withholding"]:
+                status, done = self._status_html("withholding_fees", ym, business, w["amount"])
+                states.append(done)
+                lines.append(f"<b>{office.money(w['amount'])}</b> — {html.escape(w['label'])} ({w['n_docs']} παραστατικά, "
+                             f"βάση {office.money(w['base'])}) → <b>{html.escape(w['declaration'])}</b> έως "
+                             f"<b>{date.fromisoformat(w['due']).strftime('%d/%m/%Y')}</b> · {status}")
+            rows.append(self._row("Παρακρατούμενοι φόροι", "<br>".join(lines), "done" if all(states) else "open"))
         else:
-            parts.append("Παρακρατούμενοι φόροι: κανένα παραστατικό λήψης με παρακράτηση.")
+            rows.append(self._row("Παρακρατούμενοι φόροι", "κανένα παραστατικό λήψης με παρακράτηση", ""))
         fees = s["fees"]
-        due = date.fromisoformat(obligations.month_end_or_next(*map(int, _next_month(ym).split("-"))).isoformat())
+        due = obligations.month_end_or_next(*map(int, _next_month(ym).split("-")))
         if fees["climate_docs"]:
-            parts.append(f"<b style='color:{CURRENT.warn}'>Τέλος ανθεκτικότητας</b>: {fees['climate_docs']} στοιχεία 8.2 "
-                         f"({office.money(fees['climate'])}) → δήλωση απόδοσης έως <b>{due.strftime('%d/%m/%Y')}</b>"
-                         f"{self._status_html('climate_fee', ym, business)}")
+            status, done = self._status_html("climate_fee", ym, business)
+            rows.append(self._row("Τέλος ανθεκτικότητας",
+                                  f"{fees['climate_docs']} στοιχεία 8.2 ({office.money(fees['climate'])}) → δήλωση απόδοσης "
+                                  f"έως <b>{due.strftime('%d/%m/%Y')}</b> · {status}", "done" if done else "open"))
         if fees["digital_fee"]:
-            parts.append(f"<b style='color:{CURRENT.warn}'>Ψηφιακό τέλος συναλλαγής</b> στα έσοδα: "
-                         f"{office.money(fees['digital_fee'])} → δήλωση έως <b>{due.strftime('%d/%m/%Y')}</b>"
-                         f"{self._status_html('digital_fee', ym, business)}")
+            status, done = self._status_html("digital_fee", ym, business)
+            rows.append(self._row("Ψηφιακό τέλος συναλλαγής",
+                                  f"{office.money(fees['digital_fee'])} στα έσοδα → δήλωση έως "
+                                  f"<b>{due.strftime('%d/%m/%Y')}</b> · {status}", "done" if done else "open"))
+        if fees.get("rent_fee"):
+            rows.append(self._row("Ψηφιακό τέλος ενοικίων",
+                                  f"{office.money(fees['rent_fee'])} σε παραστατικά ενοικίου — <b>δεν</b> αποδίδεται μηνιαία: "
+                                  "δηλώνεται ετησίως με τη δήλωση φορολογίας εισοδήματος (Ε2)", ""))
         f = s["flows"]
         flows = (f"αποστολές αγαθών {office.money(f['goods_out'])} · παροχή υπηρεσιών {office.money(f['services_out'])} · "
                  f"αφίξεις αγαθών {office.money(f['goods_in'])} · λήψη υπηρεσιών {office.money(f['services_in'])}")
-        vies = "<b>ΝΑΙ</b>" if s["vies"] else "όχι"
+        services_only = (f["goods_in"] == 0 and f["goods_out"] == 0) and (f["services_in"] or f["services_out"])
+        if s["vies"]:
+            y, m = int(ym[:4]), int(ym[5:7])
+            vies_due = obligations._due_vies(*((y + 1, 1) if m == 12 else (y, m + 1)))  # noqa: SLF001
+            status, done = self._status_html("vies", ym, business)
+            body = (f"{flows}<br><b>Ανακεφαλαιωτικός VIES</b> έως <b>{vies_due.strftime('%d/%m/%Y')}</b> · {status}"
+                    + (" — μόνο υπηρεσίες, άρα όχι Intrastat" if services_only else ""))
+            rows.append(self._row("Ενδοκοινοτικές (VIES)", body, "done" if done else "open"))
+        else:
+            rows.append(self._row("Ενδοκοινοτικές (VIES)", f"{flows}<br>VIES: όχι", ""))
         intr = s["intrastat"]
         intr_text = {True: "<b>ΝΑΙ</b>", False: "όχι", None: "άγνωστο — λείπουν μήνες (πατήστε «Λήψη 24 μηνών»)"}[intr["any"]]
         if intr["any"] and intr["reason"]:
             intr_text += f" ({html.escape(intr['reason'])})"
-        services_only = (f["goods_in"] == 0 and f["goods_out"] == 0) and (f["services_in"] or f["services_out"])
-        parts.append(f"Ενδοκοινοτικές: {flows}<br>VIES: {vies}{' — μόνο υπηρεσίες, άρα όχι Intrastat' if services_only else ''}"
-                     f" · Intrastat: {intr_text}")
-        bal = analysis.vat_balance(self.conn, self.afm, [ym])
-        if bal["output"] or bal["input"]:
-            parts.append(f"<span style='color:{CURRENT.muted}'>ΦΠΑ μήνα κατά το myDATA (ενδεικτικά): εκροές "
-                         f"{office.money(bal['output'])} − εισροές {office.money(bal['input'])} = "
-                         f"{office.money(bal['balance'])}{self._vat_compare(ym, business)}</span>")
-        self.summary.setText("<br>".join(parts))
+        rows.append(self._row("Intrastat", intr_text + (" · υποβάλλεται στο Τελωνείο — χωρίς αυτόματο έλεγχο"
+                                                        if intr["any"] else ""), "open" if intr["any"] else ""))
+        rows.append(self._vat_row(ym, business))
+        self.summary.setText(self._table(rows))
+
+    def _vat_row(self, ym: str, business: dict[str, Any]) -> str:
+        """ΦΠΑ: περίοδος (μηνιαία/τριμηνιαία — διακριτά), ενδεικτικό υπόλοιπο myDATA και η Φ2 της περιόδου από την ΑΑΔΕ."""
+        if business.get("vat_subject") == 0:
+            return self._row("ΦΠΑ", "μη υπόχρεος ΦΠΑ", "")
+        period = obligations.vat_period(business)
+        y, m = int(ym[:4]), int(ym[5:7])
+        if period == "quarterly":
+            q_end = ((m - 1) // 3 + 1) * 3
+            months, rule, ref = [f"{y}-{k:02d}" for k in range(q_end - 2, q_end + 1)], "vat_quarterly", f"{y}-{q_end:02d}"
+            title = f"ΦΠΑ τριμηνιαίος ({(m - 1) // 3 + 1}ο τρίμηνο)"
+        else:
+            months, rule, ref = [ym], "vat_monthly", ym
+            title = "ΦΠΑ μηνιαίος" if period == "monthly" else "ΦΠΑ (περίοδος άγνωστη)"
+        bal = analysis.vat_balance(self.conn, self.afm, months)
+        status, done = self._status_html(rule, ref, business)
+        body = (f"κατά το myDATA (ενδεικτικά): εκροές {office.money(bal['output'])} − εισροές {office.money(bal['input'])} = "
+                f"<b>{office.money(bal['balance'])}</b><br>Φ2 ΑΑΔΕ: {status}")
+        note = obligations.vat_option_note(business)
+        if note:
+            body += f"<br><span style='color:{CURRENT.accent}'>{html.escape(note)}</span>"
+        return self._row(title, body, "done" if done else "open")
+
+    def _render_year_summary(self, year: str) -> None:
+        if not any(m.startswith(year) for m in store.synced_months(self.conn, self.afm).get(self.afm, set())):
+            self.summary.setText(f"<span style='color:{CURRENT.muted}'>Η χρήση {year} δεν έχει κατέβει από το myDATA — "
+                                 "πατήστε «Λήψη χρήσης».</span>")
+            return
+        t = analysis.year_totals(self.conn, self.afm, year)
+        bal = analysis.vat_balance(self.conn, self.afm, year_months(int(year)))
+        rows = [
+            self._row("Έσοδα χρήσης", f"<b style='color:{CURRENT.ok}'>{office.money(t['income'])}</b> (καθαρή αξία)", ""),
+            self._row("Έξοδα χρήσης", f"<b style='color:{CURRENT.bad}'>{office.money(t['expenses'])}</b> (καθαρή αξία)", ""),
+            self._row("ΦΠΑ χρήσης", f"εκροές {office.money(bal['output'])} − εισροές {office.money(bal['input'])} = "
+                                    f"<b>{office.money(bal['balance'])}</b> (ενδεικτικά)", ""),
+            self._row("Παρακρατήσεις", office.money(t["withheld"]) + " σε παραστατικά λήψης", ""),
+            self._row("", f"<span style='color:{CURRENT.muted}'>{t['n']} παραστατικά · για προθεσμίες και υποβολές "
+                          "επιλέξτε μήνα</span>", ""),
+        ]
+        self.summary.setText(self._table(rows))
 
     def _business(self) -> dict[str, Any]:
         row = self.conn.execute("SELECT * FROM businesses WHERE afm=?", (self.afm,)).fetchone()
         return {**(dict(row) if row else {}), **deadlines._checks_for(self.conn, self.afm)}  # noqa: SLF001
 
-    def _status_html(self, rule_id: str, ym: str, business: dict[str, Any], expected: float | None = None) -> str:
-        """Κατάσταση υποβολής (έλεγχος υποβολών ΑΑΔΕ ή χειροκίνητο «ολοκληρώθηκε») + σύνδεσμος σήμανσης."""
+    def _status_html(self, rule_id: str, ym: str, business: dict[str, Any],
+                     expected: float | None = None) -> tuple[str, bool]:
+        """(κατάσταση υποβολής σε HTML, ολοκληρώθηκε;) — έλεγχος υποβολών ΑΑΔΕ/e-ΕΦΚΑ ή χειροκίνητο «ολοκληρώθηκε»,
+        με σύνδεσμο σήμανσης."""
         sub = obligations.submission(rule_id, business, ym)
         status = sub["status"]
         link = (f" <a style='color:{CURRENT.accent}' href='done:{rule_id}:{ym}:{0 if status == 'done' else 1}'>"
-                + (
-                    "αναίρεση" if status == "done" else "σήμανση ως ολοκληρωμένο") + "</a>")
+                + ("αναίρεση" if status == "done" else "σήμανση ως ολοκληρωμένο") + "</a>")
         if not status:
             hint = "δεν υπάρχει ακόμη αυτόματος έλεγχος" if sub["manual"] else "δεν έχει ελεγχθεί (Προθεσμίες &amp; υποβολές)"
-            return f" · <span style='color:{CURRENT.muted}'>υποβολή: {hint}</span>{link}"
+            return f"<span style='color:{CURRENT.muted}'>υποβολή: {hint}</span>{link}", False
         colour = {"submitted": CURRENT.ok, "done": CURRENT.ok, "not_submitted": CURRENT.bad}.get(status, CURRENT.warn)
-        text = f" · <b style='color:{colour}'>{html.escape(sub['label'])}</b>"
+        text = f"<b style='color:{colour}'>{html.escape(sub['label'])}</b>"
         amounts = obligations.amounts_text(sub["amounts"])
         if amounts:
             text += f" ({html.escape(amounts)})"
             due_amt = sub["amounts"].get("total_due")
             if expected is not None and due_amt is not None and abs(due_amt - expected) > 0.01:
-                text += (f" <b style='color:{CURRENT.bad}'>διαφορά με myDATA {office.money(due_amt - expected)}</b>")
-        return text + (link if status in ("done", "") or sub["manual"] else "")
-
-    def _vat_compare(self, ym: str, business: dict[str, Any]) -> str:
-        sub = obligations.submission("vat_monthly", business, ym)
-        if not sub["amounts"]:
-            return ""
-        return " · Φ2 ΑΑΔΕ: " + html.escape(obligations.amounts_text(sub["amounts"]))
+                text += f" <b style='color:{CURRENT.bad}'>διαφορά με myDATA {office.money(due_amt - expected)}</b>"
+        return text + (link if status in ("done", "") or sub["manual"] else ""), status in ("submitted", "done")
 
     def _on_link(self, href: str) -> None:
         if not href.startswith("done:"):

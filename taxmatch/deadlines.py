@@ -197,6 +197,7 @@ _VAT_NOT = ("δηλωσης επιλογης", "ειδικ", "επιστροφ",
 _TITLE_RULES: list[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = [
     ("vat_monthly", ("δηλωσ", "φπα"), ("διπλογραφ",), _VAT_NOT),
     ("vat_quarterly", ("δηλωσ", "φπα"), ("απλογραφ", "τριμην"), _VAT_NOT),
+    ("vat_quarter_option", ("δηλωσης επιλογης", "φπα"), ("τριμην", "περιοδ"), ()),
     ("vies", (), ("ανακεφαλαιωτικ", "vies"), ()),
     ("intrastat", ("intrastat",), (), ()),
     ("oss", ("oss",), (), ("import",)),

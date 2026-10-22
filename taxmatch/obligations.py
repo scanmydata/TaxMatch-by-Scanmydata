@@ -110,7 +110,7 @@ def _vat_monthly(b):
         return True, False
     if b.get("vat_subject") == 0:
         return False, False
-    pt = b.get("vat_period_type") or ""
+    pt = vat_period(b)
     return (True, False) if pt == "monthly" else ((False, False) if pt == "quarterly" else (True, True))
 
 
@@ -119,8 +119,15 @@ def _vat_quarterly(b):
         return True, False
     if b.get("vat_subject") == 0:
         return False, False
-    pt = b.get("vat_period_type") or ""
+    pt = vat_period(b)
     return (True, False) if pt == "quarterly" else ((False, False) if pt == "monthly" else (True, True))
+
+
+def second_last_business_day(year: int, month: int) -> date:
+    d = last_business_day(year, month) - timedelta(days=1)
+    while not is_business_day(d):
+        d -= timedelta(days=1)
+    return d
 
 
 def _conditional(b):                              # ισχύει μόνο αν ο πελάτης έχει τη σχετική δραστηριότητα (δεν το γνωρίζουμε)
@@ -160,6 +167,14 @@ RULES: list[Rule] = [
          "https://www.gov.gr/sdg/taxes/vat/vat-return/deadlines-for-submitting-vat-returns", "quarterly",
          lambda y, m: last_business_day(y, m), due_months=(1, 4, 7, 10), applies=_vat_quarterly,
          hide_if_feed_terms=("δηλωσης", "φπα"), period=_period_quarter),
+    Rule("vat_quarter_option", "Επιλογή τριμηνιαίας περιόδου ΦΠΑ (Β΄ κατηγορία σε μηνιαίο)",
+         "Απλογραφικά με έναρξη από 1.1.2024 υποβάλλουν υποχρεωτικά μηνιαία δήλωση ΦΠΑ (Α.1049/2025). Όταν συμπληρωθούν "
+         "24 μήνες από την έναρξη μπορούν να επανέλθουν στο τρίμηνο με δήλωση επιλογής στο myAADE (Μητρώο & Επικοινωνία → "
+         "Αλλαγή στοιχείων μητρώου) έως την προτελευταία εργάσιμη του Ιανουαρίου/Απριλίου/Ιουλίου/Οκτωβρίου· ισχύει από "
+         "την 1η του μήνα της δήλωσης και δεν ανακαλείται πριν από 12 μήνες.",
+         "https://www.taxheaven.gr/news/70387/mhniaia-dhlwsh-fpa-dhmosieyohke-h-apofash-me-tis-leptomereies", "quarterly",
+         second_last_business_day, due_months=(1, 4, 7, 10), applies=_conditional_vat,
+         hide_if_feed_terms=("επιλογης",), ref_offset=0),
     Rule("vies", "Πίνακας VIES (ενδοκοινοτικές συναλλαγές) — {period}",
          "Ανακεφαλαιωτικός πίνακας ενδοκοινοτικών παραδόσεων/αποκτήσεων (Φ4/Φ5) έως την 26η του επόμενου μήνα· "
          "αν είναι αργία, την επόμενη εργάσιμη (άρθρο 41 ΚΦΠΑ). Μόνο αν υπήρξαν ενδοκοινοτικές συναλλαγές.",
@@ -230,7 +245,9 @@ RULES_BY_ID = {r.id: r for r in RULES}
 #: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
 _BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4",
                   "withholding_fees", "fmy_wages", "climate_fee", "digital_fee"}
+_BUSINESS_ONLY |= {"vat_quarter_option"}
 _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
+                 "vat_quarter_option": "μόνο Β΄ κατηγορίας σε μηνιαίο ΦΠΑ που συμπλήρωσαν 24 μήνες από την έναρξη",
                  "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
                  "oss": "μόνο αν είναι εγγεγραμμένος στο OSS", "ioss": "μόνο αν είναι εγγεγραμμένος στο IOSS",
                  "apd": "μόνο αν απασχολεί προσωπικό", "ergani_e4": "μόνο αν απασχολεί προσωπικό",
@@ -253,6 +270,7 @@ RULE_CHECKS: dict[str, tuple[str, ...]] = {
     "vat_monthly": ("Φ2",), "vat_quarterly": ("Φ2",), "vies": ("Φ4",),
     "withholding_fees": ("ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ"),
     "fmy_wages": ("ΦΜΥ",), "climate_fee": ("ΔΙΑΜΟΝΗ",), "income_tax_return": ("E1", "E3", "ΕΙΣΟΔΗΜΑ_ΝΠ"),
+    "apd": ("ΑΠΔ",),                       # e-ΕΦΚΑ (οικονομική καρτέλα εργοδότη) — βλ. efka.py
 }
 #: Κανόνες που ολοκληρώνονται ΜΟΝΟ χειροκίνητα (δεν υπάρχει ακόμη μέθοδος ελέγχου υποβολής).
 MANUAL_ONLY = {"digital_fee"}
@@ -277,11 +295,72 @@ def _check_says_not_obligated(rule_id: str, business: dict[str, Any], ref_month:
 
 
 def vat_period(business: dict[str, Any]) -> str:
-    """'monthly' | 'quarterly' | '' — από το Μητρώο· αλλιώς από την κατηγορία βιβλίων (Γ = μηνιαία, Β = τριμηνιαία)."""
+    """'monthly' | 'quarterly' | '' — από το Μητρώο (ή τις περιόδους Φ2 του ελέγχου υποβολών)· αλλιώς από την κατηγορία
+    βιβλίων: Γ = μηνιαία, Β = τριμηνιαία — ΕΚΤΟΣ Β με έναρξη από 1.1.2024 (μηνιαία, Α.1049/2025)· χωρίς βιβλία / μη
+    εγκατεστημένοι = τριμηνιαία (άρθρο 38 ΚΦΠΑ)."""
+    from .business_profiles.vat_profile import b_monthly_by_law, keeps_no_books
     pt = business.get("vat_period_type") or ""
     if pt:
         return pt
-    return {"Γ": "monthly", "Β": "quarterly"}.get(business.get("books_category") or "", "")
+    books = business.get("books_category") or ""
+    if books == "Β" and b_monthly_by_law(business.get("start_date")):
+        return "monthly"
+    if not books and keeps_no_books(business.get("books_category_raw")):
+        return "quarterly"
+    return {"Γ": "monthly", "Β": "quarterly"}.get(books, "")
+
+
+def _add_months(d: date, n: int) -> date:
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    return date(y, m, min(d.day, _cal.monthrange(y, m)[1]))
+
+
+def quarter_option(business: Optional[dict[str, Any]], today: Optional[date] = None) -> Optional[dict[str, Any]]:
+    """Β΄ κατηγορία σε μηνιαίο ΦΠΑ: πότε μπορεί να επανέλθει στο τρίμηνο (Α.1049/2025, άρθρο 2). None = δεν αφορά.
+    {'start', 'eligible_from' (1η του πρώτου μήνα Ιαν/Απρ/Ιουλ/Οκτ μετά τους 24 μήνες), 'deadline' (επόμενη προθεσμία
+    δήλωσης επιλογής), 'eligible_now', 'by_law' (υποχρεωτικά μηνιαίος) }."""
+    from .business_profiles.vat_profile import B_MONTHLY_SINCE, parse_start
+    if not business or business.get("vat_subject") == 0 or (business.get("books_category") or "") != "Β":
+        return None
+    if vat_period(business) != "monthly":
+        return None
+    today = today or date.today()
+    start = parse_start(business.get("start_date"))
+    by_law = start is not None and start >= B_MONTHLY_SINCE
+    if by_law:
+        e = _add_months(start, 24)
+        y, m = e.year, e.month
+        if e.day > 1:                                   # οι 24 μήνες κλείνουν μέσα στον μήνα → επόμενος μήνας
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        while m not in (1, 4, 7, 10):
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        eligible_from = date(y, m, 1)
+    else:
+        eligible_from = None                            # παλαιότερη έναρξη: μηνιαίος με ΕΠΙΛΟΓΗ — άγνωστο από πότε
+    y, m = today.year, today.month
+    if eligible_from and eligible_from > today:
+        y, m = eligible_from.year, eligible_from.month
+    while m not in (1, 4, 7, 10) or second_last_business_day(y, m) < today:
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return {"start": start, "eligible_from": eligible_from, "deadline": second_last_business_day(y, m),
+            "eligible_now": bool(eligible_from and eligible_from <= today), "by_law": by_law}
+
+
+def vat_option_note(business: Optional[dict[str, Any]], today: Optional[date] = None) -> str:
+    """Μήνυμα για Β΄ κατηγορίας σε μηνιαίο ΦΠΑ (ρητό αίτημα χρήστη 2026-10-22): πότε/αν μπορεί να επανέλθει στο τρίμηνο."""
+    opt = quarter_option(business, today)
+    if not opt:
+        return ""
+    dl = opt["deadline"].strftime("%d/%m/%Y")
+    if not opt["by_law"]:
+        return ("Β΄ κατηγορία σε μηνιαίο ΦΠΑ με επιλογή (Α.1049/2025, άρθρο 3): μπορεί να ανακαλέσει μετά από 12 μήνες — "
+                f"δήλωση στο myAADE έως την προτελευταία εργάσιμη Ιαν/Απρ/Ιουλ/Οκτ (επόμενη: {dl}).")
+    if opt["eligible_now"]:
+        return ("Συμπλήρωσε 24 μήνες από την έναρξη: μπορεί να ΕΠΑΝΕΛΘΕΙ στον τριμηνιαίο ΦΠΑ — δήλωση επιλογής στο myAADE "
+                f"(Μητρώο & Επικοινωνία → Αλλαγή στοιχείων) έως {dl}.")
+    return (f"Μηνιαίος ΦΠΑ υποχρεωτικά (Β΄ κατηγορία, έναρξη {opt['start'].strftime('%d/%m/%Y')} — Α.1049/2025)· "
+            f"τριμηνιαίος μπορεί να επιλεγεί από {opt['eligible_from'].strftime('%m/%Y')} (δήλωση έως {dl}).")
 
 
 def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
@@ -298,6 +377,13 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     if rule_id in ("vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss"):
         if business.get("vat_subject") == 0:
             return "no", "δεν υπάγεται σε ΦΠΑ"
+    if rule_id == "vat_quarter_option":
+        opt = quarter_option(business)
+        if not opt or not opt["by_law"]:
+            return "no", "δεν είναι Β΄ κατηγορίας σε υποχρεωτικά μηνιαίο ΦΠΑ"
+        if ref_month and opt["eligible_from"] > date(int(ref_month[:4]), int(ref_month[5:7]), 1):
+            return "no", f"συμπληρώνει 24 μήνες από την έναρξη — επιλογή από {opt['eligible_from'].strftime('%m/%Y')}"
+        return "yes", "μηνιαίος ΦΠΑ (Β΄ κατηγορία) — μπορεί να επανέλθει στο τρίμηνο"
     if _check_says_not_obligated(rule_id, business, ref_month):
         return "no", "ΑΑΔΕ: δεν έχει υποχρέωση υποβολής (έλεγχος υποβολών)"
     if rule_id in ("vat_monthly", "vat_quarterly"):
@@ -399,6 +485,10 @@ def amounts_text(amounts: dict[str, Any]) -> str:
                        ("refund", "για επιστροφή")):
         if amounts.get(key) is not None and (key != "lump_sum" or amounts.get("total_due") is None):
             parts.append(f"{label} {eur(amounts[key])}")
+    if amounts.get("installment") is not None and amounts.get("installment") != amounts.get("total_due"):
+        parts.append(f"δόση {eur(amounts['installment'])}" + (f" έως {amounts['pay_by']}" if amounts.get("pay_by") else ""))
+    elif amounts.get("pay_by"):
+        parts.append(f"πληρωμή έως {amounts['pay_by']}")
     if amounts.get("debt_id"):
         parts.append(f"ταυτ. οφειλής {amounts['debt_id']}")
     if amounts.get("amended"):

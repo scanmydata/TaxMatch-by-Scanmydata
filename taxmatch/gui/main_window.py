@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
+from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, efka, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
 from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
@@ -38,6 +38,8 @@ from .aml_page import AmlPage
 from .busy import BusyOverlay
 from .client_detail_dialog import ClientDetailDialog
 from .client_dialog import ClientDialog
+from .email_settings import EmailSettingsBox
+from .import_dialog import ImportPreviewDialog
 from .job_queue import JobQueue
 from .icons import dot_icon, icon, logo_pixmap
 from .manual import ensure_manual
@@ -57,7 +59,8 @@ log = logging.getLogger(__name__)
 
 _CLIENT_COLS = [
     ("", 30, "Επιλέξτε για μαζικές ενέργειες"), ("ΑΦΜ", 90, ""), ("Επωνυμία", 0, "Διπλό κλικ για την καρτέλα"),
-    ("Είδος", 130, ""), ("Κατάσταση", 90, ""), ("Κύριος ΚΑΔ", 110, ""), ("Βιβλία", 55, ""), ("ΦΠΑ", 70, ""),
+    ("Είδος", 130, ""), ("Κατάσταση", 90, ""), ("Κύριος ΚΑΔ", 110, ""), ("Βιβλία", 55, ""),
+    ("ΦΠΑ", 95, "Περίοδος ΦΠΑ: μηνιαίος / τριμηνιαίος (Μητρώο ΑΑΔΕ, περίοδοι Φ2 ή κατηγορία βιβλίων) · «Όχι» = μη υπόχρεος"),
     ("Στοιχεία", 80, "Πληρότητα ανάκτησης"), ("TAXISnet", 80, ""), ("Matches", 65, ""),
     ("Αμοιβή/μήνα", 100, "Μηνιαία επαναλαμβανόμενη αμοιβή, προ ΦΠΑ (καρτέλα πελάτη → Αμοιβές)"),
     ("Υποβολές", 90, "Κατάσταση υποβολών του τρέχοντος έτους από την ΑΑΔΕ (✓ υποβλήθηκαν · ✗ δεν υποβλήθηκαν)"),
@@ -553,6 +556,17 @@ class MainWindow(QMainWindow):
                               "όλους με κωδικούς myDATA. Ενημερώνει παρακρατήσεις, VIES και Intrastat στο Ημερολόγιο.")
         mydata_btn.clicked.connect(self.on_fetch_mydata)
         actbar.addWidget(mydata_btn)
+        debts_btn = QPushButton("  Λήψη οφειλών")
+        debts_btn.setToolTip("Οφειλές ΑΑΔΕ (εκτός/σε ρύθμιση), ΚΕΑΟ ανά φορέα και τρέχουσες εισφορές e-ΕΦΚΑ — μόνο τα "
+                             "στοιχεία — για τους επιλεγμένους ή όλους με κωδικούς TAXISnet. Τα έντυπα (PDF) από την "
+                             "καρτέλα του πελάτη. Μόνο ανάγνωση.")
+        debts_btn.clicked.connect(self.on_fetch_debts)
+        actbar.addWidget(debts_btn)
+        req_btn = QPushButton("  Αιτήματα ΑΑΔΕ")
+        req_btn.setToolTip("«Τα Αιτήματά μου» (myAADE) για τους επιλεγμένους — ή όλους με κωδικούς: τι απαντήθηκε, τι "
+                           "περιμένει ενέργεια του πελάτη. Μόνο ανάγνωση.")
+        req_btn.clicked.connect(self.on_fetch_requests)
+        actbar.addWidget(req_btn)
         actbar.addStretch()
         del_btn = QPushButton("  Διαγραφή επιλεγμένων")
         del_btn.setObjectName("danger")
@@ -621,7 +635,10 @@ class MainWindow(QMainWindow):
             check.setData(Qt.ItemDataRole.UserRole, r["afm"])
             table.setItem(i, _C_CHK, check)
             state_label = {"active": "Ενεργή", "ceased": "Διακοπή", "none": "Ιδιώτης", "": "—"}.get(r["activity_state"] or "", r["activity_state"])
-            vat = {1: "Υπόχρεος", 0: "Όχι"}.get(r["vat_subject"], "—")
+            # Μηνιαίος / τριμηνιαίος ΔΙΑΚΡΙΤΑ (ρητό αίτημα χρήστη 2026-10-22) — Μητρώο, περίοδοι Φ2 ή κατηγορία βιβλίων.
+            period = obligations.vat_period(dict(r)) if r["vat_subject"] != 0 else ""
+            vat = ("Όχι" if r["vat_subject"] == 0 else {"monthly": "Μηνιαίος", "quarterly": "Τριμηνιαίος"}.get(
+                period, "Υπόχρεος" if r["vat_subject"] == 1 else "—"))
             lookup_label = {"ok": "Πλήρη", "partial": "Μερικά", "failed": "Αποτυχία", "pending": "Αναμονή", "manual": "Χειροκίνητα"}.get(r["lookup_status"], r["lookup_status"])
             creds_label = "—"
             if c and c["complete"]:
@@ -747,6 +764,8 @@ class MainWindow(QMainWindow):
             self._import_excel_from_path(Path(dlg.excel_path))
             return
         if dlg.result_afm:
+            if dlg.existed:
+                toast(self, f"Ο πελάτης {dlg.result_afm} υπήρχε ήδη — ενημερώθηκαν οι κωδικοί TAXISnet του.", "info")
             self._start_lookup([dlg.result_afm])
             self.reload_clients()
             self._refresh_status_bar()
@@ -794,6 +813,9 @@ class MainWindow(QMainWindow):
                     r = easycheck.check_client(conn, afm, y)
                     result["ok"] = result["ok"] and r.get("ok")
                     result["entries"] += r.get("entries", [])
+                    apd = efka.check_apd_entry(conn, afm, y)          # ΑΠΔ: e-ΕΦΚΑ, όχι ΑΑΔΕ
+                    if apd:
+                        result["entries"].append(apd)
                 return result
 
             def each(afm, n, result):
@@ -816,6 +838,109 @@ class MainWindow(QMainWindow):
             return msg, "warn" if state["missing"] or state["failed"] else "ok"
 
         self.jobs.submit(title, work, total=total, window=window, on_done=done)
+
+    def on_fetch_debts(self) -> None:
+        with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
+        afms = [a for a in (self._selected_client_afms() or sorted(with_creds)) if a in with_creds]
+        if not afms:
+            toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
+            return
+        self.run_debt_sync(afms)
+
+    def run_debt_sync(self, afms: list[str], window: Optional[QWidget] = None,
+                      on_done: Optional[Callable[[], None]] = None, want_pdf: bool = False) -> None:
+        """Οφειλές ΑΑΔΕ / ΚΕΑΟ / ΕΦΚΑ στην ουρά εργασιών (ένας πελάτης τη φορά, διακοπή μετά τον τρέχοντα). `want_pdf`:
+        και τα έντυπα (ταυτότητες με δοσολόγιο, καρτέλες ΚΕΑΟ) — αλλιώς μόνο δεδομένα, όπως το Tax Center."""
+        from .. import debts as debts_mod
+        afms = list(dict.fromkeys(a for a in afms if a))
+        total = len(afms)
+        names = self._client_names(afms)
+        state = {"done": 0, "failed": 0, "reason": "", "overdue": 0.0}
+
+        def work(report, cancelled):
+            conn = dbmod.connect()
+            try:
+                for i, afm in enumerate(afms, 1):
+                    if cancelled():
+                        break
+                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i - 1)
+                    try:
+                        res = debts_mod.check_client(conn, afm, want_pdf=want_pdf)
+                    except Exception as exc:                   # noqa: BLE001 — ένας πελάτης δεν σταματά τους άλλους
+                        res = {"ok": False, "reason": str(exc)[:120]}
+                    if res["ok"]:
+                        state["overdue"] += res.get("overdue", 0.0)
+                    else:
+                        state["failed"] += 1
+                        state["reason"] = res["reason"]
+                    state["done"] = i
+                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i)
+            finally:
+                conn.close()
+            return state["done"]
+
+        def done(_n):
+            if on_done:
+                on_done()
+            if total == 1 and state["failed"]:
+                return f"Οφειλές: {state['reason']}", "danger"
+            msg = f"Λήψη οφειλών ({state['done']}/{total}): ληξιπρόθεσμα {office.money(state['overdue'])}"
+            msg += f" — {state['failed']} πελάτες απέτυχαν." if state["failed"] else "."
+            return msg, "warn" if state["failed"] else "ok"
+
+        self.jobs.submit(f"{'έντυπα' if want_pdf else 'ενημέρωση'} οφειλών — {total} "
+                         f"{'πελάτης' if total == 1 else 'πελάτες'}", work, total=total, window=window, on_done=done)
+
+    def on_fetch_requests(self) -> None:
+        with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
+        afms = [a for a in (self._selected_client_afms() or sorted(with_creds)) if a in with_creds]
+        if not afms:
+            toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
+            return
+        self.run_requests_sync(afms)
+
+    def run_requests_sync(self, afms: list[str], window: Optional[QWidget] = None,
+                          on_done: Optional[Callable[[], None]] = None) -> None:
+        """«Τα Αιτήματά μου» ΑΑΔΕ στην ουρά εργασιών — και τι άλλαξε (απαντήσεις, εκκρεμότητες) από την τελευταία φορά."""
+        from .. import requests_aade
+        afms = list(dict.fromkeys(a for a in afms if a))
+        total = len(afms)
+        names = self._client_names(afms)
+        state = {"done": 0, "failed": 0, "reason": "", "changes": 0}
+
+        def work(report, cancelled):
+            conn = dbmod.connect()
+            try:
+                for i, afm in enumerate(afms, 1):
+                    if cancelled():
+                        break
+                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i - 1)
+                    try:
+                        res = requests_aade.refresh(conn, afm)
+                    except Exception as exc:                   # noqa: BLE001
+                        res = {"ok": False, "reason": str(exc)[:120], "changes": {}}
+                    state["changes"] += len(res.get("changes") or {})
+                    if not res["ok"]:
+                        state["failed"] += 1
+                        state["reason"] = res["reason"]
+                    state["done"] = i
+                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i)
+            finally:
+                conn.close()
+            return state["done"]
+
+        def done(_n):
+            self._reload_notices()
+            if on_done:
+                on_done()
+            if total == 1 and state["failed"]:
+                return f"Αιτήματα: {state['reason']}", "danger"
+            msg = f"Αιτήματα ΑΑΔΕ ({state['done']}/{total}): {state['changes']} αλλαγές"
+            msg += f" — {state['failed']} πελάτες απέτυχαν." if state["failed"] else "."
+            return msg, "warn" if state["failed"] else "ok"
+
+        self.jobs.submit(f"αιτήματα ΑΑΔΕ — {total} {'πελάτης' if total == 1 else 'πελάτες'}", work, total=total,
+                         window=window, on_done=done)
 
     def on_fetch_mydata(self) -> None:
         """Μαζική λήψη myDATA (στοιχεία, όχι PDF): οι μήνες που χρειάζονται (τρέχων + προηγούμενος + όσοι λείπουν)."""
@@ -853,8 +978,10 @@ class MainWindow(QMainWindow):
                     state["docs"] += out.get("n", 0)
                     if pdfs and out["ok"]:
                         for ym in wanted:
+                            if cancelled():
+                                break
                             report(f"PDF {ym} — {names.get(afm, afm)}", i - 1)
-                            mydata_pdfs.download_month(conn, afm, ym)
+                            mydata_pdfs.download_month(conn, afm, ym, should_cancel=cancelled)
                     state["done"] = i
                     report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i)
                 report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"])
@@ -893,34 +1020,31 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             toast(self, f"Δεν ήταν δυνατή η ανάγνωση του αρχείου: {exc}", "danger")
             return
+        if not res.rows:
+            toast(self, "Δεν βρέθηκε κανένας έγκυρος ΑΦΜ στο αρχείο.", "warn")
+            return
         with_creds = [r.afm for r in res.rows if r.has_credentials]
         lookup_afms = with_creds or [r.afm for r in res.rows]
-        msg = (f"Βρέθηκαν {len(res.rows)} πελάτες" + (f", {res.credential_count} με κωδικούς TAXISnet" if res.credential_count else "")
-              + (f", {res.gemi_count} με κωδικούς Γ.Ε.ΜΗ." if res.gemi_count else "")
-              + (f", {res.mydata_count} με κωδικούς myDATA" if res.mydata_count else "")
-              + (f", {len(res.invalid)} άκυρες γραμμές" if res.invalid else "") + ".\n\n"
-              f"Να γίνει ΤΩΡΑ και ενημέρωση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για {len(lookup_afms)} "
-              f"{'πελάτες με κωδικούς TAXISnet' if with_creds else 'πελάτες'}; Μπορεί να πάρει λίγα λεπτά — "
-              "η εφαρμογή μένει διαθέσιμη και μπορείτε να την κάνετε και αργότερα από «Ανανέωση στοιχείων».")
-        box = QMessageBox(QMessageBox.Icon.Question, "Επιβεβαίωση εισαγωγής", msg, parent=self)
-        btn_both = box.addButton("Εισαγωγή & ενημέρωση στοιχείων", QMessageBox.ButtonRole.AcceptRole)
-        btn_only = box.addButton("Μόνο εισαγωγή", QMessageBox.ButtonRole.YesRole)
-        box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(btn_both)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked not in (btn_both, btn_only):
+        # Προεπισκόπηση όπως στο Timologio Downloader: νέοι / υπάρχουν ήδη και θα ενημερωθούν (με τι) / χωρίς αλλαγές.
+        preview = clients.preview_import(self.conn, res)
+        dlg = ImportPreviewDialog(path, res, preview, len(lookup_afms), bool(with_creds), self)
+        dlg.exec()
+        if dlg.choice not in ("lookup", "import"):
             return
         backup_mod.create_backup(config.db_path(), reason="import")
         out = clients.import_result(self.conn, res)
         engine.rematch(self.conn)
-        toast(self, f"Προστέθηκαν {out['added']} πελάτες, ενημερώθηκαν {out['updated']}."
+        existing = sum(1 for p in preview if p["action"] != "new")
+        toast(self, f"Προστέθηκαν {out['added']} νέοι πελάτες"
+                    + (f" · {existing} υπήρχαν ήδη ({sum(1 for p in preview if p['action'] == 'update')} ενημερώθηκαν)"
+                       if existing else "") + "."
                     + (f" Κωδικοί TAXISnet: {out['credentials']}." if out["credentials"] else "")
                     + (f" Κωδικοί Γ.Ε.ΜΗ.: {out['gemi']}." if out["gemi"] else "")
-                    + (f" Κωδικοί myDATA: {out['mydata']}." if out["mydata"] else ""), "ok")
+                    + (f" Κωδικοί myDATA: {out['mydata']}." if out["mydata"] else "")
+                    + (f" ΙΚΑ εργοδότη/ΑΜΕ: {out['ika']}." if out["ika"] else ""), "ok")
         self.reload_clients()
         self._refresh_status_bar()
-        if clicked is btn_both:
+        if dlg.choice == "lookup":
             self._start_lookup(lookup_afms)
 
     def on_export_csv(self) -> None:
@@ -1593,8 +1717,22 @@ class MainWindow(QMainWindow):
         self.sched_mydata.toggled.connect(
             lambda on: settings_store.set_value(self.conn, "daily_mydata", "1" if on else "0"))
         sf2.addWidget(self.sched_mydata)
+        self.sched_requests = QCheckBox("και αιτήματα ΑΑΔΕ")
+        self.sched_requests.setToolTip("«Τα Αιτήματά μου» κάθε πελάτη με κωδικούς: ειδοποίηση όταν απαντηθεί ή περιμένει "
+                                       "ενέργεια του πελάτη")
+        self.sched_requests.toggled.connect(
+            lambda on: settings_store.set_value(self.conn, "daily_requests", "1" if on else "0"))
+        sf2.addWidget(self.sched_requests)
+        self.fetch_members = QCheckBox("Άντληση μελών εταιρειών")
+        self.fetch_members.setToolTip("Με την ανάκτηση στοιχείων, και τα μέλη/εκπρόσωποι κάθε εταιρείας (όχι ατομικής) από "
+                                      "το Μητρώο ΑΑΔΕ — καρτέλα εταιρείας → «Μέλη»")
+        self.fetch_members.toggled.connect(
+            lambda on: settings_store.set_value(self.conn, "fetch_members", "1" if on else "0"))
+        sf2.addWidget(self.fetch_members)
         sf2.addStretch()
         root.addWidget(sched_box)
+        self.email_box = EmailSettingsBox(self.conn, self)
+        root.addWidget(self.email_box)
 
         pass_box = QGroupBox("Κύριος κωδικός")
         pf = QHBoxLayout(pass_box)
@@ -1644,9 +1782,11 @@ class MainWindow(QMainWindow):
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
-        self.sched_mydata.blockSignals(True)
-        self.sched_mydata.setChecked(settings_store.get(self.conn, "daily_mydata") != "0")
-        self.sched_mydata.blockSignals(False)
+        for box, key, on_default in ((self.sched_mydata, "daily_mydata", True), (self.sched_requests, "daily_requests", False),
+                                     (self.fetch_members, "fetch_members", False)):
+            box.blockSignals(True)
+            box.setChecked(settings_store.get(self.conn, key) == "1" or (on_default and settings_store.get(self.conn, key) != "0"))
+            box.blockSignals(False)
         for key, status in self._settings_status.items():
             if settings_store.is_set(self.conn, key):
                 status.setText("✓ Αποθηκευμένο")

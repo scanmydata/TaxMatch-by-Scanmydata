@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db as dbmod
-from .. import easycheck
+from .. import easycheck, efka
 from .. import deadlines, obligations
 from ..aml import model as aml_model, store as aml_store
 from ..aml.content import ASSESSMENT_LABEL
@@ -23,6 +23,9 @@ from ..matching.match import ALL_SCOPE_REASON
 from .busy import BusyOverlay
 from .icons import dot_icon, icon
 from .news_dialog import NewsDialog
+from .debts_tab import DebtsTab
+from .members_tab import MembersTab
+from .requests_tab import RequestsTab
 from .mydata_tab import MydataTab
 from .office_widgets import ClientFeesWidget
 from .theme import CURRENT
@@ -69,7 +72,7 @@ class ClientDetailDialog(QDialog):
         tabs.setIconSize(QSize(16, 16))
         root.addWidget(tabs, 1)
         tabs.addTab(self._profile_tab(), icon("edit", CURRENT.muted, 16), "Προφίλ")
-        tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet")
+        tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet && e-ΕΦΚΑ")
         tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προθεσμίες && υποβολές")
         news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
         tabs.addTab(self._aml_tab(), icon("aml", CURRENT.muted, 16), "Δέουσα επιμέλεια")
@@ -77,6 +80,12 @@ class ClientDetailDialog(QDialog):
         tabs.addTab(self.fees, icon("stats", CURRENT.muted, 16), "Αμοιβές")
         self.mydata = MydataTab(self.conn, afm, self, main=self.main)
         tabs.addTab(self.mydata, icon("etimologio", CURRENT.muted, 16), "myDATA")
+        self.debts_tab = DebtsTab(self.conn, afm, self, main=self.main)
+        tabs.addTab(self.debts_tab, icon("send", CURRENT.muted, 16), "Οφειλές && email")
+        self.requests_tab = RequestsTab(self.conn, afm, self, main=self.main)
+        tabs.addTab(self.requests_tab, icon("bell", CURRENT.muted, 16), "Αιτήματα ΑΑΔΕ")
+        self.members_tab = MembersTab(self.conn, afm, self, main=self.main)
+        tabs.addTab(self.members_tab, icon("clients", CURRENT.muted, 16), "Μέλη")
         if b["lookup_status"] == "ok":
             # Τα στοιχεία του πελάτη είναι ήδη πλήρη· αυτό που θα κοιτάξει πρώτα ο λογιστής είναι τι νέο τον αφορά,
             # όχι το προφίλ που δεν έχει αλλάξει.
@@ -103,6 +112,28 @@ class ClientDetailDialog(QDialog):
         form.addRow("ΔΟΥ", self.f_doy)
         self.f_address = QLineEdit()
         form.addRow("Διεύθυνση έδρας", self.f_address)
+        # Στοιχεία επικοινωνίας από το Μητρώο ΑΑΔΕ (getLdapInfo) — αν τα αλλάξει ο χρήστης, η ανάκτηση δεν τα πατά
+        contact = QHBoxLayout()
+        self.f_email = QLineEdit()
+        self.f_email.setPlaceholderText("email")
+        self.f_mobile = QLineEdit()
+        self.f_mobile.setPlaceholderText("κινητό")
+        self.f_mobile.setFixedWidth(130)
+        self.f_phone = QLineEdit()
+        self.f_phone.setPlaceholderText("σταθερό")
+        self.f_phone.setFixedWidth(130)
+        contact.addWidget(self.f_email, 1)
+        contact.addWidget(self.f_mobile)
+        contact.addWidget(self.f_phone)
+        form.addRow("Επικοινωνία", contact)
+        self.f_contact_note = QLabel("")
+        self.f_contact_note.setObjectName("muted")
+        self.f_email_auto = QCheckBox("Αυτόματα email (οφειλές / νέα) σε αυτόν τον πελάτη")
+        crow = QHBoxLayout()
+        crow.addWidget(self.f_email_auto)
+        crow.addStretch()
+        crow.addWidget(self.f_contact_note)
+        form.addRow("", crow)
         self.f_books = QComboBox()
         self.f_books.addItem("— άγνωστη —", "")
         self.f_books.addItem("Β (απλογραφικά)", "Β")
@@ -113,6 +144,14 @@ class ClientDetailDialog(QDialog):
         self.f_vat.addItem("Υπόχρεος ΦΠΑ", "1")
         self.f_vat.addItem("Μη υπόχρεος / απαλλασσόμενος", "0")
         form.addRow("Καθεστώς ΦΠΑ", self.f_vat)
+        self.f_vat_period = QComboBox()
+        for label, value in (("— αυτόματα (Μητρώο / Φ2 / βιβλία) —", ""), ("Μηνιαίος ΦΠΑ", "monthly"),
+                             ("Τριμηνιαίος ΦΠΑ", "quarterly")):
+            self.f_vat_period.addItem(label, value)
+        form.addRow("Περίοδος ΦΠΑ", self.f_vat_period)
+        self.f_vat_note = QLabel("")
+        self.f_vat_note.setWordWrap(True)
+        form.addRow("", self.f_vat_note)
         self.f_employer = QComboBox()
         for label, value in (("— άγνωστο —", ""), ("Ναι — απασχολεί προσωπικό (ΑΠΔ, Ε4)", "1"), ("Όχι", "0")):
             self.f_employer.addItem(label, value)
@@ -136,6 +175,36 @@ class ClientDetailDialog(QDialog):
         form.addRow("", save)
         return page
 
+    @staticmethod
+    def _contact_note(b: dict) -> str:
+        """Από πού και πότε ήρθαν τα στοιχεία επικοινωνίας — ώστε ο χρήστης να ξέρει αν είναι σωστά ενημερωμένα."""
+        if b.get("contact_source") == "manual":
+            return "διορθωμένα χειροκίνητα"
+        if b.get("contact_source") != "aade":
+            return "θα έρθουν με την ανάκτηση στοιχείων (κωδικοί TAXISnet του ίδιου του πελάτη)"
+        origin = {"mail2": "email επικοινωνίας του υπόχρεου",
+                  "mailemep": "⚠ email ΕΚΠΡΟΣΩΠΟΥ/ΛΟΓΙΣΤΗ — ο υπόχρεος δεν έχει δηλώσει δικό του",
+                  "mail": "παλιό email TAXISnet"}.get(b.get("email_origin") or "", "")
+        when = (b.get("contact_at") or "")[:10]
+        return "Μητρώο ΑΑΔΕ" + (f" · {origin}" if origin else "") + (f" · {when[8:10]}/{when[5:7]}/{when[:4]}" if when else "")
+
+    @staticmethod
+    def _vat_note(b: dict) -> str:
+        """Τι ισχύει ΤΩΡΑ για την περίοδο ΦΠΑ και από πού προκύπτει — μηνιαίος/τριμηνιαίος διακριτά (ρητό αίτημα)."""
+        if b.get("vat_subject") == 0:
+            return "Μη υπόχρεος ΦΠΑ."
+        period = obligations.vat_period(b)
+        if not period:
+            return "Η περίοδος ΦΠΑ δεν είναι γνωστή — ορίστε την ή τρέξτε «Έλεγχος υποβολών» (περίοδοι Φ2)."
+        source = {"easycheck": "από τις πραγματικές περιόδους Φ2 της ΑΑΔΕ", "manual": "επιλογή χρήστη"}.get(
+            b.get("vat_period_source") or "", "από το Μητρώο ΑΑΔΕ / την κατηγορία βιβλίων"
+            + (f" («{b['books_category_raw']}»)" if b.get("books_category_raw") else ""))
+        text = f"<b>{'Μηνιαίος' if period == 'monthly' else 'Τριμηνιαίος'} ΦΠΑ</b> — {html.escape(source)}."
+        note = obligations.vat_option_note(b)
+        if note:
+            text += f"<br><span style='color:{CURRENT.accent}'>{html.escape(note)}</span>"
+        return text
+
     def _save_profile(self) -> None:
         vat = self.f_vat.currentData()
         clients.update_fields(self.conn, self.afm, {
@@ -144,6 +213,19 @@ class ClientDetailDialog(QDialog):
             "books_category": self.f_books.currentData(), "status": self.f_status.text().strip(),
             "notes": self.f_notes.toPlainText().strip(),
         }, vat_subject={"1": True, "0": False}.get(vat, None))
+        old = self.conn.execute("SELECT email, mobile, phone FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        contact = (self.f_email.text().strip().lower(), self.f_mobile.text().strip(), self.f_phone.text().strip())
+        if contact != (old["email"], old["mobile"], old["phone"]):
+            self.conn.execute("UPDATE businesses SET email=?, mobile=?, phone=?, contact_source='manual' WHERE afm=?",
+                              (*contact, self.afm))
+        self.conn.execute("UPDATE businesses SET email_auto=? WHERE afm=?", (int(self.f_email_auto.isChecked()), self.afm))
+        period = self.f_vat_period.currentData()
+        if period:                                     # ρητή επιλογή χρήστη: η ανάκτηση Μητρώου δεν την πατά
+            self.conn.execute("UPDATE businesses SET vat_period_type=?, vat_period_source='manual' WHERE afm=?",
+                              (period, self.afm))
+        else:
+            self.conn.execute("UPDATE businesses SET vat_period_source='' WHERE afm=? AND vat_period_source='manual'",
+                              (self.afm,))
         flags = {"1": 1, "0": 0}
         self.conn.execute("UPDATE businesses SET employer=?, intrastat=? WHERE afm=?",
                           (flags.get(self.f_employer.currentData()), flags.get(self.f_intrastat.currentData()), self.afm))
@@ -189,7 +271,86 @@ class ClientDetailDialog(QDialog):
         clear.clicked.connect(self._clear_credentials)
         row.addWidget(clear)
         form.addRow("", row)
+
+        # e-ΕΦΚΑ εργοδότη: ΑΜΕ + κωδικοί ΙΚΑ εργοδότη — για τον έλεγχο υποβολής ΑΠΔ (οικονομική καρτέλα εργοδότη).
+        efka_head = QLabel("e-ΕΦΚΑ εργοδότη (έλεγχος ΑΠΔ)")
+        efka_head.setObjectName("h2")
+        form.addRow(efka_head)
+        self._cred_form = form
+        self.e_amka = QLineEdit()
+        self.e_amka.setPlaceholderText("11 ψηφία — για ΚΕΑΟ και τρέχουσες εισφορές e-ΕΦΚΑ (φυσικά πρόσωπα)")
+        form.addRow("ΑΜΚΑ", self.e_amka)
+        self.e_ame = QLineEdit()
+        self.e_ame.setPlaceholderText("10 ψηφία — από Excel, χειροκίνητα ή «Ανάκτηση ΑΜΕ»")
+        form.addRow("ΑΜΕ (Αρ. Μητρώου Εργοδότη)", self.e_ame)
+        self.e_user = QLineEdit()
+        form.addRow("Χρήστης ΙΚΑ εργοδότη", self.e_user)
+        self.e_pass = QLineEdit()
+        self.e_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.e_pass.setPlaceholderText("(αφήστε κενό για να μείνει ως έχει)")
+        form.addRow("Κωδικός ΙΚΑ εργοδότη", self.e_pass)
+        self.e_status = QLabel("")
+        self.e_status.setWordWrap(True)
+        self.e_status.setObjectName("muted")
+        form.addRow("", self.e_status)
+        erow = QHBoxLayout()
+        esave = QPushButton("Αποθήκευση")
+        esave.clicked.connect(self._save_efka)
+        erow.addWidget(esave)
+        fetch_ame = QPushButton(icon("download", CURRENT.txt, 16), "  Ανάκτηση ΑΜΕ")
+        fetch_ame.setToolTip("Από την «Πιστοποίηση Εργοδοτών» του e-ΕΦΚΑ, με τους κωδικούς ΙΚΑ εργοδότη ή TAXISnet του "
+                             "πελάτη — μόνο ανάγνωση")
+        fetch_ame.clicked.connect(self._retrieve_ame)
+        erow.addWidget(fetch_ame)
+        erow.addStretch()
+        form.addRow("", erow)
         return page
+
+    def _save_efka(self) -> None:
+        ame = self.e_ame.text().strip()
+        if ame and not efka.normalize_ame(ame):
+            toast(self, "Ο ΑΜΕ πρέπει να είναι έως 10 ψηφία.", "warn")
+            return
+        user, pwd = self.e_user.text().strip(), self.e_pass.text()
+        amka = self.e_amka.text().strip()
+        if amka and amka != efka.get_amka(self.conn, self.afm) and not efka.set_amka(self.conn, self.afm, amka):
+            toast(self, "Ο ΑΜΚΑ πρέπει να έχει 11 ψηφία.", "warn")
+            return
+        if amka and not (ame or user or pwd):
+            toast(self, "Ο ΑΜΚΑ αποθηκεύτηκε (κρυπτογραφημένος).", "ok")
+            self._reload()
+            return
+        if not efka.set_(self.conn, self.afm, ame=ame or None, user=user, password=pwd):
+            toast(self, "Δεν δόθηκαν στοιχεία e-ΕΦΚΑ.", "warn")
+            return
+        self.e_pass.clear()
+        toast(self, "Τα στοιχεία e-ΕΦΚΑ αποθηκεύτηκαν (οι κωδικοί κρυπτογραφημένοι).", "ok")
+        self._reload()
+
+    def _retrieve_ame(self) -> None:
+        if not (efka.ika_credentials(self.conn, self.afm) or client_creds.get(self.conn, self.afm)):
+            toast(self, "Χρειάζονται κωδικοί ΙΚΑ εργοδότη ή TAXISnet του πελάτη.", "warn")
+            return
+
+        def work(_p):
+            conn = dbmod.connect()           # δικό του thread — ποτέ η σύνδεση του UI
+            try:
+                return efka.retrieve_ame(conn, self.afm)
+            finally:
+                conn.close()
+
+        def done(res):
+            self.busy.stop()
+            toast(self, f"ΑΜΕ: {res['ame']}" if res["ok"] else res["reason"], "ok" if res["ok"] else "warn")
+            self._reload()
+
+        def failed(m):
+            self.busy.stop()
+            toast(self, m, "danger")
+
+        toast(self, "Ξεκίνησε η ανάκτηση ΑΜΕ από τον e-ΕΦΚΑ…", "info")
+        self.busy.start("Ανάκτηση ΑΜΕ…")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _save_credentials(self) -> None:
         user, pwd = self.c_user.text().strip(), self.c_pass.text()
@@ -565,6 +726,15 @@ class ClientDetailDialog(QDialog):
         self.f_books.setCurrentIndex(max(0, self.f_books.findData(b["books_category"] or "")))
         vat_value = "" if b["vat_subject"] is None else str(int(b["vat_subject"]))
         self.f_vat.setCurrentIndex(max(0, self.f_vat.findData(vat_value)))
+        full = dict(self.conn.execute("SELECT * FROM businesses WHERE afm=?", (self.afm,)).fetchone())
+        self.f_vat_period.setCurrentIndex(max(0, self.f_vat_period.findData(
+            full["vat_period_type"] if full["vat_period_source"] == "manual" else "")))
+        self.f_vat_note.setText(self._vat_note(full))
+        self.f_email.setText(full["email"])
+        self.f_mobile.setText(full["mobile"])
+        self.f_phone.setText(full["phone"])
+        self.f_email_auto.setChecked(bool(full["email_auto"]))
+        self.f_contact_note.setText(self._contact_note(full))
         flags = self.conn.execute("SELECT employer, intrastat FROM businesses WHERE afm=?", (self.afm,)).fetchone()
         for box, value in ((self.f_employer, flags["employer"]), (self.f_intrastat, flags["intrastat"])):
             box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
@@ -582,6 +752,19 @@ class ClientDetailDialog(QDialog):
         else:
             self.c_status.setText("Δεν έχουν δοκιμαστεί ακόμη." if cred else "")
             self.c_status.setStyleSheet("")
+        ef = efka.status_map(self.conn).get(self.afm) or {}
+        self.e_ame.setText(ef.get("ame", ""))
+        self.e_amka.setText(efka.get_amka(self.conn, self.afm))
+        # Οι εταιρείες δεν έχουν ΑΜΚΑ — συνδέονται στον e-ΕΦΚΑ/ΚΕΑΟ ως εργοδότες με ΑΜΕ
+        company = obligations.is_legal_entity(b.get("legal_form") or "")
+        self.e_amka.setVisible(not company)
+        label = self._cred_form.labelForField(self.e_amka)
+        if label is not None:
+            label.setVisible(not company)
+        self.e_user.setText(efka.ika_user(self.conn, self.afm))
+        self.e_status.setText(ef.get("check_message") or ("Ο ΑΜΕ χρειάζεται για τον έλεγχο ΑΠΔ — χωρίς αυτόν γίνεται "
+                                                          "προσπάθεια ανάκτησης κατά τον έλεγχο υποβολών."
+                                                          if not ef.get("ame") else ""))
         self.hint_label.setText("Χωρίς δικούς του κωδικούς, το Μητρώο ΑΑΔΕ δεν δίνει στοιχεία για αυτόν τον πελάτη "
                                 "(δείχνει μόνο το ΑΦΜ με το οποίο έγινε η σύνδεση) — θα χρησιμοποιηθούν ΓΕΜΗ/VIES όπου υπάρχουν."
                                 if not cred else "")

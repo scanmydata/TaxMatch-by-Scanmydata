@@ -137,13 +137,17 @@ CLIMATE_TYPE = "8.2"      # Ειδικό στοιχείο είσπραξης τ�
 def special_fees(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, float]:
     """Τέλη που ΕΙΣΠΡΑΤΤΕΙ ο πελάτης στα έσοδά του τον μήνα και οφείλει να δηλώσει/αποδώσει:
     'climate' = σύνολο παραστατικών 8.2 (τέλος ανθεκτικότητας — δήλωση έως το τέλος του επόμενου μήνα)·
-    'digital_fee' = ψηφιακό τέλος συναλλαγής (πρώην χαρτόσημο, ν. 5135/2024 — δήλωση έως το τέλος του επόμενου μήνα)."""
+    'digital_fee' = ψηφιακό τέλος συναλλαγής (πρώην χαρτόσημο, ν. 5135/2024 — δήλωση έως το τέλος του επόμενου μήνα)
+    ΧΩΡΙΣ τα ενοίκια· 'rent_fee' = ψηφιακό τέλος σε ενοίκια (8.1 / 3,6%): ΔΕΝ δημιουργεί μηνιαία υποχρέωση — αποδίδεται
+    με τη δήλωση φορολογίας εισοδήματος (ρητό αίτημα χρήστη 2026-10-22)."""
     r = conn.execute("SELECT COALESCE(SUM(CASE WHEN invoice_type=? THEN total ELSE 0 END),0) AS climate, "
-                     "COALESCE(SUM(stamp),0) AS digital FROM mydata_docs WHERE afm=? AND direction='outgoing' AND "
-                     "cancelled=0 AND substr(issue_date,1,7)=?", (CLIMATE_TYPE, afm, ym)).fetchone()
+                     "COALESCE(SUM(CASE WHEN rent=0 THEN stamp ELSE 0 END),0) AS digital, "
+                     "COALESCE(SUM(CASE WHEN rent=1 THEN stamp ELSE 0 END),0) AS rent_fee FROM mydata_docs WHERE afm=? "
+                     "AND direction='outgoing' AND cancelled=0 AND substr(issue_date,1,7)=?", (CLIMATE_TYPE, afm, ym)).fetchone()
     n82 = conn.execute("SELECT COUNT(*) FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 AND "
                        "invoice_type=? AND substr(issue_date,1,7)=?", (afm, CLIMATE_TYPE, ym)).fetchone()[0]
-    return {"climate": round(r["climate"], 2), "climate_docs": n82, "digital_fee": round(r["digital"], 2)}
+    return {"climate": round(r["climate"], 2), "climate_docs": n82, "digital_fee": round(r["digital"], 2),
+            "rent_fee": round(r["rent_fee"], 2)}
 
 
 def vat_warnings(conn: sqlite3.Connection, afm: str, year: Optional[int] = None) -> list[dict[str, Any]]:
@@ -158,6 +162,28 @@ def vat_warnings(conn: sqlite3.Connection, afm: str, year: Optional[int] = None)
         sql += " AND substr(issue_date,1,4)=?"
         args.append(str(year))
     return [dict(r) for r in conn.execute(sql + " ORDER BY issue_date", args)]
+
+
+#: Καταχωρήσεις ΛΗΠΤΗ (τις διαβιβάζει ο ίδιος ο πελάτης ως αγοραστής/μισθωτής): είναι ΕΞΟΔΑ παρότι είναι «διαβιβασμένα».
+RECEIVER_TYPES = ("13.", "14.", "16.")
+
+
+def is_income(doc: dict[str, Any]) -> bool:
+    """Έσοδο (εκδοθέν του πελάτη) ή έξοδο (λήψη ή καταχώρηση λήπτη 13.x/14.x/16.x) — για τη στήλη «Έσοδο/Έξοδο»."""
+    return doc["direction"] == "outgoing" and not str(doc.get("invoice_type") or "").startswith(RECEIVER_TYPES)
+
+
+def year_totals(conn: sqlite3.Connection, afm: str, year: str) -> dict[str, float]:
+    """Σύνολα χρήσης από το myDATA: καθαρή αξία εσόδων/εξόδων (πιστωτικά αφαιρούνται), ΦΠΑ, παρακρατήσεις, πλήθος."""
+    out = {"income": 0.0, "expenses": 0.0, "withheld": 0.0, "n": 0}
+    for r in conn.execute("SELECT direction, invoice_type, net, withheld FROM mydata_docs WHERE afm=? AND cancelled=0 "
+                          "AND substr(issue_date,1,4)=?", (afm, year)):
+        key = "income" if is_income(dict(r)) else "expenses"
+        out[key] = round(out[key] + _sign(r["invoice_type"]) * r["net"], 2)
+        if r["direction"] == "incoming":
+            out["withheld"] = round(out["withheld"] + (r["withheld"] or 0), 2)
+        out["n"] += 1
+    return out
 
 
 def vat_balance(conn: sqlite3.Connection, afm: str, months: list[str]) -> dict[str, float]:

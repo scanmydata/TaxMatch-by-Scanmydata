@@ -95,6 +95,18 @@ class _HyperHttp:
         self._store(url, resp)
         return resp
 
+    def post_raw(self, url: str, body: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """POST με ακατέργαστο σώμα (JSON των REST εφαρμογών της ΑΑΔΕ — `http.api` του runner), χωρίς ανακατευθύνσεις."""
+        h = {"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Content-Type": "application/json",
+             "Accept-Language": "el-GR,el;q=0.9,en;q=0.8", **(headers or {})}
+        ck = self._cookie(url)
+        if ck:
+            h["Cookie"] = ck
+        resp = self.session.request("POST", url, headers=h, data=body.encode("utf-8"), allow_redirects=False,
+                                    timeout=self.timeout)
+        self._store(url, resp)
+        return {"url": url, "status": resp.status_code, "text": resp.text}
+
     def follow(self, method: str, url: str, form: Optional[Dict[str, str]] = None,
                headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         res = self._once(method, url, form, headers)
@@ -283,8 +295,33 @@ def build_profile(target: str, login_afm: str, userdata: str, fysiko: str, epix:
     }
 
 
+_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$")
+
+
+def parse_contact(ldap: str) -> Dict[str, str]:
+    """Στοιχεία επικοινωνίας από το `getLdapInfo/{afm}` του Μητρώου (port του ScanMyData Tax Center `aade-profile.js`,
+    επαληθευμένο ζωντανά εκεί): email από `mail2` → `mailemep` → `mail`· κινητό από `mobilenumber` → `mobilenumberemep`
+    (ΜΟΝΟ ελληνικό 69xxxxxxxx — λάθος αριθμός θα έστελνε φορολογικά στοιχεία σε τρίτο)· σταθερό από `phonenumber`."""
+    out = {"email": "", "mobile": "", "phone": "", "origin": ""}
+    for name in ("mail2", "mailemep", "mail"):
+        candidate = _tag(ldap, name)
+        if candidate and _EMAIL.match(candidate):
+            out["email"] = candidate.lower()
+            out["origin"] = name          # mail2 = του υπόχρεου · mailemep = εκπροσώπου/λογιστή · mail = παλιό TAXISnet
+            break
+    for name in ("mobilenumber", "mobilenumberemep"):
+        digits = re.sub(r"^0030|^30(?=69)", "", re.sub(r"\D", "", _tag(ldap, name)))
+        if re.fullmatch(r"69\d{8}", digits):
+            out["mobile"] = digits
+            break
+    phone = re.sub(r"[^\d+]", "", _tag(ldap, "phonenumber"))
+    if len(re.sub(r"\D", "", phone)) >= 10:
+        out["phone"] = phone
+    return out
+
+
 def fetch_company_profile(username: str, password: str, afm: Optional[str] = None,
-                          login_fn=aade_login) -> Dict[str, Any]:
+                          login_fn=aade_login, with_members: bool = False) -> Dict[str, Any]:
     """Login + Μητρώο (φυσικού + επιχείρησης + δραστηριοτήτων/ΚΑΔ) για `afm` (κενό = ο ΑΦΜ του λογαριασμού)."""
     login = login_fn(username, password)
     if not login.get("ok"):
@@ -308,4 +345,19 @@ def fetch_company_profile(username: str, password: str, afm: Optional[str] = Non
             activities = http.follow("GET", w + "/getMhtrwoDrastiriothtesEpixeir/" + target)["text"]
         except requests.RequestException:            # οι ΚΑΔ είναι επιπλέον· μην χαλάς όλο το lookup
             log.warning("οι δραστηριότητες (ΚΑΔ) δεν ανακτήθηκαν για το ΑΦΜ %s", target)
-    return build_profile(target, login_afm, userdata, fysiko, epix, activities)
+    profile = build_profile(target, login_afm, userdata, fysiko, epix, activities)
+    if profile.get("ok") and target == login_afm:
+        # Στοιχεία επικοινωνίας (email/κινητό/τηλέφωνο) — μόνο για τον ΑΦΜ του λογαριασμού (ξένος ΑΦΜ = του γραφείου!)
+        try:
+            # cache-buster όπως η ίδια η σελίδα της ΑΑΔΕ (Tax Center aade-email.js) — αλλιώς μπορεί να έρθει παλιό email
+            ldap = http.follow("GET", w + "/getLdapInfo/" + target + "?" + str(int(datetime.now().timestamp() * 1000)))
+            profile["contact"] = parse_contact(ldap["text"])
+        except requests.RequestException:
+            log.warning("τα στοιχεία επικοινωνίας δεν ανακτήθηκαν για το ΑΦΜ %s", target)
+    if profile.get("ok") and with_members and profile.get("kind") == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ":
+        from ..members import fetch_from_registry      # μέλη/εκπρόσωποι εταιρείας (όχι ατομικής) — ρύθμιση fetch_members
+        try:
+            profile["members"] = fetch_from_registry(http, target)
+        except requests.RequestException:
+            log.warning("τα μέλη δεν ανακτήθηκαν για το ΑΦΜ %s", target)
+    return profile

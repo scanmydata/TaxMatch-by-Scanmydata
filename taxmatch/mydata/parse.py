@@ -106,6 +106,20 @@ def carries_vat(inv: ET.Element, direction: str = "outgoing") -> bool:
     return False
 
 
+#: Παραστατικό ΕΝΟΙΚΙΟΥ: τύπος 8.1 «Ενοίκια – Έσοδο», ή γραμμή με ψηφιακό τέλος κατηγορίας 3 (3,6% = ο συντελεστής των
+#: μισθώσεων ακινήτων, άρθρο 6 ν. 5135/2024). Στα ενοίκια το ψηφιακό τέλος αποδίδεται ΕΤΗΣΙΩΣ με τη δήλωση φορολογίας
+#: εισοδήματος — όχι με τη μηνιαία δήλωση (ρητό αίτημα χρήστη 2026-10-22· στα πραγματικά του δεδομένα ψηφιακό τέλος
+#: στα έσοδα υπήρχε μόνο σε 8.1, 3,56% επί της καθαρής).
+RENT_TYPES = ("8.1",)
+RENT_STAMP_CATEGORY = "3"
+
+
+def is_rent(inv: ET.Element, invoice_type: str) -> bool:
+    if invoice_type in RENT_TYPES:
+        return True
+    return any(_t(det, "stampDutyPercentCategory") == RENT_STAMP_CATEGORY for det in inv.iter(NS + "invoiceDetails"))
+
+
 def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
     header = inv.find(NS + "invoiceHeader")
     summary = inv.find(NS + "invoiceSummary")
@@ -124,6 +138,7 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
         "cancelled": bool(_t(inv, "cancelledByMark")),
         # Ψηφιακό τέλος συναλλαγής = το πρώην «χαρτόσημο» του myDATA (μετονομασία στο API v1.0.11)
         "stamp": round(_f(_t(summary, "totalStampDutyAmount")), 2), "vat_class": carries_vat(inv, direction),
+        "rent": is_rent(inv, _t(header, "invoiceType")),
     }
 
 

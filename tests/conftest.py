@@ -6,6 +6,8 @@ import pytest
 from cryptography.fernet import Fernet
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Έντυπα (reports.py) φτιάχνουν Qt εφαρμογή και εκτός GUI tests — πάντα headless, όπως τα GUI tests.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 @pytest.fixture(autouse=True)

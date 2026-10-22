@@ -136,12 +136,59 @@ def _is_better_name(current: str, new: str) -> bool:
     return len(b) > len(a) and b.startswith(a + " ")
 
 
+def _is_company(conn: sqlite3.Connection, afm: str, name: str = "") -> bool:
+    """Εταιρεία (νομικό πρόσωπο) από τη νομική μορφή — ή, αν δεν είναι ακόμη γνωστή, από την κατάληξη της επωνυμίας."""
+    from ..obligations import is_legal_entity
+    row = conn.execute("SELECT legal_form, name FROM businesses WHERE afm=?", (afm,)).fetchone()
+    form = (row["legal_form"] if row else "") or legal_form.from_name(name or (row["name"] if row else ""))
+    return is_legal_entity(form or "")
+
+
+def preview_import(conn: sqlite3.Connection, res: ImportResult) -> list[dict[str, Any]]:
+    """Τι θα κάνει η εισαγωγή για κάθε γραμμή, ΠΡΙΝ γραφτεί οτιδήποτε (όπως το Timologio Downloader — ρητό αίτημα χρήστη
+    2026-10-22): {afm, name, action: new|update|same, existing_name, changes: [...]}. Οι κωδικοί συγκρίνονται
+    αποκρυπτογραφημένοι ΜΟΝΟ εδώ, για το ναι/όχι — δεν επιστρέφονται ποτέ."""
+    from .. import efka
+    from ..aml import gemi_browser
+    from ..mydata import credentials as mydata_creds
+    out = []
+    for r in res.rows:
+        row = conn.execute("SELECT name, employer, intrastat FROM businesses WHERE afm=?", (r.afm,)).fetchone()
+        if row is None:
+            out.append({"afm": r.afm, "name": r.name, "action": "new", "existing_name": "", "changes": []})
+            continue
+        changes = []
+        if r.name and _is_better_name(row["name"], r.name):
+            changes.append("επωνυμία")
+        for label, has, new, old in (
+                ("κωδικοί TAXISnet", r.has_credentials, (r.taxis_user, r.taxis_pass), credentials.get(conn, r.afm)),
+                ("κωδικοί Γ.Ε.ΜΗ.", r.has_gemi, (r.gemi_user, r.gemi_pass), gemi_browser.get_credentials(conn, r.afm)),
+                ("κωδικοί myDATA", r.has_mydata, (r.mydata_user, r.mydata_key), mydata_creds.get(conn, r.afm)),
+                ("κωδικοί ΙΚΑ εργοδότη", r.has_ika, (r.ika_user, r.ika_pass), efka.ika_credentials(conn, r.afm))):
+            if has and tuple(old or ()) != new:
+                changes.append(label + (" (νέοι)" if not old else " (αλλαγή)"))
+        if r.ame and efka.normalize_ame(r.ame) != efka.get_ame(conn, r.afm):
+            changes.append("ΑΜΕ")
+        if r.amka and not _is_company(conn, r.afm, r.name) and r.amka.split(".")[0].strip().zfill(11) != efka.get_amka(conn, r.afm):
+            changes.append("ΑΜΚΑ")
+        if r.member_of or r.member_afms:
+            changes.append("μέλη εταιρείας")
+        if r.employer is not None and row["employer"] != int(r.employer):
+            changes.append("μισθοδοσία")
+        if r.intrastat and not row["intrastat"]:
+            changes.append("Intrastat")
+        out.append({"afm": r.afm, "name": r.name or row["name"], "action": "update" if changes else "same",
+                    "existing_name": row["name"] or "", "changes": changes})
+    return out
+
+
 def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]:
     """Αποθηκεύει τις γραμμές του import. Υπάρχοντες πελάτες δεν αντικαθίστανται (συμπληρώνεται μόνο κενή επωνυμία)·
     οι κωδικοί TAXISnet (και Γ.Ε.ΜΗ.) όμως ΕΝΗΜΕΡΩΝΟΝΤΑΙ και σε υπάρχοντες (η μαζική ρύθμιση κωδικών είναι βασική χρήση)."""
     from ..aml import gemi_browser              # τοπικά: το aml/ εξαρτάται ήδη από το business_profiles, όχι το αντίστροφο
     from ..mydata import credentials as mydata_creds
-    added = updated = creds = gemi = mydata = 0
+    from .. import efka
+    added = updated = creds = gemi = mydata = ika = 0
     for r in res.rows:
         if add(conn, r.afm, r.name, source="excel", kads=r.kads):
             added += 1
@@ -156,12 +203,20 @@ def import_result(conn: sqlite3.Connection, res: ImportResult) -> dict[str, int]
             gemi += 1
         if r.has_mydata and mydata_creds.set_(conn, r.afm, r.mydata_user, r.mydata_key):
             mydata += 1
+        if (r.has_ika or r.ame) and efka.set_(conn, r.afm, ame=r.ame or None, user=r.ika_user, password=r.ika_pass,
+                                              source="excel"):
+            ika += 1
+        if r.amka and not _is_company(conn, r.afm, r.name):
+            efka.set_amka(conn, r.afm, r.amka)            # οι εταιρείες δεν έχουν ΑΜΚΑ
         if r.employer is not None:
             conn.execute("UPDATE businesses SET employer=? WHERE afm=?", (int(r.employer), r.afm))
         if r.intrastat:
             conn.execute("UPDATE businesses SET intrastat=1 WHERE afm=?", (r.afm,))
+    from .. import members as members_mod
+    linked = members_mod.from_import(conn, res.rows)
     return {"added": added, "updated": updated, "invalid": len(res.invalid), "duplicates": res.duplicates,
-            "credentials": creds, "gemi": gemi, "mydata": mydata}
+            "members": linked,
+            "credentials": creds, "gemi": gemi, "mydata": mydata, "ika": ika}
 
 
 # ------------------------------------------------------------------ lookups
@@ -254,7 +309,9 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     for who, user, pwd in attempts:
         attempted = True
         try:
-            a = aade_fetch(user, pwd, afm)
+            # Μέλη εταιρείας (ρύθμιση «Άντληση μελών εταιρειών») — μόνο με τους κωδικούς της ίδιας της εταιρείας
+            with_members = who == "client" and settings_store.get(conn, "fetch_members") == "1"
+            a = aade_fetch(user, pwd, afm, with_members=True) if with_members else aade_fetch(user, pwd, afm)
         except requests.RequestException as exc:
             errors.append(f"ΑΑΔΕ: σφάλμα δικτύου ({str(exc)[:120]})")
             break                                  # το δίκτυο θα αποτύχει και για τους επόμενους κωδικούς
@@ -373,8 +430,22 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
                  vat["books_category_raw"]]
         # Η περίοδος από τις ΠΡΑΓΜΑΤΙΚΕΣ υποχρεώσεις Φ2 (easycheck, vat_period_source='easycheck') υπερισχύει της
         # ερμηνείας της κατηγορίας βιβλίων — δεν την πατάμε.
-        sets.append("vat_period_type=CASE WHEN vat_period_source='easycheck' THEN vat_period_type ELSE ? END")
+        sets.append("vat_period_type=CASE WHEN vat_period_source IN ('easycheck','manual') THEN vat_period_type ELSE ? END")
         args.append(vat["vat_period_type"])
+    contact = (aade or {}).get("contact") or {}
+    if any(contact.values()):
+        # Στοιχεία επικοινωνίας του Μητρώου — ΠΟΤΕ πάνω σε όσα άλλαξε ο χρήστης (contact_source='manual')
+        sets.append("email=CASE WHEN contact_source='manual' THEN email ELSE ? END")
+        sets.append("mobile=CASE WHEN contact_source='manual' THEN mobile ELSE ? END")
+        sets.append("phone=CASE WHEN contact_source='manual' THEN phone ELSE ? END")
+        sets.append("contact_source=CASE WHEN contact_source='manual' THEN 'manual' ELSE 'aade' END")
+        sets.append("email_origin=CASE WHEN contact_source='manual' THEN email_origin ELSE ? END")
+        sets.append("contact_at=?")
+        args += [contact.get("email", ""), contact.get("mobile", ""), contact.get("phone", ""), contact.get("origin", ""),
+                 now]
+    if aade and aade.get("members") is not None:
+        from .. import members as members_mod
+        members_mod.store(conn, afm, aade["members"], "aade")
     if kads:
         set_kads(conn, afm, kads)
     elif aade and aade.get("business_state") in ("ceased", "none"):

@@ -105,19 +105,25 @@ def file_name(doc: dict) -> str:
 
 
 def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optional[Callable[[int, int], None]] = None,
-                   fetch: Callable[[str], bytes] = None) -> dict[str, int]:
-    """PDF όλων των παραστατικών του μήνα που δεν έχουν ήδη κατέβει. Επιστρέφει πλήθη ανά κατάσταση."""
+                   fetch: Callable[[str], bytes] = None,
+                   should_cancel: Optional[Callable[[], bool]] = None) -> dict[str, int]:
+    """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει.
+    Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) δεν ξαναζητούνται."""
     session = requests.Session()
     fetch = fetch or (lambda u: fetch_pdf(u, session))
     rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,7)=? ORDER BY issue_date, mark", (afm, ym))]
-    folder = month_dir(afm, ym)
+        "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))]
     counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0}
     try:
         for i, doc in enumerate(rows, 1):
+            if should_cancel and should_cancel():
+                break
+            folder = month_dir(afm, doc["issue_date"][:7])
             status, path = doc["pdf_status"], doc["pdf_path"]
             if status == "ok" and path and Path(path).exists():
                 counts["ok"] += 1
+            elif status == "viewer" and doc["url"]:
+                counts["viewer"] += 1
             elif not doc["url"]:
                 status, path = "no_url", ""
                 counts["no_url"] += 1
@@ -147,9 +153,9 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
 
 
 def zip_month(conn: sqlite3.Connection, afm: str, ym: str, marks: Optional[list[str]] = None) -> bytes:
-    """ZIP με τα PDF του μήνα (ή μόνο των επιλεγμένων MARK), σε φακέλους «Λήψεις» / «Εκδοθέντα»."""
-    sql = "SELECT direction, pdf_path FROM mydata_docs WHERE afm=? AND substr(issue_date,1,7)=? AND pdf_status='ok'"
-    args: list = [afm, ym]
+    """ZIP με τα PDF του μήνα ή της χρήσης (ή μόνο των επιλεγμένων MARK), σε φακέλους «Λήψεις» / «Εκδοθέντα»."""
+    sql = "SELECT direction, pdf_path FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? AND pdf_status='ok'"
+    args: list = [afm, len(ym), ym]
     if marks:
         sql += f" AND mark IN ({','.join('?' * len(marks))})"
         args += marks
