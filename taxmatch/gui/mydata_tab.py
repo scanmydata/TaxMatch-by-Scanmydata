@@ -1,31 +1,33 @@
-"""Καρτέλα πελάτη → «myDATA»: κωδικοί API, παραστατικά ανά μήνα με επιτόπια προεπισκόπηση PDF, ZIP, εκτύπωση,
-και ό,τι προκύπτει για τις υποχρεώσεις (παρακρατούμενοι φόροι, VIES, Intrastat). Λογική: `taxmatch/mydata/`."""
+"""Καρτέλα πελάτη → «myDATA»: κωδικοί API, παραστατικά ανά χρήση/μήνα (με την επωνυμία του αντισυμβαλλόμενου, όπως το
+Timologio Downloader), PDF / ZIP / εκτύπωση, και ό,τι προκύπτει για τις υποχρεώσεις: παρακρατούμενοι φόροι, VIES,
+Intrastat, τέλος ανθεκτικότητας (8.2), ψηφιακό τέλος συναλλαγής, προειδοποίηση ΦΠΑ σε μη υπόχρεο. Λογική: `taxmatch/mydata/`.
+
+Οι λήψεις τρέχουν στην ουρά εργασιών του κύριου παραθύρου (`MainWindow.run_mydata_sync`): με διακοπή, και αν κλείσει η
+καρτέλα το μήνυμα προόδου περνά στο κύριο παράθυρο. Η προεπισκόπηση PDF στο πλάι αφαιρέθηκε (ρητό αίτημα χρήστη
+2026-10-22) — διπλό κλικ / «Άνοιγμα PDF» το ανοίγει στον προεπιλεγμένο προβολέα."""
 from __future__ import annotations
 
 import html
 from datetime import date
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtPdf import QPdfDocument
-from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
-from .. import office
-from ..mydata import analysis, credentials as mydata_creds, pdfs, store
+from .. import deadlines, obligations, office
+from ..mydata import analysis, credentials as mydata_creds, names, pdfs, store
 from .icons import icon
 from .theme import CURRENT
-from .toast import ProgressToast, toast
+from .toast import toast
 from .workers import run_task
 
-#: Λίγες στήλες: ο πίνακας μοιράζεται το πλάτος με την προεπισκόπηση PDF (ΑΦΜ/ΦΠΑ στο tooltip της γραμμής).
-_COLS = ["Ημ/νία", "Τύπος", "Λ/Ε", "Αντισυμβαλλόμενος", "Καθαρή", "Σύνολο", "Παρακρ.", "PDF"]
+_COLS = ["Ημ/νία", "Τύπος", "Λ/Ε", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
 HISTORY_MONTHS = 24                     # για Intrastat χρειάζεται όλο το προηγούμενο έτος + το τρέχον
 
 
@@ -34,10 +36,17 @@ def _months(n: int = 36) -> list[str]:
     return store.previous_months(f"{today.year}-{today.month:02d}", n)
 
 
+def year_months(year: int) -> list[str]:
+    """Οι μήνες της χρήσης ως σήμερα (νεότερος πρώτος)."""
+    today = date.today()
+    last = 12 if year < today.year else today.month
+    return [f"{year}-{m:02d}" for m in range(last, 0, -1)]
+
+
 class MydataTab(QWidget):
-    def __init__(self, conn, afm: str, window: QWidget) -> None:
+    def __init__(self, conn, afm: str, window: QWidget, main: Any = None) -> None:
         super().__init__()
-        self.conn, self.afm, self.window_ = conn, afm, window
+        self.conn, self.afm, self.window_, self.main = conn, afm, window, main
         self._tasks: list = []
         self._docs: list[dict[str, Any]] = []
         root = QVBoxLayout(self)
@@ -64,11 +73,15 @@ class MydataTab(QWidget):
         root.addWidget(self.creds_status)
 
         bar = QHBoxLayout()
+        bar.addWidget(QLabel("Χρήση:"))
+        self.year = QComboBox()
+        this_year = date.today().year
+        for y in range(this_year, this_year - 6, -1):
+            self.year.addItem(str(y), y)
+        self.year.currentIndexChanged.connect(lambda _i: self._fill_months())
+        bar.addWidget(self.year)
         bar.addWidget(QLabel("Μήνας:"))
         self.month = QComboBox()
-        for ym in _months():
-            self.month.addItem(analysis.month_label(ym), ym)
-        self.month.setCurrentIndex(1)                     # προηγούμενος μήνας: ο τελευταίος «κλειστός»
         self.month.currentIndexChanged.connect(lambda _i: self.reload())
         bar.addWidget(self.month)
         self.fetch_btn = QPushButton(icon("download", CURRENT.txt, 16), "  Λήψη μήνα")
@@ -76,21 +89,33 @@ class MydataTab(QWidget):
         self.fetch_btn.setToolTip("Παραστατικά του μήνα από το myDATA (λήψεις και εκδοθέντα) και τα PDF τους από τον πάροχο")
         self.fetch_btn.clicked.connect(lambda: self._fetch([self.month.currentData()], pdf=True))
         bar.addWidget(self.fetch_btn)
+        year_btn = QPushButton("  Λήψη χρήσης")
+        year_btn.setToolTip("Όλοι οι μήνες της επιλεγμένης χρήσης — μόνο στοιχεία, χωρίς PDF, με ΕΝΑ αίτημα ανά κατεύθυνση")
+        year_btn.clicked.connect(lambda: self._fetch(year_months(self.year.currentData()), pdf=False))
+        bar.addWidget(year_btn)
         history = QPushButton("  Λήψη 24 μηνών")
-        history.setToolTip("Μόνο στοιχεία (χωρίς PDF) των τελευταίων 24 μηνών — χρειάζονται για τα κατώφλια Intrastat "
-                           "(προηγούμενο έτος) και για το Ημερολόγιο (VIES / παρακράτηση ανά μήνα)")
+        history.setToolTip("Μόνο στοιχεία των τελευταίων 24 μηνών (όσοι λείπουν + οι δύο πιο πρόσφατοι) — χρειάζονται για "
+                           "τα κατώφλια Intrastat (προηγούμενο έτος) και το Ημερολόγιο")
         history.clicked.connect(lambda: self._fetch(_months(HISTORY_MONTHS), pdf=False, only_missing=True))
         bar.addWidget(history)
         bar.addStretch()
         root.addLayout(bar)
 
+        self.warning = QLabel("")
+        self.warning.setWordWrap(True)
+        self.warning.setTextFormat(Qt.TextFormat.RichText)
+        self.warning.setStyleSheet(f"QLabel {{ border:1px solid {CURRENT.bad}; border-left:3px solid {CURRENT.bad}; "
+                                   f"border-radius:8px; padding:8px; }}")
+        self.warning.hide()
+        root.addWidget(self.warning)
+
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setObjectName("card")
+        self.summary.linkActivated.connect(self._on_link)
         root.addWidget(self.summary)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
         self.table = QTableWidget(0, len(_COLS))
         self.table.setHorizontalHeaderLabels(_COLS)
         self.table.verticalHeader().setVisible(False)
@@ -101,24 +126,12 @@ class MydataTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((64, 44, 44, 0, 86, 86, 76, 84)):
+        for col, width in enumerate((64, 48, 40, 0, 90, 90, 80, 90, 80, 90)):
             if width:
                 self.table.setColumnWidth(col, width)
-        self.table.itemSelectionChanged.connect(self._preview_selected)
+        self.table.itemSelectionChanged.connect(self._selection_note)
         self.table.doubleClicked.connect(lambda *_: self._open_selected())
-        split.addWidget(self.table)
-        self.pdf_doc = QPdfDocument(self)
-        self.pdf_view = QPdfView(self)
-        self.pdf_view.setDocument(self.pdf_doc)
-        self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
-        self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        self.pdf_view.setMinimumWidth(320)
-        split.addWidget(self.pdf_view)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([640, 420])
-        self.table.setMinimumWidth(420)
-        root.addWidget(split, 1)
+        root.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
         self.preview_note = QLabel("")
@@ -140,6 +153,43 @@ class MydataTab(QWidget):
         print_btn.clicked.connect(self._print)
         actions.addWidget(print_btn)
         root.addLayout(actions)
+        self._fill_months(select_previous=True)
+        self._resolve_names()
+
+    def _resolve_names(self) -> None:
+        """Επωνυμίες από το VIES για τους αντισυμβαλλόμενους του πελάτη που δεν έχουν ακόμη επίσημη (στο παρασκήνιο,
+        ~1/δευτερόλεπτο)· ο πίνακας ξαναγεμίζει όταν τελειώσει."""
+        n = len(names.pending(self.conn, self.afm))
+        if not n:
+            return
+        self.preview_note.setText(f"Αναζήτηση {min(n, 60)} επωνυμιών στο VIES…")
+
+        def work(_p):
+            conn = dbmod.connect()
+            try:
+                return names.resolve_via_vies(conn, self.afm, limit=60)
+            finally:
+                conn.close()
+
+        def done(found):
+            try:
+                self.reload()
+                if found:
+                    self.preview_note.setText(f"VIES: βρέθηκαν {found} επωνυμίες αντισυμβαλλομένων.")
+            except RuntimeError:                             # η καρτέλα έκλεισε στο μεταξύ
+                pass
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda _m: None))
+
+    def _fill_months(self, select_previous: bool = False) -> None:
+        self.month.blockSignals(True)
+        self.month.clear()
+        for ym in year_months(self.year.currentData()):
+            self.month.addItem(analysis.month_label(ym), ym)
+        if select_previous and self.month.count() > 1:
+            self.month.setCurrentIndex(1)                 # προηγούμενος μήνας: ο τελευταίος «κλειστός»
+        self.month.blockSignals(False)
+        if self.month.count() == 0:                       # Ιανουάριος: η τρέχουσα χρήση έχει μόνο τον τρέχοντα μήνα
+            self.month.addItem(analysis.month_label(_months(1)[0]), _months(1)[0])
         self.reload()
 
     # ------------------------------------------------------------------ κωδικοί
@@ -178,7 +228,7 @@ class MydataTab(QWidget):
             "Χωρίς κωδικούς myDATA — ορίστε τους εδώ ή εισάγετέ τους από Excel (στήλη «Api myData»).")
         self.creds_status.setText(status)
 
-    # ------------------------------------------------------------------ λήψη
+    # ------------------------------------------------------------------ λήψη (ουρά εργασιών του κύριου παραθύρου)
     def _fetch(self, months: list[str], pdf: bool, only_missing: bool = False) -> None:
         if not mydata_creds.get(self.conn, self.afm):
             toast(self.window_, "Χρειάζονται οι κωδικοί myDATA του πελάτη.", "warn")
@@ -190,74 +240,91 @@ class MydataTab(QWidget):
             if not months:
                 toast(self.window_, "Όλοι οι μήνες έχουν ήδη κατέβει.", "ok")
                 return
-        total = len(months)
-        bar = ProgressToast(self.window_, f"Ξεκίνησε η λήψη myDATA ({total} {'μήνας' if total == 1 else 'μήνες'})…")
-        state = {"done": 0}
+        n = len(months)
+        what = analysis.month_label(months[0]) if n == 1 else f"{n} μήνες"
+        title = f"λήψη myDATA ({what}{', με PDF' if pdf else ''}) — {self.window_.windowTitle() or self.afm}"
+        if self.main is not None and hasattr(self.main, "run_mydata_sync"):
+            self.main.run_mydata_sync([self.afm], months, window=self.window_, on_done=self._after_fetch, pdfs=pdf,
+                                      title=title)
+            return
+        # Χωρίς κύριο παράθυρο (μόνο σε tests): απευθείας στο παρασκήνιο.
 
-        def work(progress):
+        def work(_p):
             conn = dbmod.connect()
             try:
-                found = 0
-                for i, ym in enumerate(months, 1):
-                    state["done"] = i - 1
-                    progress(f"myDATA: {analysis.month_label(ym)} ({i}/{total})")
-                    out = store.sync_month(conn, self.afm, ym)
-                    if not out["ok"]:
-                        raise RuntimeError(out["reason"])
-                    found += out["n"]
-                    if pdf:
-                        progress(f"PDF παραστατικών {analysis.month_label(ym)}…")
-                        pdfs.download_month(conn, self.afm, ym,
-                                            on_each=lambda k, n: progress(f"PDF {k}/{n} — {analysis.month_label(ym)}"))
-                state["done"] = total
-                return found
+                out = store.sync_range(conn, self.afm, months)
+                if pdf and out["ok"]:
+                    for ym in months:
+                        pdfs.download_month(conn, self.afm, ym)
+                return out
             finally:
                 conn.close()
+        self._tasks.append(run_task(self, work, on_done=lambda _o: self._after_fetch()))
 
-        def done(found):
-            bar.finish(f"Η λήψη myDATA ολοκληρώθηκε — {found} παραστατικά.", "ok")
-            self.reload()
-
-        def failed(m):
-            bar.finish(f"Η λήψη myDATA απέτυχε: {m}", "danger")
-            self.reload()
-
-        self._tasks.append(run_task(self, work, on_progress=lambda m: bar.update(m, state["done"], total),
-                                    on_done=done, on_error=failed))
+    def _after_fetch(self) -> None:
+        self.reload()
+        self._resolve_names()
 
     # ------------------------------------------------------------------ προβολή
     def reload(self) -> None:
         self._reload_creds()
         ym = self.month.currentData()
+        if not ym:
+            return
         self._docs = store.month_docs(self.conn, self.afm, ym)
+        party = names.name_map(self.conn)
         t = self.table
         t.setSortingEnabled(False)
         t.setRowCount(len(self._docs))
         for i, d in enumerate(self._docs):
             incoming = d["direction"] == "incoming"
-            other = pdfs.other_party(d, self.afm)
+            other_name, other_vat = names.display_name(d, party, self.afm)
             cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], d["invoice_type"], "Λ" if incoming else "Ε",
-                     other[0] or "—", office.money(d["net"]), office.money(d["total"]),
-                     office.money(d["withheld"]) if d["withheld"] else "", pdfs.STATUS_LABEL.get(d["pdf_status"], "")]
-            tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other[0]} · ΑΦΜ {other[1] or '—'}\n"
+                     other_name or "—", other_vat or "—", office.money(d["net"]), office.money(d["vat"]),
+                     office.money(d["total"]), office.money(d["withheld"]) if d["withheld"] else "",
+                     pdfs.STATUS_LABEL.get(d["pdf_status"], "")]
+            tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other_name or '—'} · ΑΦΜ {other_vat or '—'}\n"
                    f"{d['series']} {d['aa']} · {d['issue_date']} · τύπος {d['invoice_type']} · MARK {d['mark']}\n"
-                   f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}")
+                   f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}"
+                   + (f" · ψηφιακό τέλος {office.money(d['stamp'])}" if d.get("stamp") else ""))
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setToolTip(tip)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
-                if col in (4, 5, 6):
+                if col in (5, 6, 7, 8):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if col == 6 and d["withheld"] and incoming:
+                if col == 8 and d["withheld"] and incoming:
                     item.setForeground(QColor(CURRENT.warn))
+                if d.get("vat_class") and self._non_vat():
+                    item.setForeground(QColor(CURRENT.bad))
                 if d["cancelled"]:
                     item.setForeground(QColor(CURRENT.muted))
                 t.setItem(i, col, item)
         t.setSortingEnabled(True)
+        self._render_warning()
         self._render_summary(ym)
-        self.pdf_doc.close()
         self.preview_note.setText(f"{len(self._docs)} παραστατικά" if self._docs else "")
+
+    def _non_vat(self) -> bool:
+        row = self.conn.execute("SELECT vat_subject FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        return bool(row) and row["vat_subject"] == 0
+
+    def _render_warning(self) -> None:
+        """Μη υπόχρεος ΦΠΑ με παραστατικά που φέρουν ΦΠΑ / χαρακτηρισμό ΦΠΑ — για όλη τη χρήση."""
+        year = self.year.currentData()
+        docs = analysis.vat_warnings(self.conn, self.afm, year)
+        if not docs:
+            self.warning.hide()
+            return
+        out = sum(1 for d in docs if d["direction"] == "outgoing")
+        months = sorted({d["issue_date"][:7] for d in docs})
+        self.warning.setText(
+            f"<b style='color:{CURRENT.bad}'>⚠ Ο πελάτης ΔΕΝ είναι υπόχρεος ΦΠΑ, αλλά στο myDATA της χρήσης {year} "
+            f"υπάρχουν {len(docs)} παραστατικά με ΦΠΑ ή χαρακτηρισμό ΦΠΑ</b> ({out} εκδοθέντα) — μήνες: "
+            f"{', '.join(analysis.month_label(m) for m in months)}. Ελέγξτε την έκδοση/τον χαρακτηρισμό ή την υπαγωγή "
+            "του πελάτη σε ΦΠΑ. Οι γραμμές εμφανίζονται με κόκκινο.")
+        self.warning.show()
 
     def _render_summary(self, ym: str) -> None:
         s = analysis.month_summary(self.conn, self.afm, ym)
@@ -265,15 +332,27 @@ class MydataTab(QWidget):
             self.summary.setText(f"<span style='color:{CURRENT.muted}'>Ο μήνας δεν έχει κατέβει από το myDATA — "
                                  "πατήστε «Λήψη μήνα».</span>")
             return
+        business = self._business()
         parts = []
         if s["withholding"]:
             rows = "".join(
                 f"<li><b>{office.money(w['amount'])}</b> — {html.escape(w['label'])} ({w['n_docs']} παραστατικά, "
                 f"βάση {office.money(w['base'])}) → <b>{html.escape(w['declaration'])}</b> έως "
-                f"<b>{date.fromisoformat(w['due']).strftime('%d/%m/%Y')}</b>{self._filed(w, ym)}</li>" for w in s["withholding"])
+                f"<b>{date.fromisoformat(w['due']).strftime('%d/%m/%Y')}</b>"
+                f"{self._status_html('withholding_fees', ym, business, w['amount'])}</li>" for w in s["withholding"])
             parts.append(f"<b style='color:{CURRENT.warn}'>Παρακρατούμενοι φόροι προς απόδοση</b><ul>{rows}</ul>")
         else:
             parts.append("Παρακρατούμενοι φόροι: κανένα παραστατικό λήψης με παρακράτηση.")
+        fees = s["fees"]
+        due = date.fromisoformat(obligations.month_end_or_next(*map(int, _next_month(ym).split("-"))).isoformat())
+        if fees["climate_docs"]:
+            parts.append(f"<b style='color:{CURRENT.warn}'>Τέλος ανθεκτικότητας</b>: {fees['climate_docs']} στοιχεία 8.2 "
+                         f"({office.money(fees['climate'])}) → δήλωση απόδοσης έως <b>{due.strftime('%d/%m/%Y')}</b>"
+                         f"{self._status_html('climate_fee', ym, business)}")
+        if fees["digital_fee"]:
+            parts.append(f"<b style='color:{CURRENT.warn}'>Ψηφιακό τέλος συναλλαγής</b> στα έσοδα: "
+                         f"{office.money(fees['digital_fee'])} → δήλωση έως <b>{due.strftime('%d/%m/%Y')}</b>"
+                         f"{self._status_html('digital_fee', ym, business)}")
         f = s["flows"]
         flows = (f"αποστολές αγαθών {office.money(f['goods_out'])} · παροχή υπηρεσιών {office.money(f['services_out'])} · "
                  f"αφίξεις αγαθών {office.money(f['goods_in'])} · λήψη υπηρεσιών {office.money(f['services_in'])}")
@@ -285,34 +364,65 @@ class MydataTab(QWidget):
         services_only = (f["goods_in"] == 0 and f["goods_out"] == 0) and (f["services_in"] or f["services_out"])
         parts.append(f"Ενδοκοινοτικές: {flows}<br>VIES: {vies}{' — μόνο υπηρεσίες, άρα όχι Intrastat' if services_only else ''}"
                      f" · Intrastat: {intr_text}")
+        bal = analysis.vat_balance(self.conn, self.afm, [ym])
+        if bal["output"] or bal["input"]:
+            parts.append(f"<span style='color:{CURRENT.muted}'>ΦΠΑ μήνα κατά το myDATA (ενδεικτικά): εκροές "
+                         f"{office.money(bal['output'])} − εισροές {office.money(bal['input'])} = "
+                         f"{office.money(bal['balance'])}{self._vat_compare(ym, business)}</span>")
         self.summary.setText("<br>".join(parts))
 
-    def _filed(self, w: dict[str, Any], ym: str) -> str:
-        """Κατάσταση υποβολής της δήλωσης από τον «Έλεγχο υποβολών» (EasyCheck): ΦΜΥ_ΕΠΙΧ/ΕΡΓΟΛΑΒΩΝ ανά μήνα."""
-        if not w.get("easycheck"):
+    def _business(self) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        return {**(dict(row) if row else {}), **deadlines._checks_for(self.conn, self.afm)}  # noqa: SLF001
+
+    def _status_html(self, rule_id: str, ym: str, business: dict[str, Any], expected: float | None = None) -> str:
+        """Κατάσταση υποβολής (έλεγχος υποβολών ΑΑΔΕ ή χειροκίνητο «ολοκληρώθηκε») + σύνδεσμος σήμανσης."""
+        sub = obligations.submission(rule_id, business, ym)
+        status = sub["status"]
+        link = (f" <a style='color:{CURRENT.accent}' href='done:{rule_id}:{ym}:{0 if status == 'done' else 1}'>"
+                + (
+                    "αναίρεση" if status == "done" else "σήμανση ως ολοκληρωμένο") + "</a>")
+        if not status:
+            hint = "δεν υπάρχει ακόμη αυτόματος έλεγχος" if sub["manual"] else "δεν έχει ελεγχθεί (Προθεσμίες &amp; υποβολές)"
+            return f" · <span style='color:{CURRENT.muted}'>υποβολή: {hint}</span>{link}"
+        colour = {"submitted": CURRENT.ok, "done": CURRENT.ok, "not_submitted": CURRENT.bad}.get(status, CURRENT.warn)
+        text = f" · <b style='color:{colour}'>{html.escape(sub['label'])}</b>"
+        amounts = obligations.amounts_text(sub["amounts"])
+        if amounts:
+            text += f" ({html.escape(amounts)})"
+            due_amt = sub["amounts"].get("total_due")
+            if expected is not None and due_amt is not None and abs(due_amt - expected) > 0.01:
+                text += (f" <b style='color:{CURRENT.bad}'>διαφορά με myDATA {office.money(due_amt - expected)}</b>")
+        return text + (link if status in ("done", "") or sub["manual"] else "")
+
+    def _vat_compare(self, ym: str, business: dict[str, Any]) -> str:
+        sub = obligations.submission("vat_monthly", business, ym)
+        if not sub["amounts"]:
             return ""
-        row = self.conn.execute("SELECT status FROM obligation_checks WHERE afm=? AND year=? AND obligation=? AND period=?",
-                                (self.afm, int(ym[:4]), w["easycheck"], f"{int(ym[5:7])}ος Μήνας")).fetchone()
-        if not row:
-            return f" · <span style='color:{CURRENT.muted}'>υποβολή: δεν έχει ελεγχθεί (Προθεσμίες &amp; υποβολές)</span>"
-        colour = {"submitted": CURRENT.ok, "not_submitted": CURRENT.bad}.get(row["status"], CURRENT.warn)
-        from ..easycheck import STATUS_LABEL
-        return f" · <b style='color:{colour}'>ΑΑΔΕ: {STATUS_LABEL.get(row['status'], row['status'])}</b>"
+        return " · Φ2 ΑΑΔΕ: " + html.escape(obligations.amounts_text(sub["amounts"]))
+
+    def _on_link(self, href: str) -> None:
+        if not href.startswith("done:"):
+            return
+        _tag, rule_id, ym, flag = href.split(":")
+        deadlines.mark_done(self.conn, self.afm, rule_id, ym, flag == "1")
+        toast(self.window_, "Σημειώθηκε ως ολοκληρωμένο." if flag == "1" else "Αναιρέθηκε η σήμανση.", "ok")
+        self.reload()
+        if self.main is not None and hasattr(self.main, "_render_calendar_from_db"):
+            self.main._render_calendar_from_db()  # noqa: SLF001
 
     def _selected_docs(self) -> list[dict[str, Any]]:
         rows = sorted({i.row() for i in self.table.selectedItems()})
         return [self._docs[self.table.item(r, 0).data(Qt.ItemDataRole.UserRole)] for r in rows]
 
-    def _preview_selected(self) -> None:
+    def _selection_note(self) -> None:
         docs = self._selected_docs()
         if not docs:
             return
         d = docs[0]
         if d["pdf_status"] == "ok" and d["pdf_path"] and Path(d["pdf_path"]).exists():
-            self.pdf_doc.load(d["pdf_path"])
-            self.preview_note.setText(Path(d["pdf_path"]).name)
+            self.preview_note.setText(Path(d["pdf_path"]).name + " — διπλό κλικ για άνοιγμα")
         else:
-            self.pdf_doc.close()
             self.preview_note.setText({"viewer": "Ο πάροχος δίνει μόνο online προβολή — «Άνοιγμα στον πάροχο».",
                                        "no_url": "Χωρίς σύνδεσμο παρόχου στο myDATA.",
                                        "failed": "Η λήψη του PDF απέτυχε — ξαναδοκιμάστε «Λήψη μήνα»."}.get(
@@ -322,6 +432,8 @@ class MydataTab(QWidget):
         for d in self._selected_docs()[:1]:
             if d["pdf_path"] and Path(d["pdf_path"]).exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(d["pdf_path"]))
+            elif d["url"]:
+                QDesktopServices.openUrl(QUrl(d["url"]))      # ρητό κλικ· capability URL, όχι το κλειδί
 
     def _open_provider(self) -> None:
         for d in self._selected_docs()[:1]:
@@ -354,3 +466,8 @@ class MydataTab(QWidget):
             toast(self.window_, "Δεν υπάρχουν PDF για εκτύπωση — πατήστε πρώτα «Λήψη μήνα».", "warn")
         elif failed:
             toast(self.window_, f"{failed} PDF δεν άνοιξαν για εκτύπωση.", "warn")
+
+
+def _next_month(ym: str) -> str:
+    y, m = int(ym[:4]), int(ym[5:7])
+    return f"{y + 1}-01" if m == 12 else f"{y}-{m + 1:02d}"

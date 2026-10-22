@@ -43,10 +43,13 @@ class FakeClient:
         assert (user, key) == ("md_user", "md_key")
         return self
 
+    calls = 0
+
     def fetch_pages(self, incoming, date_from, date_to):
-        ym = f"{date_from[6:10]}-{date_from[3:5]}"
+        FakeClient.calls += 1
+        lo, hi = f"{date_from[6:10]}-{date_from[3:5]}-{date_from[:2]}", f"{date_to[6:10]}-{date_to[3:5]}-{date_to[:2]}"
         src = self.incoming if incoming else self.outgoing
-        return [page(*[x for x in src if f"<issueDate>{ym}" in x])]
+        return [page(*[x for x in src if lo <= x.split("<issueDate>")[1][:10] <= hi])]
 
     def close(self):
         pass
@@ -149,9 +152,10 @@ def test_calendar_liability_uses_mydata_per_reference_month(client_with_creds):
     assert obligations.liability("vies", b, "2026-04") == ("no", "καμία ενδοκοινοτική συναλλαγή στο myDATA")
     assert obligations.liability("vies", b, "2026-05")[0] == "maybe"            # χωρίς στοιχεία
     assert obligations.liability("withholding_fees", b, "2026-03")[0] == "yes"
-    occ = [o for o in obligations.occurrences(date(2026, 5, 1), date(2026, 5, 31), b) if o.rule_id == "withholding_fees"]
+    # 31/5/2026 Κυριακή → η προθεσμία πάει στην επόμενη εργάσιμη (1/6), όπως στο ημερολόγιο ΑΑΔΕ
+    occ = [o for o in obligations.occurrences(date(2026, 5, 1), date(2026, 6, 2), b) if o.rule_id == "withholding_fees"]
     assert occ and occ[0].ref_month == "2026-03" and not occ[0].conditional and "Μάρτιος 2026" in occ[0].title
-    assert not [o for o in obligations.occurrences(date(2026, 6, 1), date(2026, 6, 30), b) if o.rule_id == "withholding_fees"]
+    assert not [o for o in obligations.occurrences(date(2026, 6, 3), date(2026, 6, 30), b) if o.rule_id == "withholding_fees"]
     from taxmatch import deadlines
     ev = {"kind": "rule", "id": "vies", "date": "2026-04-27", "title": "VIES", "ref_month": "2026-03"}
     people = deadlines.clients_for_event(conn, ev)

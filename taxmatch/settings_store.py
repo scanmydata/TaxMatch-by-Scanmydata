@@ -43,6 +43,9 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("max_extractions_per_run", "Μέγιστες εξαγωγές LLM ανά έλεγχο", default="60"),
     SettingDef("fetch_full_text", "Λήψη πλήρους κειμένου άρθρου", default="1"),
     SettingDef("daily_time", "Ώρα καθημερινού ελέγχου", default="08:00"),
+    # Λήψη myDATA (έσοδα + έξοδα, χωρίς PDF) στον καθημερινό έλεγχο — μόνο για πελάτες με κωδικούς myDATA
+    SettingDef("daily_mydata", "Λήψη myDATA στον καθημερινό έλεγχο", default="1"),
+    SettingDef("mydata_last_run", "Τελευταία προγραμματισμένη λήψη myDATA"),
     # Δέουσα επιμέλεια (taxmatch/aml): μία μεθοδολογία για ΟΛΟΥΣ τους πελάτες — γι' αυτό είναι ρύθμιση γραφείου
     SettingDef("aml_model", "Μοντέλο βαθμολόγησης (A|B)", default="A"),
     SettingDef("aml_review_low", "Επανεξέταση χαμηλού κινδύνου (μήνες)", default="24"),

@@ -131,15 +131,61 @@ def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[
     return result
 
 
+CLIMATE_TYPE = "8.2"      # Ειδικό στοιχείο είσπραξης τέλους ανθεκτικότητας στην κλιματική κρίση (πρώην φόρος διαμονής)
+
+
+def special_fees(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, float]:
+    """Τέλη που ΕΙΣΠΡΑΤΤΕΙ ο πελάτης στα έσοδά του τον μήνα και οφείλει να δηλώσει/αποδώσει:
+    'climate' = σύνολο παραστατικών 8.2 (τέλος ανθεκτικότητας — δήλωση έως το τέλος του επόμενου μήνα)·
+    'digital_fee' = ψηφιακό τέλος συναλλαγής (πρώην χαρτόσημο, ν. 5135/2024 — δήλωση έως το τέλος του επόμενου μήνα)."""
+    r = conn.execute("SELECT COALESCE(SUM(CASE WHEN invoice_type=? THEN total ELSE 0 END),0) AS climate, "
+                     "COALESCE(SUM(stamp),0) AS digital FROM mydata_docs WHERE afm=? AND direction='outgoing' AND "
+                     "cancelled=0 AND substr(issue_date,1,7)=?", (CLIMATE_TYPE, afm, ym)).fetchone()
+    n82 = conn.execute("SELECT COUNT(*) FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 AND "
+                       "invoice_type=? AND substr(issue_date,1,7)=?", (afm, CLIMATE_TYPE, ym)).fetchone()[0]
+    return {"climate": round(r["climate"], 2), "climate_docs": n82, "digital_fee": round(r["digital"], 2)}
+
+
+def vat_warnings(conn: sqlite3.Connection, afm: str, year: Optional[int] = None) -> list[dict[str, Any]]:
+    """Παραστατικά με ΦΠΑ (ή χαρακτηρισμό ΦΠΑ) σε πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ (ρητό αίτημα χρήστη 2026-10-22).
+    Κενή λίστα αν ο πελάτης είναι υπόχρεος ή άγνωστο."""
+    b = conn.execute("SELECT vat_subject FROM businesses WHERE afm=?", (afm,)).fetchone()
+    if not b or b["vat_subject"] != 0:
+        return []
+    sql = "SELECT * FROM mydata_docs WHERE afm=? AND vat_class=1 AND cancelled=0"
+    args: list[Any] = [afm]
+    if year:
+        sql += " AND substr(issue_date,1,4)=?"
+        args.append(str(year))
+    return [dict(r) for r in conn.execute(sql + " ORDER BY issue_date", args)]
+
+
+def vat_balance(conn: sqlite3.Connection, afm: str, months: list[str]) -> dict[str, float]:
+    """ΕΝΔΕΙΚΤΙΚΟΣ ΦΠΑ περιόδου από το myDATA: εκροές (εκδοθέντα) − εισροές (ληφθέντα). Δεν ξέρει την εκπιπτόμενη
+    αναλογία, αυτοπαραδόσεις, τα 14.x αντίστροφης επιβάρυνσης κ.λπ. — για σύγκριση με το αποτέλεσμα της Φ2, όχι υπολογισμό."""
+    marks = ",".join("?" * len(months))
+    out = {"output": 0.0, "input": 0.0}
+    for r in conn.execute(f"SELECT direction, invoice_type, vat FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
+                          f"substr(issue_date,1,7) IN ({marks})", (afm, *months)):
+        key = "output" if r["direction"] == "outgoing" else "input"
+        out[key] = round(out[key] + _sign(r["invoice_type"]) * r["vat"], 2)
+    out["balance"] = round(out["output"] - out["input"], 2)
+    return out
+
+
 def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
-    """ΑΦΜ -> μήνας -> {'vies', 'intrastat', 'withholding'} για όσους μήνες έχουν κατέβει (για το Ημερολόγιο)."""
+    """ΑΦΜ -> μήνας -> {'vies', 'intrastat', 'withholding', 'climate', 'digital_fee'} για όσους μήνες έχουν κατέβει
+    (για το Ημερολόγιο)."""
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for afm, months in synced_months(conn).items():
         for ym in months:
+            fees = special_fees(conn, afm, ym)
             out.setdefault(afm, {})[ym] = {
                 "vies": vies(conn, afm, ym, months),
                 "intrastat": intrastat(conn, afm, ym, months)["any"],
                 "withholding": bool(withholding(conn, afm, ym)),
+                "climate": fees["climate_docs"] > 0,
+                "digital_fee": fees["digital_fee"] > 0,
             }
     return out
 
@@ -148,7 +194,7 @@ def month_summary(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, Any]
     flows = ic_flows(conn, afm, ym)
     synced = synced_months(conn, afm).get(afm, set())
     return {"flows": flows, "vies": vies(conn, afm, ym, synced), "intrastat": intrastat(conn, afm, ym, synced),
-            "withholding": withholding(conn, afm, ym), "synced": ym in synced}
+            "withholding": withholding(conn, afm, ym), "synced": ym in synced, "fees": special_fees(conn, afm, ym)}
 
 
 def month_label(ym: str) -> str:

@@ -17,6 +17,7 @@ Tax Center), που με τη σειρά του αναπαράγει το `Hyper
 """
 from __future__ import annotations
 
+import calendar
 import html as _html
 import json
 import logging
@@ -25,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from . import db
 from .business_profiles import credentials, lookup_aade
@@ -183,20 +184,149 @@ def _set_as_myself(ctx: _Ctx, page: str, category: str) -> bool:
     return "Καλωσήρθατε στην Υπηρεσία ηλεκτρονικής υποβολής δηλώσεων" in t
 
 
-def _subtype_submitted(ctx: _Ctx, o: Obligation, args: dict[str, str]) -> Optional[bool]:
+_STATE_CALL = re.compile(r'doDisplayDeclarationState\(document\.displayDeclarationStateForm,\s*"([^"]*)"\s*,\s*"([^"]*)"')
+#: Υποχρεώσεις για τις οποίες διαβάζονται και τα ΠΟΣΑ της δήλωσης (εκκαθάριση + ταυτότητα οφειλής). Φ2: πιστό port του
+#: runner `lib/aade-vat-http.js` (επαληθευμένο εκεί). Οι υπόλοιπες ακολουθούν την ίδια δομή σελίδων της ΑΑΔΕ στη δική
+#: τους κατηγορία — ΔΕΝ έχει επαληθευτεί· αν η σελίδα δεν έχει τα πεδία, απλώς δεν εμφανίζονται ποσά.
+AMOUNT_KEYS = {"Φ2", "ΦΜΥ", "ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ", "ΦΜΥ_ΜΕΡΙΣΜΑΤΑ", "ΔΙΑΜΟΝΗ"}
+_MONTH_ORD = re.compile(r"(\d{1,2})\s*ο[ςυ]?\s*Μήνας")
+_QUARTER_ORD = re.compile(r"(\d)\s*ο\s*Τρίμηνο")
+
+
+def to_num(s: str) -> Optional[float]:
+    """Ελληνικό ποσό «2.217,42» -> 2217.42 (None αν λείπει)."""
+    m = re.search(r"\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:,\d+)?", s or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def label_map(page: str) -> dict[str, str]:
+    """label → τιμή από γραμμές πινάκων με ΔΥΟ μη κενά κελιά (κρατά την πρώτη εμφάνιση) — όπως το labelMap του runner."""
+    out: dict[str, str] = {}
+    for tr in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page or "", re.S | re.I):
+        cells = [c for c in (strip_tags(x) for x in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", tr, re.S | re.I)) if c]
+        if len(cells) == 2:
+            key = re.sub(r"[:：]\s*$", "", cells[0]).strip()
+            if key and key not in out:
+                out[key] = cells[1]
+    return out
+
+
+def _find(m: dict[str, str], pattern: str) -> str:
+    rx = re.compile(pattern)
+    return next((v for k, v in m.items() if rx.search(k)), "")
+
+
+def _last_day(y: int, m: int) -> str:
+    return f"{y}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def period_end(args: Optional[dict[str, str]], year: int, period_text: str = "") -> tuple[str, str]:
+    """(ISO τελευταία ημέρα της περιόδου, 'month' | 'quarter' | '') — για αντιστοίχιση με τις προθεσμίες του Ημερολογίου
+    (μήνας αναφοράς = μήνας της ημερομηνίας αυτής)."""
+    if args:
+        ptype = {"oneMonth": "month", "threeMonths": "quarter"}.get(args.get("periodType", ""), "")
+        end = _dmy(args.get("effectivePeriodEnd", "")) or _dmy(args.get("periodEnd", ""))
+        if end:
+            return _last_day(end[2], end[1]), ptype
+        start = _dmy(args.get("effectivePeriodStart", "")) or _dmy(args.get("periodStart", ""))
+        if start:
+            m = start[1] + (2 if ptype == "quarter" else 0)
+            return _last_day(start[2] + (m - 1) // 12, (m - 1) % 12 + 1), ptype
+    mm = _MONTH_ORD.search(period_text or "")
+    if mm and 1 <= int(mm.group(1)) <= 12:
+        return _last_day(year, int(mm.group(1))), "month"
+    q = _QUARTER_ORD.search(period_text or "")
+    if q and 1 <= int(q.group(1)) <= 4:
+        return _last_day(year, int(q.group(1)) * 3), "quarter"
+    return "", ""
+
+
+def _declarations(ctx: _Ctx, o: Obligation, args: dict[str, str]) -> Optional[list[dict[str, str]]]:
+    """Οι δηλώσεις μιας περιόδου (`displayDeclarationsList`): αρ. καταχώρισης, ημ/νία, τύπος, Οριστική. None = άγνωστο."""
     try:
         page = ctx.get(f"{AADE}/taxisnet/{o.category}/protected/displayDeclarationsList.htm?{urlencode(args)}")
     except Exception:                                   # noqa: BLE001 — άγνωστο, όχι «δεν υποβλήθηκε»
         return None
-    for cells in rows(page):
-        t4 = strip_tags(cells[4]) if len(cells) > 4 else ""
-        t5 = strip_tags(cells[5]) if len(cells) > 5 else ""
-        if (not o.search_type or o.search_type in t4) and t5 == "Οριστική":
-            return True
-    return False
+    out = []
+    for row in _ROW.findall(page or ""):
+        texts = [strip_tags(c) for c in _CELL.findall(row)]
+        call = _STATE_CALL.search(_html.unescape(row))
+        out.append({"db_id": (call.group(2) if call else (texts[2] if len(texts) > 2 else "")).strip(),
+                    "submitted_at": texts[3] if len(texts) > 3 else "", "type": texts[4] if len(texts) > 4 else "",
+                    "final": texts[5] if len(texts) > 5 else ""})
+    return out
 
 
-def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = None) -> dict[str, Any]:
+def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> dict[str, Any]:
+    """Εκκαθάριση + ταυτότητα οφειλής μιας δήλωσης (port του `declarationAmounts` του runner). Μόνο ανάγνωση."""
+    out: dict[str, Any] = {}
+    base = f"{AADE}/taxisnet/{o.category}/protected/"
+    q = f"declarationType={o.filter}&declarationDatabaseId={db_id}&returnView={quote(ret_view)}"
+    try:
+        m = label_map(ctx.get(base + "displayDeclarationState.htm?" + q))
+        res = _find(m, r"Αποτέλεσμα")
+        if res:
+            out["result"] = ("Χρεωστική" if "Χρεωστικ" in res else "Πιστωτική" if "Πιστωτικ" in res
+                             else "Μηδενική" if "Μηδενικ" in res else res)
+        pay = _find(m, r"Δυνατότητες Πληρωμής")
+        lump = re.search(r"Εφάπαξ ποσό:\s*([\d.,]+)", pay)
+        if lump:
+            out["lump_sum"] = to_num(lump.group(1))
+        first = re.search(r"Ποσό 1ης Δόσης:\s*([\d.,]+)", pay)
+        if first:
+            out["first_installment"] = to_num(first.group(1))
+        for key, pattern in (("deduction", r"Ποσό για Έκπτωση"), ("refund", r"Ποσό για Επιστροφή")):
+            value = to_num(_find(m, pattern))
+            if value is not None:
+                out[key] = value
+        state = _find(m, r"Τρέχουσα Κατάσταση")
+        if state:
+            out["state"] = state
+    except Exception as exc:                            # noqa: BLE001 — χωρίς ποσά, όχι αποτυχία ελέγχου
+        log.info("easycheck declarationState %s: %s", o.key, exc)
+    try:
+        page = ctx.get(base + "displayDebtCode.htm?" + q)
+        if re.search(r"Ταυτότητα Οφειλής|Συνολικό ποσό οφειλής", page or ""):
+            m = label_map(page)
+            total = to_num(_find(m, r"Συνολικό ποσό οφειλής"))
+            if total is not None:
+                out["total_due"] = total
+            debt = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
+            if debt:
+                out["debt_id"] = debt.group(0).strip()
+    except Exception as exc:                            # noqa: BLE001
+        log.info("easycheck debtCode %s: %s", o.key, exc)
+    return out
+
+
+def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optional[dict] = None
+                    ) -> tuple[Optional[bool], dict[str, Any]]:
+    """(υποβλήθηκε οριστική του ζητούμενου τύπου — None αν δεν φιλτράρεται τύπος· ποσά της ισχύουσας δήλωσης).
+    `known`: ποσά που έχουν ήδη διαβαστεί για την ΙΔΙΑ δήλωση (ίδιος αριθμός καταχώρισης) — δεν ξαναζητούνται."""
+    decls = _declarations(ctx, o, args)
+    if decls is None:
+        return None, {}
+    mine = [d for d in decls if not o.search_type or o.search_type in d["type"]]
+    finals = [d for d in mine if d["final"] == "Οριστική"]
+    submitted = bool(finals) if o.search_type else None
+    effective = (finals or mine or [None])[-1]           # τροποποιητική υπερισχύει της αρχικής (τελευταία οριστική)
+    if o.key not in AMOUNT_KEYS or not effective or not effective["db_id"]:
+        return submitted, {}
+    if known and known.get("registration_no") == effective["db_id"]:
+        return submitted, known
+    amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
+    amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
+    return submitted, amounts
+
+
+def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = None,
+                     known: Optional[dict[str, dict]] = None) -> dict[str, Any]:
+    """`year` = φορολογική χρήση. `known`: περίοδος -> ποσά που έχουν ήδη αποθηκευτεί (δεν ξαναδιαβάζονται)."""
     o = OBLIGATIONS[key]
     entry: dict[str, Any] = {"obligation": key, "label": o.label, "periods": [], "status": ""}
     if o.kind == "income":
@@ -208,7 +338,8 @@ def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = Non
         done, when = income_submission(text, o, page)
         amend = " (τροποποιητική)" if re.search(r"τροποποιητικ", text, re.I) else ""
         entry["periods"].append({"period": str(year), "status": "submitted" if done else "not_submitted",
-                                 "detail": f"Υποβλήθηκε {when}{amend}".strip() if done else "Δεν έχει υποβληθεί δήλωση"})
+                                 "detail": f"Υποβλήθηκε {when}{amend}".strip() if done else "Δεν έχει υποβληθεί δήλωση",
+                                 "period_end": f"{year}-12-31", "period_type": "year"})
         entry["status"] = "submitted" if done else "not_submitted"
         return entry
     cache = cache if cache is not None else {}
@@ -228,14 +359,27 @@ def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = Non
         return entry
     for cells in found:
         period, status, text = interpret_row(o, cells)
-        if o.search_type and status != "not_submitted":
-            args = decl_list_args(cells[o.button_col] if o.button_col < len(cells) else "")
-            if args and _subtype_submitted(ctx, o, args) is False:
+        args = decl_list_args(cells[o.button_col] if o.button_col < len(cells) else "")
+        end, ptype = period_end(args, year, period)
+        amounts: dict[str, Any] = {}
+        if args and status != "not_submitted" and (o.search_type or o.key in AMOUNT_KEYS):
+            submitted, amounts = _period_details(ctx, o, args, (known or {}).get(period))
+            if submitted is False:
                 status = "not_submitted"
-        entry["periods"].append({"period": period, "status": status, "detail": text})
+        entry["periods"].append({"period": period, "status": status, "detail": text, "period_end": end,
+                                 "period_type": ptype, "amounts": amounts})
     statuses = {p["status"] for p in entry["periods"]}
     entry["status"] = "not_submitted" if "not_submitted" in statuses else ("pending" if "pending" in statuses else "submitted")
     return entry
+
+
+def vat_period_from_checks(entry: dict[str, Any]) -> str:
+    """'monthly' | 'quarterly' | '' από τις ΠΡΑΓΜΑΤΙΚΕΣ περιόδους Φ2 της χρήσης (η ΑΑΔΕ τις βγάζει από το καθεστώς του
+    πελάτη) — πιο αξιόπιστο από την κατηγορία βιβλίων. Αλλαγή περιόδου μέσα στη χρήση ⇒ μετρά η τελευταία."""
+    types = [p.get("period_type") for p in entry.get("periods", []) if p.get("period_type") in ("month", "quarter")]
+    if not types:
+        return ""
+    return "monthly" if types[-1] == "month" else "quarterly"
 
 
 def default_keys(business: dict[str, Any], withheld_keys: Optional[set[str]] = None) -> list[str]:
@@ -286,14 +430,21 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
         return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet."),
                 "entries": []}
     ctx, cache, entries = _Ctx(login["http"]), {}, []
+    stored: dict[str, dict[str, dict]] = {}
+    for r in conn.execute("SELECT obligation, period, amounts_json FROM obligation_checks WHERE afm=? AND year=? "
+                          "AND status='submitted'", (afm, year)):
+        stored.setdefault(r["obligation"], {})[r["period"]] = json.loads(r["amounts_json"] or "{}")
     for key in keys:
         try:
-            entries.append(check_obligation(ctx, key, year, cache))
+            entries.append(check_obligation(ctx, key, year, cache, stored.get(key)))
         except Exception as exc:                        # noqa: BLE001 — μία υποχρέωση δεν ρίχνει τις υπόλοιπες
             log.warning("easycheck %s/%s: %s", afm, key, exc)
             entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
                             "detail": str(exc)[:200]})
     store_results(conn, afm, year, entries)
+    vat_type = next((vat_period_from_checks(e) for e in entries if e["obligation"] == "Φ2"), "")
+    if vat_type:                                       # οι πραγματικές περίοδοι Φ2 υπερισχύουν της κατηγορίας βιβλίων
+        conn.execute("UPDATE businesses SET vat_period_type=?, vat_period_source='easycheck' WHERE afm=?", (vat_type, afm))
     return {"ok": True, "reason": "", "entries": entries}
 
 
@@ -305,9 +456,11 @@ def store_results(conn: sqlite3.Connection, afm: str, year: int, entries: list[d
             conn.execute("DELETE FROM obligation_checks WHERE afm=? AND year=? AND obligation=?", (afm, year, e["obligation"]))
             periods = e["periods"] or [{"period": "", "status": e["status"], "detail": e.get("detail", "")}]
             for p in periods:
-                conn.execute("INSERT OR REPLACE INTO obligation_checks(afm, year, obligation, period, status, detail, checked_at) "
-                             "VALUES (?,?,?,?,?,?,?)", (afm, year, e["obligation"], p["period"], p["status"],
-                                                        p.get("detail", ""), now))
+                conn.execute("INSERT OR REPLACE INTO obligation_checks(afm, year, obligation, period, status, detail, "
+                             "checked_at, period_end, period_type, amounts_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                             (afm, year, e["obligation"], p["period"], p["status"], p.get("detail", ""), now,
+                              p.get("period_end", ""), p.get("period_type", ""),
+                              json.dumps(p.get("amounts") or {}, ensure_ascii=False)))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")

@@ -194,8 +194,10 @@ LOOKUP_WORKERS = 6
 
 
 def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str, Any]], None]] = None,
-                workers: int = LOOKUP_WORKERS, fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> int:
-    """Ανάκτηση για πολλούς πελάτες ΠΑΡΑΛΛΗΛΑ. Κάθε thread ανοίγει ΔΙΚΗ του σύνδεση βάσης (το sqlite3 δεν επιτρέπει
+                workers: int = LOOKUP_WORKERS, fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None,
+                should_cancel: Optional[Callable[[], bool]] = None) -> int:
+    """Ανάκτηση για πολλούς πελάτες ΠΑΡΑΛΛΗΛΑ. `should_cancel()` = True: όσοι πελάτες δεν έχουν ξεκινήσει παραλείπονται,
+    όσοι τρέχουν ολοκληρώνονται («διακοπή μετά τον τρέχοντα πελάτη»). Κάθε thread ανοίγει ΔΙΚΗ του σύνδεση βάσης (το sqlite3 δεν επιτρέπει
     κοινή χρήση ανάμεσα σε threads· WAL + busy_timeout σειριοποιούν τις λίγες γραφές). `on_each(afm, done, result)`
     καλείται από το thread του worker μετά από κάθε πελάτη. Επιστρέφει πόσοι ολοκληρώθηκαν."""
     import threading
@@ -207,6 +209,8 @@ def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str,
 
     def one(afm: str) -> None:
         nonlocal done
+        if should_cancel and should_cancel():
+            return
         conn = db.connect()                               # ανά πελάτη: ένα sqlite3 object δεν περνά σε άλλο thread
         try:
             result = fetch(conn, afm)
@@ -364,9 +368,13 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         args += [aade.get("business_state") or "", aade.get("cease_date") or "", aade.get("cease_reason") or "",
                  aade.get("business_start") or ""]
     if vat:
-        sets += ["vat_subject=?", "books_category=?", "books_category_raw=?", "vat_period_type=?"]
+        sets += ["vat_subject=?", "books_category=?", "books_category_raw=?"]
         args += [None if vat["vat_subject"] is None else int(vat["vat_subject"]), vat["books_category"],
-                 vat["books_category_raw"], vat["vat_period_type"]]
+                 vat["books_category_raw"]]
+        # Η περίοδος από τις ΠΡΑΓΜΑΤΙΚΕΣ υποχρεώσεις Φ2 (easycheck, vat_period_source='easycheck') υπερισχύει της
+        # ερμηνείας της κατηγορίας βιβλίων — δεν την πατάμε.
+        sets.append("vat_period_type=CASE WHEN vat_period_source='easycheck' THEN vat_period_type ELSE ? END")
+        args.append(vat["vat_period_type"])
     if kads:
         set_kads(conn, afm, kads)
     elif aade and aade.get("business_state") in ("ceased", "none"):

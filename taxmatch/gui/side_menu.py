@@ -220,11 +220,8 @@ class SideMenu(QWidget):
 
         box.addSpacing(10)
         box.addWidget(self._separator("ΔΕΔΟΜΕΝΑ"))
-        for name, text, tip in [
-            ("import", "Εισαγωγή από Excel", "Μαζική εισαγωγή πελατών (και κωδικών TAXISnet) από Excel"),
-            ("export", "Εξαγωγή πελατών", "Λίστα πελατών σε CSV (χωρίς κωδικούς)"),
-        ]:
-            self._add(box, name, text, tip)
+        # Η εισαγωγή από Excel γίνεται από το «Νέος πελάτης» (ρητό αίτημα χρήστη 2026-10-22: δεύτερο κουμπί περιττό).
+        self._add(box, "export", "Εξαγωγή πελατών", "Λίστα πελατών σε CSV (χωρίς κωδικούς)")
 
         box.addSpacing(10)
         box.addWidget(self._separator("ΑΥΤΟΜΑΤΑ"))

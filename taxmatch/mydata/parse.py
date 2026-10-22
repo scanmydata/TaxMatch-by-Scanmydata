@@ -86,6 +86,26 @@ def withheld_lines(inv: ET.Element) -> dict[str, float]:
     return out
 
 
+#: Κατηγορίες ΦΠΑ myDATA (vatCategory) ΧΩΡΙΣ φόρο: 7 = 0%, 8 = εγγραφές χωρίς ΦΠΑ (π.χ. μισθοδοσία/αποσβέσεις).
+_NO_VAT_CATEGORIES = {"7", "8", ""}
+
+
+def carries_vat(inv: ET.Element, direction: str = "outgoing") -> bool:
+    """Για την προειδοποίηση σε ΜΗ υπόχρεους ΦΠΑ. Εκδοθέντα: γραμμή με κατηγορία ΦΠΑ που έχει συντελεστή ή ποσό ΦΠΑ.
+    Και στις δύο κατευθύνσεις: χαρακτηρισμός ΦΠΑ (`vatClassification` / `VAT_…`, π.χ. VAT_361 «με δικαίωμα έκπτωσης»).
+    Τα ΛΗΦΘΕΝΤΑ από προμηθευτές φέρουν φυσικά ΦΠΑ — εκεί μετρά μόνο ο χαρακτηρισμός."""
+    if direction == "outgoing":
+        for det in inv.iter(NS + "invoiceDetails"):
+            if _t(det, "vatCategory") not in _NO_VAT_CATEGORIES or _f(_t(det, "vatAmount")):
+                return True
+    for elem in inv.iter():
+        name = elem.tag.split("}", 1)[-1]
+        if name in ("vatClassification", "vatClassificationType") or (
+                name == "classificationType" and (elem.text or "").strip().startswith("VAT_")):
+            return True
+    return False
+
+
 def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
     header = inv.find(NS + "invoiceHeader")
     summary = inv.find(NS + "invoiceSummary")
@@ -102,6 +122,8 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
         "withheld": round(_f(_t(summary, "totalWithheldAmount")), 2), "withheld_lines": withheld_lines(inv),
         "url": url, "provider": urlsplit(url).netloc if url else "",
         "cancelled": bool(_t(inv, "cancelledByMark")),
+        # Ψηφιακό τέλος συναλλαγής = το πρώην «χαρτόσημο» του myDATA (μετονομασία στο API v1.0.11)
+        "stamp": round(_f(_t(summary, "totalStampDutyAmount")), 2), "vat_class": carries_vat(inv, direction),
     }
 
 

@@ -388,6 +388,36 @@ MIGRATIONS: list[str] = [
     ALTER TABLE businesses ADD COLUMN intrastat INTEGER;
     ALTER TABLE articles ADD COLUMN ml_score REAL
     """,
+    # v12 — (α) ποσά των υποβληθεισών δηλώσεων (Φ2: αποτέλεσμα/οφειλή/ταυτότητα οφειλής — port του runner
+    # lib/aade-vat-http.js) και είδος περιόδου (μήνας/τρίμηνο) ανά γραμμή ελέγχου· (β) περίοδος ΦΠΑ από τις ΠΡΑΓΜΑΤΙΚΕΣ
+    # υποχρεώσεις Φ2 (`vat_period_source`='easycheck' — η ανάκτηση από το Μητρώο δεν την πατά)· (γ) επωνυμίες
+    # αντισυμβαλλομένων myDATA (από παραστατικά / πελάτες / VIES, όπως το Timologio Downloader).
+    """
+    -- party_names: name='' με source='vies_miss' = ρωτήθηκε στο VIES χωρίς απάντηση (να μην ξαναρωτηθεί)
+    CREATE TABLE party_names (
+        vat        TEXT PRIMARY KEY,
+        name       TEXT NOT NULL DEFAULT '',
+        source     TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+    -- obligation_done: ο χρήστης σημείωσε χειροκίνητα «ολοκληρώθηκε» μια προθεσμία πελάτη (π.χ. ψηφιακό τέλος
+    -- συναλλαγής — δεν υπάρχει ακόμη αυτόματος έλεγχος υποβολής)
+    CREATE TABLE obligation_done (
+        afm       TEXT NOT NULL,
+        rule_id   TEXT NOT NULL,
+        ref_month TEXT NOT NULL,
+        done_at   TEXT NOT NULL,
+        note      TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (afm, rule_id, ref_month)
+    );
+    -- mydata_docs.stamp: ψηφιακό τέλος συναλλαγής (πρώην χαρτόσημο, totalStampDutyAmount)· vat_class: 1 = το
+    -- παραστατικό φέρει ΦΠΑ (κατηγορία ΦΠΑ με συντελεστή ή χαρακτηρισμό VAT_…) — για προειδοποίηση σε μη υπόχρεους
+    ALTER TABLE mydata_docs ADD COLUMN stamp REAL NOT NULL DEFAULT 0;
+    ALTER TABLE mydata_docs ADD COLUMN vat_class INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE obligation_checks ADD COLUMN amounts_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE obligation_checks ADD COLUMN period_type TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN vat_period_source TEXT NOT NULL DEFAULT ''
+    """,
 ]
 
 

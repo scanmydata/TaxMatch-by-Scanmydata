@@ -49,6 +49,14 @@ def window(qapp, conn):
         QApplication.processEvents()
     win.conn.close()
     win.deleteLater()
+    # Το deleteLater εκτελείται μόνο όταν αντληθούν τα DeferredDelete — χωρίς αυτό ΚΑΘΕ παράθυρο έμενε ζωντανό και το
+    # QApplication.setStyleSheet (apply_theme) του επόμενου ξαναστίλιζε όλα τα προηγούμενα: η κατασκευή του παραθύρου
+    # έφτανε τα ~55" στο τέλος της σουίτας και η σουίτα έμοιαζε να «κολλά» (2026-10-22).
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for w in QApplication.topLevelWidgets():
+        if w is not win and w.parent() is None:
+            w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_main_window_builds_all_pages_without_crashing(window):
@@ -938,22 +946,37 @@ def test_client_fees_tab_saves_and_shows_monthly_fee_in_client_list(window, conn
 
 
 def test_client_detail_shows_submission_checks(window, conn):
+    """Καρτέλα πελάτη → υποχρεώσεις της χρήσης με την κατάσταση υποβολής ΚΑΙ τα ποσά της δήλωσης (έλεγχος υποβολών),
+    και «σήμανση ως ολοκληρωμένο»."""
     from taxmatch import easycheck
     from taxmatch.gui.client_detail_dialog import ClientDetailDialog
     from taxmatch.gui.main_window import _C_CHECKS
     from datetime import date
+    y = date.today().year
     service.add(conn, AFM, "ΑΛΦΑ")
-    easycheck.store_results(conn, AFM, date.today().year, [
+    service.update_fields(conn, AFM, {"vat_period_type": "quarterly"}, vat_subject=True)
+    conn.execute("UPDATE businesses SET activity_state='active' WHERE afm=?", (AFM,))
+    easycheck.store_results(conn, AFM, y, [
         {"obligation": "Φ2", "status": "not_submitted", "periods": [
-            {"period": "1ο Τρίμηνο", "status": "submitted", "detail": ""},
-            {"period": "2ο Τρίμηνο", "status": "not_submitted", "detail": ""}]}])
+            {"period": "1ο Τρίμηνο", "status": "submitted", "detail": "", "period_end": f"{y}-03-31",
+             "period_type": "quarter", "amounts": {"result": "Χρεωστική", "total_due": 1234.5, "debt_id": "1234567890"}},
+            {"period": "2ο Τρίμηνο", "status": "not_submitted", "detail": "", "period_end": f"{y}-06-30",
+             "period_type": "quarter"}]}])
     dlg = ClientDetailDialog(window, AFM)
-    texts = [dlg.checks_list.item(i).text() for i in range(dlg.checks_list.count())]
-    assert any("ΔΕΝ υποβλήθηκε" in x and "2ο Τρίμηνο" in x for x in texts)
+    t = dlg.year_table
+    rows = {t.item(r, 1).text(): r for r in range(t.rowCount())}
+    q1 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Α΄ τρίμηνο" in title)
+    q2 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Β΄ τρίμηνο" in title)
+    assert t.item(q1, 3).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 4).text()
+    assert t.item(q2, 3).text() == "ΔΕΝ υποβλήθηκε"
+    t.setCurrentCell(q2, 0)
+    dlg._toggle_done()
+    q2 = next(r for r in range(t.rowCount()) if "Β΄ τρίμηνο" in t.item(r, 1).text() and "τριμηνιαία" in t.item(r, 1).text())
+    assert t.item(q2, 3).text().startswith("Ολοκληρώθηκε")
     window.reload_clients()
-    t = window.client_table
-    row = next(r for r in range(t.rowCount()) if t.item(r, 1).text() == AFM)
-    assert t.item(row, _C_CHECKS).text() == "✓1 ✗1"
+    ct = window.client_table
+    row = next(r for r in range(ct.rowCount()) if ct.item(r, 1).text() == AFM)
+    assert ct.item(row, _C_CHECKS).text() == "✓1 ✗1"
     dlg.deleteLater()
 
 
@@ -980,3 +1003,40 @@ def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
     assert "200,00 €" in dlg.mydata.summary.text() and "επιχειρηματικής" in dlg.mydata.summary.text()
     assert "δεκτοί" not in dlg.mydata.creds_status.text() and dlg.mydata.user.text() == "u"
     dlg.deleteLater()
+
+
+def test_job_queue_runs_in_order_cancels_after_current_and_moves_toast_to_main(window, conn):
+    """Μακριές εργασίες: η δεύτερη περιμένει την πρώτη· «Διακοπή μετά τον τρέχοντα πελάτη» σταματά ανάμεσα στους
+    πελάτες· το μήνυμα προόδου μιας εργασίας από διάλογο περνά στο κύριο παράθυρο όταν ο διάλογος κλείσει."""
+    import threading
+    from PySide6.QtWidgets import QDialog
+    gate = threading.Event()
+    order, processed = [], []
+
+    def first(report, cancelled):
+        order.append("first")
+        for i in range(5):
+            if cancelled():
+                break
+            gate.wait(2)
+            processed.append(i)
+            report(f"πελάτης {i}", i + 1)
+        return len(processed)
+
+    def second(report, cancelled):
+        order.append("second")
+        return 0
+
+    dlg = QDialog(window)
+    window._toast_host = None
+    job1 = window.jobs.submit("πρώτη", first, total=5, window=dlg)
+    job2 = window.jobs.submit("δεύτερη", second, total=1)
+    assert any("Σε αναμονή: δεύτερη" in t for t in _toast_texts(window))
+    window.jobs.adopt(dlg)                                   # ο διάλογος κλείνει: το toast περνά στο κύριο παράθυρο
+    assert job1.toast.window is window
+    job1.toast.cancel()                                     # διακοπή ΜΕΤΑ τον τρέχοντα πελάτη
+    gate.set()
+    assert _pump_until(lambda: order == ["first", "second"] and not window.jobs.busy, tries=200)
+    assert len(processed) <= 2                               # δεν έτρεξαν και οι 5
+    assert any("Διακόπηκε" in t for t in _toast_texts(window))
+    assert job2.toast is not None

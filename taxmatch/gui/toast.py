@@ -156,12 +156,52 @@ def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = Non
 class ProgressToast:
     """Μόνιμο toast με μπάρα προόδου: ποσοστό + σε ποιο στοιχείο βρίσκεται η εργασία (ρητό αίτημα χρήστη,
     2026-10-22, για την ανάκτηση στοιχείων). Μένει όσο τρέχει η εργασία· το `finish()` το κάνει κανονικό toast που
-    κλείνει μόνο του. Το «×» απλώς το κρύβει — η εργασία συνεχίζει."""
+    κλείνει μόνο του. Το «×» απλώς το κρύβει — η εργασία συνεχίζει.
 
-    def __init__(self, window: QWidget, message: str) -> None:
+    `on_cancel`: κουμπί «Διακοπή» — η εργασία σταματά ΜΕΤΑ τον πελάτη που τρέχει (όχι στη μέση του). `move_to()`: το
+    toast περνά σε άλλο παράθυρο (π.χ. από την καρτέλα πελάτη που κλείνει στο κύριο), με την ίδια πρόοδο."""
+
+    def __init__(self, window: QWidget, message: str, on_cancel=None) -> None:
         self._window = window
+        self._message, self._done, self._total = message, None, None
+        self._on_cancel, self._cancelled = on_cancel, False
         self._host = _host_for(window)
-        self._item = self._host.add(message, "info", 0, progress=True)
+        self._item = self._build()
+
+    def _build(self) -> _ToastItem:
+        item = self._host.add(self._message, "info", 0, progress=True)
+        self.cancel_btn: QPushButton | None = None
+        if self._on_cancel is not None:
+            btn = QPushButton("Διακοπή μετά τον τρέχοντα πελάτη")
+            btn.setToolTip("Ολοκληρώνεται ο πελάτης που τρέχει τώρα και η εργασία σταματά — ό,τι έχει γίνει κρατιέται")
+            btn.clicked.connect(self.cancel)
+            btn.setEnabled(not self._cancelled)
+            if self._cancelled:
+                btn.setText("Διακόπτεται…")
+            item.layout().itemAt(0).layout().addWidget(btn)
+            self.cancel_btn = btn
+        if self._total and item.bar is not None:
+            item.bar.setRange(0, self._total)
+            item.bar.setValue(max(0, min(self._done or 0, self._total)))
+        return item
+
+    @property
+    def window(self) -> QWidget:
+        return self._window
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> None:
+        if self._cancelled:
+            return
+        self._cancelled = True
+        if self.cancel_btn is not None and self._alive():
+            self.cancel_btn.setEnabled(False)
+            self.cancel_btn.setText("Διακόπτεται…")
+        if self._on_cancel is not None:
+            self._on_cancel()
 
     def _alive(self) -> bool:
         try:
@@ -169,7 +209,19 @@ class ProgressToast:
         except RuntimeError:                             # το παράθυρο έκλεισε στο μεταξύ
             return False
 
+    def move_to(self, window: QWidget) -> None:
+        """Μεταφορά σε άλλο παράθυρο (στη σειρά, κάτω από όσα toasts έχει ήδη εκεί)."""
+        if window is self._window:
+            return
+        if self._alive():
+            self._host._remove(self._item)  # noqa: SLF001
+        self._window, self._host = window, _host_for(window)
+        self._item = self._build()
+
     def update(self, message: str, done: int | None = None, total: int | None = None) -> None:
+        self._message = message
+        if total:
+            self._done, self._total = done, total
         if not self._alive():
             return
         self._item.label.setText(message)
@@ -188,4 +240,6 @@ class ProgressToast:
         self._item.label.setText(message)
         if self._item.bar is not None:
             self._item.bar.hide()
+        if self.cancel_btn is not None:
+            self.cancel_btn.hide()
         self._host.expire(self._item, _DEFAULT_MS.get(level, 4200))

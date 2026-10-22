@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # ~387 tests, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # ~400 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -91,7 +91,9 @@ taxmatch/
   mydata/                     myDATA ανά πελάτη — port του Timologio Downloader: client.py (RequestDocs/RequestTransmittedDocs,
                               pagination, 429· το κλειδί ΜΟΝΟ προς mydatapi.aade.gr), parse.py (+ γραμμές παρακράτησης, χώρες),
                               credentials.py (enc:1:), store.py (`mydata_docs`/`mydata_sync`), pdfs.py (PDF παρόχου, ZIP),
-                              analysis.py (παρακρατούμενοι φόροι, VIES, Intrastat ανά μήνα). GUI: gui/mydata_tab.py, gui/printing.py
+                              analysis.py (παρακρατούμενοι φόροι, VIES, Intrastat, 8.2, ψηφιακό τέλος, προειδοποίηση ΦΠΑ),
+                              names.py (επωνυμίες: πελάτες > VIES > παραστατικό), scheduled.py (καθημερινή λήψη).
+                              GUI: gui/mydata_tab.py, gui/printing.py· ουρά εργασιών: gui/job_queue.py
   daily.py, scheduler_win.py  headless entry + Windows Task Scheduler (StartWhenAvailable, per-user, χωρίς admin)
 packaging/                    entry.py (PyInstaller entry — μπαίνει στο taxmatch.gui.app.main), taxmatch.spec (PySide6, ΟΧΙ webview),
                               installer.iss, build.ps1, make_icons.py
@@ -111,7 +113,7 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
 ## Schema (db.py — πηγή αλήθειας)
 `businesses`, `business_kad`, `articles`, `matches` (UNIQUE article_id+afm, `user_feedback` 1/-1/NULL), `obligations_general`,
 `aml_profile`/`aml_assessments`/`aml_office`/`aml_register`/`aml_cases`/`aml_templates`/`aml_files`/`aml_screenings` +
-κωδικοί `aml_rep_credentials`/`aml_gemi_credentials` (enc:1:) (δέουσα επιμέλεια — ΣΚΟΠΙΜΑ χωρίς FK/CASCADE: διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό, τήρηση 5ετίας άρθρο 30), `office_services`/`client_fees` (τιμοκατάλογος/αμοιβές), `obligation_checks` (EasyCheck), `mydata_credentials`/`mydata_docs`/`mydata_sync` (myDATA), `businesses.employer`/`intrastat` (σημαίες από Excel/προφίλ), `articles.ml_score`, `settings` (`encrypted` flag· και κατάσταση: `aade_office_status`, `llm_last_error`), `runs`, `client_credentials` (κωδικοί TAXISnet ανά πελάτη, `enc:1:`, χωριστά από το `businesses` ώστε
+κωδικοί `aml_rep_credentials`/`aml_gemi_credentials` (enc:1:) (δέουσα επιμέλεια — ΣΚΟΠΙΜΑ χωρίς FK/CASCADE: διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό, τήρηση 5ετίας άρθρο 30), `office_services`/`client_fees` (τιμοκατάλογος/αμοιβές), `obligation_checks` (EasyCheck), `mydata_credentials`/`mydata_docs`/`mydata_sync` (myDATA), `party_names` (επωνυμίες αντισυμβαλλομένων), `obligation_done` (χειροκίνητο «ολοκληρώθηκε»), `businesses.employer`/`intrastat` (σημαίες από Excel/προφίλ), `articles.ml_score`, `settings` (`encrypted` flag· και κατάσταση: `aade_office_status`, `llm_last_error`), `runs`, `client_credentials` (κωδικοί TAXISnet ανά πελάτη, `enc:1:`, χωριστά από το `businesses` ώστε
 να μη διαρρέουν σε ερωτήματα λίστας), `calendar_sync` (ποιοι μήνες του πλήρους ημερολογίου έχουν κατέβει). Άρθρα: `extraction_status` = pending | done | failed | irrelevant | **skipped** (prefilter) |
 **duplicate** (`duplicate_of`). `businesses`: `activity_state` (active|ceased|none), `cease_date`, `cease_reason`, `start_date`. Νέα αλλαγή schema = νέο στοιχείο στο `MIGRATIONS` (ποτέ επεξεργασία υπάρχοντος).
 
@@ -309,8 +311,8 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    διάλογος (`client_dialog.py`) έχει τώρα κουμπί «Εισαγωγή από Excel…» που ανοίγει file picker και, αν επιλεγεί αρχείο, κλείνει τον
    διάλογο ως Accepted με `dlg.excel_path` ορισμένο (ΧΩΡΙΣ να κάνει ο ίδιος την εισαγωγή)· το `MainWindow.on_add_client()` ελέγχει
    ΠΡΩΤΑ το `excel_path` και τρέχει `_import_excel_from_path()` αν υπάρχει, αλλιώς συνεχίζει με το `result_afm` όπως πριν. Το
-   ξεχωριστό «Εισαγωγή από Excel» στο μενού ΔΕΔΟΜΕΝΑ παραμένει επίσης (δεν αφαιρέθηκε) — και τα δύο μονοπάτια καταλήγουν στην ίδια
-   `_import_excel_from_path()`.
+   ξεχωριστό «Εισαγωγή από Excel» του μενού ΔΕΔΟΜΕΝΑ αφαιρέθηκε 2026-10-22 (ρητό αίτημα — περιττό)· μένει μόνο αυτό το
+   μονοπάτι → `_import_excel_from_path()`.
    **«Νέα & Matches»: το preview έδειχνε άδειο διάλογο για άρθρα που δεν έχουν αναλυθεί ακόμη με LLM** (status «σε αναμονή»/
    «φιλτραρίστηκε»/«αποτυχία») — το `summary` έρχεται ΜΟΝΟ από το `extracted_json`, που δεν υπάρχει πριν την εξαγωγή. Διορθώθηκε
    (`_open_selected_news`): αν λείπει το `summary`, δείχνει fallback `article.full_text` (αν έχει ήδη ανακτηθεί) ή `raw_summary` του
@@ -448,7 +450,7 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    - **Παρακρατούμενοι φόροι:** από `withheldPercentCategory` γραμμών (ή `taxesTotals` taxType=1) στα ΛΗΦΘΕΝΤΑ του πελάτη·
      πληρωτής αποδίδει κατ. 1–7,16,17 (όχι 8/9/10 = προκαταβλητέος του ίδιου του επαγγελματία, όχι 11–15 μισθοδοσία).
      Προθεσμία: τέλος 2ου μήνα από την ΚΑΤΑΒΟΛΗ (άρθρο 60 ΚΦΕ)· το myDATA δεν έχει ημ/νία πληρωμής → ημερομηνία έκδοσης
-     (όπως ζήτησε ο χρήστης)· «τελευταία εργάσιμη» όπως ο ΦΠΑ (ίδια αβεβαιότητα, §6b). Κανόνας Ημερολογίου
+     (όπως ζήτησε ο χρήστης)· τέλος μήνα → επόμενη εργάσιμη, όπως το ημερολόγιο ΑΑΔΕ (§17). Κανόνας Ημερολογίου
      `withholding_fees` (ref_offset=2). Πίνακας κατηγοριών: επαληθεύτηκε μέσω τρίτης πηγής (wrapp.ai), όχι από το PDF ΑΑΔΕ.
      Σύνδεση με EasyCheck: οι κατηγορίες του έτους προσθέτουν ΦΜΥ_ΕΠΙΧ / ΕΡΓΟΛΑΒΩΝ / ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ / ΦΜΥ_ΤΟΚΟΙ στον
      έλεγχο υποβολών, και η καρτέλα myDATA δείχνει «ΑΑΔΕ: Υποβλήθηκε / ΔΕΝ υποβλήθηκε» δίπλα σε κάθε παρακράτηση.
@@ -463,4 +465,42 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
      για τα «μόνο online» — κουμπί «Άνοιγμα στον πάροχο». Αρχεία: `<data>/invoices/<ΑΦΜ>/<YYYY-MM>/`. Αντισυμβαλλόμενος:
      `pdfs.other_party` (στα 14.x ο ΕΚΔΟΤΗΣ, παρότι είναι «διαβιβασμένα»).
    - **ΔΕΝ έχει δοκιμαστεί ζωντανά από το TaxMatch** (μόνο ψεύτικο XML)· ο κώδικας του timologio είναι επαληθευμένος εκεί.
+17. **Υποβολές στο Ημερολόγιο, ποσά, νέα τέλη, ουρά εργασιών (2026-10-22, ρητό αίτημα χρήστη).**
+   - **Διπλές υποχρεώσεις στο Ημερολόγιο — αιτία:** οι τίτλοι του taxheaven γράφουν «Φ.Π.Α.», «Α.Π.Δ.», «ανακεφαλαιωτικός
+     πίνακας» και το `normalize_text` τα κάνει «φ π α» — οι όροι `hide_if_feed_terms` («φπα», «απδ», «vies») δεν
+     ταίριαζαν ΠΟΤΕ, οπότε έβγαιναν και ο κανόνας και το γεγονός. Τώρα `deadlines.classify_general` (`_compact` ενώνει
+     τις συντομογραφίες, πίνακας `_TITLE_RULES` επαληθευμένος σε ΠΡΑΓΜΑΤΙΚΟΥΣ τίτλους Σεπ.–Νοε. 2026) + ο κανόνας κρύβεται
+     αν υπάρχει γεγονός του ίδιου κανόνα σε ±`_SAME_DEADLINE_DAYS` ημέρες· μήνας αναφοράς γεγονότος = της κοντινότερης
+     προθεσμίας του κανόνα (`nearest_ref`: ΑΠΔ στις 2/11 = Σεπτέμβριος). Ίδιος τίτλος δύο φορές την ίδια μέρα = ένας.
+   - **Λάθος ημερομηνίες κανόνων (από τη σύγκριση με το ημερολόγιο ΑΑΔΕ):** ΑΠΔ, παρακρατούμενοι, ΦΜΥ, τέλη = τέλος μήνα →
+     ΕΠΟΜΕΝΗ εργάσιμη (`month_end_or_next`: 31/10/2026 Σάββατο → 2/11)· ΦΠΑ = τελευταία εργάσιμη (30/10)· OSS/IOSS =
+     τελευταία ημέρα χωρίς μετάθεση (31/10).
+   - **Νέοι κανόνες:** `fmy_wages` (ΦΜΥ μισθωτών, 2ος μήνας, μόνο εργοδότες), `climate_fee` (τέλος ανθεκτικότητας — από
+     εκδοθέντα **8.2** στο myDATA), `digital_fee` (ψηφιακό τέλος συναλλαγής, ν. 5135/2024 — `totalStampDutyAmount` στα
+     ΕΣΟΔΑ: το χαρτόσημο του myDATA μετονομάστηκε στο API v1.0.11· ΔΕΝ έχει επαληθευτεί σε πραγματικά παραστατικά).
+     Τα δύο τέλη: αν ο πελάτης έχει μήνες myDATA και δεν εμφανίστηκαν ποτέ ⇒ «όχι» (όχι «υπό προϋποθέσεις» για 150+).
+   - **Έλεγχος υποβολών ↔ προθεσμίες:** `obligation_checks.period_end` (μήνας αναφοράς) + `obligations.RULE_CHECKS`
+     (κανόνας → έντυπα easycheck) → `obligations.submission()`· «Δεν έχετε υποχρεώσεις υποβολής» για όλα τα έντυπα ⇒
+     `liability` = «όχι». Χειροκίνητο «Ολοκληρώθηκε» → πίνακας `obligation_done` (db v12) — για τα `MANUAL_ONLY` (ψηφιακό
+     τέλος) και ό,τι υποβλήθηκε εκτός ΑΑΔΕ. Χρήση ελέγχου = έτος του μήνα αναφοράς (δήλωση εισοδήματος: το προηγούμενο).
+   - **Ποσά δηλώσεων** (`easycheck.declaration_amounts`, port του runner `lib/aade-vat-http.js`): εκκαθάριση + ταυτότητα
+     οφειλής της ισχύουσας (τελευταίας οριστικής) δήλωσης → `obligation_checks.amounts_json`· δεν ξαναζητούνται για τον ίδιο
+     αρ. καταχώρισης. Επαληθευμένο μόνο για Φ2 (στο runner)· για ΦΜΥ/τέλη η ίδια δομή σελίδων ΔΕΝ έχει επαληθευτεί.
+   - **Μηνιαίος/τριμηνιαίος ΦΠΑ:** `vat_profile` = λογική του ScanMyData Tax Center (`aade-profile.js: vatProfile`) —
+     λατινικά «ομοιώματα» (`NAI`), καθεστώς αγροτών, `kathestwsfpa`· ΚΑΙ οι πραγματικές περίοδοι Φ2 του ελέγχου υποβολών
+     (`vat_period_source='easycheck'`, η ανάκτηση Μητρώου δεν την πατά).
+   - **myDATA:** λήψη με ΕΝΑ αίτημα ανά χρήση και κατεύθυνση (`store.sync_range` — πριν 2 ανά μήνα = 429 και αναμονές)·
+     επωνυμίες αντισυμβαλλομένων `mydata/names.py` με την ιεραρχία του ScanMyData (`vat_name_cache.py`): πελάτες > VIES /
+     Business Portal > παραστατικό (`party_names`, αστοχίες VIES κρατιούνται)· προειδοποίηση σε ΜΗ υπόχρεο ΦΠΑ
+     (`mydata_docs.vat_class`: εκδοθέντα με κατηγορία ΦΠΑ/ποσό, ή χαρακτηρισμός `VAT_…`· ληφθέντα μόνο χαρακτηρισμός)·
+     καθημερινός έλεγχος (`mydata/scheduled.py`, ρύθμιση `daily_mydata`): τρέχων + προηγούμενος + όσοι λείπουν.
+   - **Ουρά εργασιών** (`gui/job_queue.py`): λήψη myDATA και έλεγχος υποβολών σε σειρά, «Διακοπή μετά τον τρέχοντα πελάτη»
+     (`ProgressToast(on_cancel=…)`, `lookup_many(should_cancel=…)`), και το toast περνά στο κύριο παράθυρο όταν κλείσει η
+     καρτέλα πελάτη (`ProgressToast.move_to`, `JobQueue.adopt`). Η ανάκτηση στοιχείων έχει διακοπή αλλά τρέχει εκτός ουράς.
+   - **UI:** Πελάτες χωρίς πάνω γραμμή κουμπιών (Νέος πελάτης/Excel/Εξαγωγή από το πλαϊνό μενού — το «Εισαγωγή από Excel»
+     του μενού αφαιρέθηκε, γίνεται από «Νέος πελάτης»), ενέργειες σε δεύτερη σειρά· καρτέλα myDATA χωρίς προεπισκόπηση PDF
+     (ρητό αίτημα), με χρήση/μήνα, ΑΦΜ/ΦΠΑ στήλες· καρτέλα πελάτη → «Προθεσμίες & υποβολές» = πίνακας της χρήσης +
+     σύνοψη + λεπτομέρειες επιλεγμένης υποχρέωσης (ποσά, αρ. καταχώρισης, ημ/νία υποβολής/ελέγχου).
+   - **Tests διεπαφής: κάθε ένα περνά μόνο του** — αν η πλήρης `tests/test_gui_smoke.py` φαίνεται να «κολλά», τρέξε με
+     `-o faulthandler_timeout=120` και ξεχωριστά ανά test για να βρεις ποιο.
 

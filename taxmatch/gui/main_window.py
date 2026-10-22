@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDesktopServices
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, logs, notices as notices_mod, office, pipeline, scheduler_win, settings_store
+from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
 from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
@@ -37,6 +38,7 @@ from .aml_page import AmlPage
 from .busy import BusyOverlay
 from .client_detail_dialog import ClientDetailDialog
 from .client_dialog import ClientDialog
+from .job_queue import JobQueue
 from .icons import dot_icon, icon, logo_pixmap
 from .manual import ensure_manual
 from .news_dialog import NewsDialog
@@ -47,7 +49,7 @@ from .toast import ProgressToast, toast
 from .tour import Step, Tour
 from .office_widgets import OfficeSettingsBox, ServicesBox
 from .tray import Tray
-from . import excel_help, unlock
+from . import unlock
 from .widgets import ToggleSwitch, due_badge, kind_colour, resort, setup_columns
 from .workers import run_task
 
@@ -173,7 +175,9 @@ def _clients_suffix(ev: dict) -> str:
         return ""
     if not n and not maybe:
         return "  —  κανένας πελάτης"
-    return f"  —  {n} πελάτες" + (f" (+{maybe} υπό προϋπ.)" if maybe else "")
+    done, missing = ev.get("n_submitted") or 0, ev.get("n_missing") or 0
+    checks = (f"  ·  ✓{done}" if done else "") + (f" ✗{missing}" if missing else "")
+    return f"  —  {n} πελάτες" + (f" (+{maybe} υπό προϋπ.)" if maybe else "") + checks
 
 
 class MainWindow(QMainWindow):
@@ -200,6 +204,7 @@ class MainWindow(QMainWindow):
         else:
             self._prefs = QSettings("scanmydata", "TaxMatch")
         self._tasks: list[Any] = []                        # κρατά ζωντανά τα background tasks (βλ. workers.run_task)
+        self.jobs = JobQueue(self)                          # μακριές εργασίες σε σειρά, με διακοπή (gui/job_queue.py)
         self._tour: Optional[Tour] = None
         self._title_bar_done = False
 
@@ -509,22 +514,8 @@ class MainWindow(QMainWindow):
         page = QWidget()
         root = QVBoxLayout(page)
 
-        top = QHBoxLayout()
-        add_btn = QPushButton("  Νέος πελάτης")
-        add_btn.setObjectName("primary")
-        add_btn.clicked.connect(self.on_add_client)
-        top.addWidget(add_btn)
-        import_btn = QPushButton("  Εισαγωγή από Excel")
-        import_btn.setToolTip("Πελάτες + κωδικοί TAXISnet / Γ.Ε.ΜΗ. από «Κωδικοί Υπόχρεων» ή «Κωδικοί Υπηρεσιών μέσω Internet»")
-        import_btn.clicked.connect(self.on_import_excel)
-        top.addWidget(import_btn)
-        top.addWidget(excel_help.help_button(self))
-        export_btn = QPushButton("  Εξαγωγή CSV")
-        export_btn.clicked.connect(self.on_export_csv)
-        top.addWidget(export_btn)
-        top.addStretch()
-        root.addLayout(top)
-
+        # Νέος πελάτης / εισαγωγή Excel / εξαγωγή: από το πλαϊνό μενού (η πάνω γραμμή κουμπιών αφαιρέθηκε, ρητό αίτημα
+        # χρήστη 2026-10-22). Δύο σειρές: επιλογή/φίλτρα και ενέργειες — σε μία, τα κουμπιά «στριμώχνονταν».
         selbar = QHBoxLayout()
         self.client_sel_label = QLabel("Κανένας πελάτης επιλεγμένος")
         selbar.addWidget(self.client_sel_label)
@@ -543,27 +534,31 @@ class MainWindow(QMainWindow):
         self.client_clear_filters_btn.setVisible(False)
         selbar.addWidget(self.client_clear_filters_btn)
         selbar.addStretch()
-        del_btn = QPushButton("  Διαγραφή επιλεγμένων")
-        del_btn.setObjectName("danger")
-        del_btn.clicked.connect(self.on_delete_selected_clients)
-        selbar.addWidget(del_btn)
+        selbar.addWidget(self._reload_button(lambda: self.reload_clients(), "Ξαναδιαβάζει τον πίνακα πελατών"))
+        root.addLayout(selbar)
+
+        actbar = QHBoxLayout()
         lookup_btn = QPushButton("  Ανανέωση στοιχείων")
         lookup_btn.setToolTip("Ανάκτηση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για τους επιλεγμένους — ή για όλους αν δεν έχει "
                               "επιλεγεί κανείς")
         lookup_btn.clicked.connect(self.on_refresh_selected_clients)
-        selbar.addWidget(lookup_btn)
+        actbar.addWidget(lookup_btn)
         check_btn = QPushButton("  Έλεγχος υποβολών")
-        check_btn.setToolTip("Ρωτά την ΑΑΔΕ αν έχουν υποβληθεί οι δηλώσεις του τρέχοντος έτους (Φ2, ΦΜΥ, εισοδήματος, "
-                             "ΜΥΦ…) για τους επιλεγμένους — ή για όλους με κωδικούς TAXISnet. Μόνο ανάγνωση.")
+        check_btn.setToolTip("Ρωτά την ΑΑΔΕ αν έχουν υποβληθεί οι δηλώσεις του τρέχοντος έτους (Φ2 με ποσά, ΦΜΥ, "
+                             "εισοδήματος, ΜΥΦ…) για τους επιλεγμένους — ή για όλους με κωδικούς TAXISnet. Μόνο ανάγνωση.")
         check_btn.clicked.connect(self.on_check_submissions)
-        selbar.addWidget(check_btn)
+        actbar.addWidget(check_btn)
         mydata_btn = QPushButton("  Λήψη myDATA")
         mydata_btn.setToolTip("Παραστατικά των 3 τελευταίων μηνών από το myDATA (χωρίς PDF) για τους επιλεγμένους — ή για "
                               "όλους με κωδικούς myDATA. Ενημερώνει παρακρατήσεις, VIES και Intrastat στο Ημερολόγιο.")
         mydata_btn.clicked.connect(self.on_fetch_mydata)
-        selbar.addWidget(mydata_btn)
-        selbar.addWidget(self._reload_button(lambda: self.reload_clients(), "Ξαναδιαβάζει τον πίνακα πελατών"))
-        root.addLayout(selbar)
+        actbar.addWidget(mydata_btn)
+        actbar.addStretch()
+        del_btn = QPushButton("  Διαγραφή επιλεγμένων")
+        del_btn.setObjectName("danger")
+        del_btn.clicked.connect(self.on_delete_selected_clients)
+        actbar.addWidget(del_btn)
+        root.addLayout(actbar)
 
         self.client_table = QTableWidget(0, len(_CLIENT_COLS))
         self.client_table.setHorizontalHeaderLabels([c[0] for c in _CLIENT_COLS])
@@ -773,88 +768,119 @@ class MainWindow(QMainWindow):
         self._start_lookup(afms)
 
     def on_check_submissions(self) -> None:
-        """EasyCheck για πολλούς πελάτες, παράλληλα (ίδιος μηχανισμός με την ανάκτηση στοιχείων)."""
+        """EasyCheck για τους επιλεγμένους (ή όλους με κωδικούς TAXISnet) — για την τρέχουσα χρήση."""
         with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
         afms = [a for a in (self._selected_client_afms() or sorted(with_creds)) if a in with_creds]
         if not afms:
             toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
             return
-        year, total = date.today().year, len(afms)
-        bar = ProgressToast(self, f"Ξεκίνησε ο έλεγχος υποβολών {year} για {total} {'πελάτη' if total == 1 else 'πελάτες'}…")
-        state = {"done": 0, "missing": 0, "failed": 0}
+        self.run_submission_checks(afms, [date.today().year])
 
-        def work(progress):
+    def run_submission_checks(self, afms: list[str], years: list[int], window: Optional[QWidget] = None,
+                              on_done: Optional[Callable[[], None]] = None) -> None:
+        """Έλεγχος υποβολών (ΑΑΔΕ) στην ουρά εργασιών: παράλληλα ανά πελάτη, διακοπή μετά τον τρέχοντα, για μία ή
+        περισσότερες χρήσεις. Χρησιμοποιείται από Πελάτες, Ημερολόγιο και καρτέλα πελάτη."""
+        afms = list(dict.fromkeys(a for a in afms if a))
+        total = len(afms)
+        names = self._client_names(afms)
+        label = ", ".join(str(y) for y in sorted(set(years)))
+        title = f"έλεγχος υποβολών {label} — {total} {'πελάτης' if total == 1 else 'πελάτες'}"
+        state = {"missing": 0, "failed": 0, "done": 0}
+
+        def work(report, cancelled):
             def one(conn, afm):
-                return easycheck.check_client(conn, afm, year)
+                result = {"ok": True, "entries": []}
+                for y in years:
+                    r = easycheck.check_client(conn, afm, y)
+                    result["ok"] = result["ok"] and r.get("ok")
+                    result["entries"] += r.get("entries", [])
+                return result
 
-            def each(_afm, n, result):
+            def each(afm, n, result):
                 state["done"] = n
-                if not result.get("ok"):
-                    state["failed"] += 1
+                state["failed"] += 0 if result.get("ok") else 1
                 state["missing"] += sum(1 for e in result.get("entries", []) for p in e["periods"]
                                         if p["status"] == "not_submitted")
-                progress(f"Έλεγχος υποβολών {n}/{total}")
+                report(f"Έλεγχος υποβολών {n}/{total} — {names.get(afm, afm)}", n)
 
-            clients.lookup_many(afms, on_each=each, fetch=one)
-            return total
-
-        def on_progress(msg: str) -> None:
-            bar.update(msg, state["done"], total)
-            self._client_refresh_timer.start()
+            clients.lookup_many(afms, on_each=each, fetch=one, should_cancel=cancelled)
+            return state["done"]
 
         def done(_n):
-            self._client_refresh_timer.stop()
-            msg = f"Ο έλεγχος υποβολών ολοκληρώθηκε: {state['missing']} περίοδοι χωρίς υποβολή"
-            msg += f", {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
-            bar.finish(msg, "warn" if state["missing"] or state["failed"] else "ok")
             self.reload_clients()
+            self._render_calendar_from_db()
+            if on_done:
+                on_done()
+            msg = f"Έλεγχος υποβολών ({state['done']}/{total}): {state['missing']} περίοδοι χωρίς υποβολή"
+            msg += f", {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
+            return msg, "warn" if state["missing"] or state["failed"] else "ok"
 
-        def failed(m: str) -> None:
-            self._client_refresh_timer.stop()
-            bar.finish(f"Σφάλμα ελέγχου υποβολών: {m}", "danger")
-
-        self._tasks.append(run_task(self, work, on_progress=on_progress, on_done=done, on_error=failed))
+        self.jobs.submit(title, work, total=total, window=window, on_done=done)
 
     def on_fetch_mydata(self) -> None:
-        """Μαζική λήψη myDATA (στοιχεία, όχι PDF) — παράλληλα, ο καθένας με τα δικά του κλειδιά."""
-        from ..mydata import credentials as mydata_creds, store as mydata_store
+        """Μαζική λήψη myDATA (στοιχεία, όχι PDF): οι μήνες που χρειάζονται (τρέχων + προηγούμενος + όσοι λείπουν)."""
+        from ..mydata import credentials as mydata_creds
         have = mydata_creds.with_credentials(self.conn)
         afms = [a for a in (self._selected_client_afms() or sorted(have)) if a in have]
         if not afms:
             toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς myDATA.", "warn")
             return
-        today = date.today()
-        months = mydata_store.previous_months(f"{today.year}-{today.month:02d}", 4)[1:]   # 3 κλειστοί μήνες
+        self.run_mydata_sync(afms)
+
+    def run_mydata_sync(self, afms: list[str], months: Optional[list[str]] = None, window: Optional[QWidget] = None,
+                        on_done: Optional[Callable[[], None]] = None, pdfs: bool = False, title: str = "") -> None:
+        """Λήψη myDATA στην ουρά εργασιών, ένας πελάτης τη φορά (η ΑΑΔΕ απαντά 429 σε πολλά παράλληλα). `months=None`:
+        έξυπνη επιλογή (`store.months_to_refresh`). `pdfs`: κατεβαίνουν και τα PDF των μηνών (καρτέλα πελάτη)."""
+        from ..mydata import names as mydata_names, pdfs as mydata_pdfs, store as mydata_store
+        afms = list(dict.fromkeys(a for a in afms if a))
         total = len(afms)
-        bar = ProgressToast(self, f"Ξεκίνησε η λήψη myDATA ({len(months)} μήνες) για {total} "
-                                  f"{'πελάτη' if total == 1 else 'πελάτες'}…")
-        state = {"done": 0, "failed": 0}
+        names = self._client_names(afms)
+        title = title or f"λήψη myDATA — {total} {'πελάτης' if total == 1 else 'πελάτες'}"
+        state = {"failed": 0, "docs": 0, "done": 0, "reason": ""}
 
-        def work(progress):
-            def one(conn, afm):
-                for ym in months:
-                    out = mydata_store.sync_month(conn, afm, ym)
+        def work(report, cancelled):
+            conn = dbmod.connect()
+            try:
+                for i, afm in enumerate(afms, 1):
+                    if cancelled():
+                        break
+                    wanted = months or mydata_store.months_to_refresh(conn, afm)
+                    report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)} ({len(wanted)} μήνες)", i - 1)
+                    out = mydata_store.sync_range(conn, afm, wanted)
                     if not out["ok"]:
-                        return {"ok": False}
-                return {"ok": True}
-
-            def each(_afm, n, result):
-                state["done"] = n
-                state["failed"] += 0 if result.get("ok") else 1
-                progress(f"Λήψη myDATA {n}/{total}")
-
-            clients.lookup_many(afms, on_each=each, fetch=one, workers=4)
-            return total
+                        state["failed"] += 1
+                        state["reason"] = out["reason"]
+                    state["docs"] += out.get("n", 0)
+                    if pdfs and out["ok"]:
+                        for ym in wanted:
+                            report(f"PDF {ym} — {names.get(afm, afm)}", i - 1)
+                            mydata_pdfs.download_month(conn, afm, ym)
+                    state["done"] = i
+                    report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i)
+                report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"])
+                mydata_names.resolve_via_vies(conn, afms[0] if total == 1 else None, limit=60, should_cancel=cancelled)
+            finally:
+                conn.close()
+            return state["done"]
 
         def done(_n):
-            msg = "Η λήψη myDATA ολοκληρώθηκε" + (f" — {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)."
-                                                 if state["failed"] else ".")
-            bar.finish(msg, "warn" if state["failed"] else "ok")
             self._render_calendar_from_db()
             self.reload_dashboard()
+            if on_done:
+                on_done()
+            if total == 1 and state["failed"]:
+                return f"myDATA: {state['reason']}", "danger"
+            msg = f"Η λήψη myDATA ολοκληρώθηκε ({state['done']}/{total}, {state['docs']} παραστατικά)"
+            msg += f" — {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
+            return msg, "warn" if state["failed"] else "ok"
 
-        self._tasks.append(run_task(self, work, on_progress=lambda m: bar.update(m, state["done"], total), on_done=done,
-                                    on_error=lambda m: bar.finish(f"Σφάλμα λήψης myDATA: {m}", "danger")))
+        self.jobs.submit(title, work, total=total, window=window, on_done=done)
+
+    def _client_names(self, afms: list[str]) -> dict[str, str]:
+        if not afms:
+            return {}
+        return {r["afm"]: r["name"] or r["afm"] for r in self.conn.execute(
+            f"SELECT afm, name FROM businesses WHERE afm IN ({','.join('?' * len(afms))})", afms)}
 
     def on_import_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Εισαγωγή από Excel", "", "Excel/CSV (*.xlsx *.xlsm *.csv *.txt)")
@@ -920,7 +946,9 @@ class MainWindow(QMainWindow):
         self.run_status.setText(f"Ανάκτηση στοιχείων για {total} πελάτες…")
         # Μόνιμο toast με ποσοστό και τον πελάτη που επεξεργάζεται τώρα (ρητό αίτημα χρήστη, 2026-10-22) — κλείνει
         # μόνο του όταν τελειώσει η ανάκτηση.
-        bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…")
+        stop = threading.Event()
+        bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…",
+                            on_cancel=stop.set)
         state = {"done": 0}
 
         def work(progress):
@@ -932,8 +960,8 @@ class MainWindow(QMainWindow):
                 state["done"] = n
                 progress(f"Ανάκτηση στοιχείων {n}/{total} — {names.get(afm, afm)}")
 
-            clients.lookup_many(afms, on_each=each)
-            progress(f"Αντιστοίχιση νέων με τους πελάτες ({total}/{total})…")
+            clients.lookup_many(afms, on_each=each, should_cancel=stop.is_set)
+            progress(f"Αντιστοίχιση νέων με τους πελάτες ({state['done']}/{total})…")
             conn = dbmod.connect()
             try:
                 engine.rematch(conn)
@@ -950,7 +978,10 @@ class MainWindow(QMainWindow):
         def done(_n):
             self._client_refresh_timer.stop()
             self.run_status.setText("Η ανάκτηση στοιχείων ολοκληρώθηκε.")
-            bar.finish(f"Η ανάκτηση στοιχείων ολοκληρώθηκε ({total} {'πελάτης' if total == 1 else 'πελάτες'}).", "ok")
+            if stop.is_set():
+                bar.finish(f"Η ανάκτηση στοιχείων διακόπηκε μετά από {state['done']}/{total} πελάτες.", "warn")
+            else:
+                bar.finish(f"Η ανάκτηση στοιχείων ολοκληρώθηκε ({total} {'πελάτης' if total == 1 else 'πελάτες'}).", "ok")
             self.reload_clients()
             self.reload_dashboard()
             self._reload_notices()
@@ -1079,6 +1110,20 @@ class MainWindow(QMainWindow):
         self.cal_clients_list.itemActivated.connect(self._open_cal_client)
         self.cal_clients_list.setToolTip("Διπλό κλικ: άνοιγμα της καρτέλας του πελάτη")
         sbox.addWidget(self.cal_clients_list, 1)
+        # Έλεγχος υποβολής της ΣΥΓΚΕΚΡΙΜΕΝΗΣ προθεσμίας για τους υπόχρεους πελάτες της (ρητό αίτημα χρήστη 2026-10-22)
+        cal_actions = QHBoxLayout()
+        self.cal_check_btn = QPushButton(icon("check", CURRENT.txt, 16), "  Έλεγχος υποβολών")
+        self.cal_check_btn.setToolTip("Ρωτά την ΑΑΔΕ αν οι υπόχρεοι πελάτες (με κωδικούς TAXISnet) υπέβαλαν αυτή τη "
+                                      "δήλωση — μόνο ανάγνωση. Διακοπή μετά τον τρέχοντα πελάτη από το μήνυμα προόδου.")
+        self.cal_check_btn.clicked.connect(self._check_cal_event)
+        cal_actions.addWidget(self.cal_check_btn)
+        self.cal_done_btn = QPushButton("  Ολοκληρώθηκε")
+        self.cal_done_btn.setToolTip("Σημειώνει (ή αναιρεί) την προθεσμία ως ολοκληρωμένη για τον επιλεγμένο πελάτη — για "
+                                     "δηλώσεις χωρίς αυτόματο έλεγχο (π.χ. ψηφιακό τέλος συναλλαγής)")
+        self.cal_done_btn.clicked.connect(self._toggle_cal_done)
+        cal_actions.addWidget(self.cal_done_btn)
+        cal_actions.addStretch()
+        sbox.addLayout(cal_actions)
         dsplit.addWidget(side)
         dsplit.setStretchFactor(0, 1)
         dsplit.setStretchFactor(1, 1)
@@ -1245,27 +1290,76 @@ class MainWindow(QMainWindow):
                                               "περιοδική υποχρέωση — δεν είναι γνωστό ποιους πελάτες αφορά.")
                 return
             rows = [{"afm": c["afm"], "name": c["name"], "confidence": 1.0 if c["status"] == "yes" else 0.5,
-                     "matched_reason": c["reason"] or "υπόχρεος", "maybe": c["status"] != "yes"} for c in people]
+                     "matched_reason": c["reason"] or "υπόχρεος", "maybe": c["status"] != "yes",
+                     "submission": c.get("submission"), "rule_id": c.get("rule_id"), "ref_month": c.get("ref_month")}
+                    for c in people]
             n_maybe = sum(1 for r in rows if r["maybe"])
-            if n_maybe:
-                self.cal_clients_hint.setText(f"{len(rows) - n_maybe} υπόχρεοι · {n_maybe} υπό προϋποθέσεις που η εφαρμογή "
-                                              "δεν γνωρίζει (π.χ. προσωπικό, ενδοκοινοτικές συναλλαγές).")
+            subs = [r["submission"]["status"] for r in rows if r.get("submission") and not r["maybe"]]
+            n_ok = sum(1 for x in subs if x in ("submitted", "done"))
+            n_miss = sum(1 for x in subs if x == "not_submitted")
+            self.cal_clients_hint.setText(
+                f"{len(rows) - n_maybe} υπόχρεοι · ✓ {n_ok} ολοκληρωμένες · ✗ {n_miss} χωρίς υποβολή · "
+                f"{len(rows) - n_maybe - n_ok - n_miss} δεν έχουν ελεγχθεί"
+                + (f" · {n_maybe} υπό προϋποθέσεις (π.χ. προσωπικό, ενδοκοινοτικές — άγνωστο)." if n_maybe else "."))
         self.cal_clients_title.setText(f"Πελάτες που αφορά ({len(rows)})")
         if not rows:
             self.cal_clients_hint.setText("Κανένας πελάτης δεν έχει ταιριάξει με αυτό το νέο." if ev["kind"] == "news" else
                                           "Κανένας από τους πελάτες σας δεν είναι υπόχρεος (με βάση τα στοιχεία του Μητρώου).")
             return
+        sub_colour = {"submitted": CURRENT.ok, "done": CURRENT.ok, "not_submitted": CURRENT.bad, "pending": CURRENT.warn}
         for r in rows:
             text = f"{r['name'] or r['afm']}  ·  {r['afm']}\n{r['matched_reason']}"      # 2 γραμμές: χωρίς οριζόντιο scroll
             colour = None
             if r["confidence"] < 1:
                 text += "  ·  υπό προϋποθέσεις" if r.get("maybe") else "  ·  να επιβεβαιωθεί"
                 colour = CURRENT.warn
+            sub = r.get("submission")
+            if sub and sub["status"]:
+                text += f"\n{sub['label']}"
+                amounts = obligations.amounts_text(sub["amounts"])
+                if amounts:
+                    text += f" — {amounts}"
+                colour = sub_colour.get(sub["status"], colour)
+            elif sub is not None and not r.get("maybe"):
+                text += "\n" + ("Υποβολή: χειροκίνητη σήμανση" if sub["manual"] else "Υποβολή: δεν έχει ελεγχθεί")
             it = QListWidgetItem(dot_icon(colour or CURRENT.ok), text)
-            if colour:
+            if colour and colour != CURRENT.ok:
                 it.setForeground(QColor(colour))
             it.setData(Qt.ItemDataRole.UserRole, r["afm"])
+            it.setData(Qt.ItemDataRole.UserRole + 1, r)
             lst.addItem(it)
+
+    def _cal_event_rows(self) -> list[dict]:
+        out = []
+        for i in range(self.cal_clients_list.count()):
+            r = self.cal_clients_list.item(i).data(Qt.ItemDataRole.UserRole + 1)
+            if r and r.get("rule_id"):
+                out.append(r)
+        return out
+
+    def _check_cal_event(self) -> None:
+        rows = [r for r in self._cal_event_rows() if not r.get("maybe")]
+        if not rows:
+            toast(self, "Επιλέξτε μια προθεσμία με υπόχρεους πελάτες.", "warn")
+            return
+        with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
+        afms = [r["afm"] for r in rows if r["afm"] in with_creds]
+        if not afms:
+            toast(self, "Κανένας υπόχρεος πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
+            return
+        years = sorted({obligations.check_year(r["rule_id"], r["ref_month"]) for r in rows})
+        self.run_submission_checks(afms, years, on_done=lambda: self._show_cal_event_clients(self.cal_list.currentItem()))
+
+    def _toggle_cal_done(self) -> None:
+        item = self.cal_clients_list.currentItem()
+        r = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
+        if not r or not r.get("rule_id"):
+            toast(self, "Επιλέξτε πρώτα έναν πελάτη μιας προθεσμίας.", "warn")
+            return
+        done = (r.get("submission") or {}).get("status") != "done"
+        deadlines.mark_done(self.conn, r["afm"], r["rule_id"], r["ref_month"], done)
+        toast(self, f"{r['name'] or r['afm']}: " + ("σημειώθηκε ως ολοκληρωμένο." if done else "αναιρέθηκε η σήμανση."), "ok")
+        self._show_cal_event_clients(self.cal_list.currentItem())
 
     def _open_cal_client(self, item: QListWidgetItem) -> None:
         afm = item.data(Qt.ItemDataRole.UserRole)
@@ -1491,6 +1585,14 @@ class MainWindow(QMainWindow):
         sched_off = QPushButton("Απενεργοποίηση")
         sched_off.clicked.connect(self._remove_schedule)
         sf2.addWidget(sched_off)
+        # Λήψη myDATA (έσοδα + έξοδα, μόνο οι μήνες που χρειάζονται) στον ίδιο καθημερινό έλεγχο — mydata/scheduled.py
+        self.sched_mydata = QCheckBox("και λήψη myDATA")
+        self.sched_mydata.setToolTip("Για πελάτες με κωδικούς myDATA: τρέχων + προηγούμενος μήνας και όσοι λείπουν — "
+                                     "εντοπίζει παρακρατήσεις, τέλος ανθεκτικότητας (8.2), ψηφιακό τέλος συναλλαγής, VIES/"
+                                     "Intrastat για το Ημερολόγιο. Χωρίς PDF.")
+        self.sched_mydata.toggled.connect(
+            lambda on: settings_store.set_value(self.conn, "daily_mydata", "1" if on else "0"))
+        sf2.addWidget(self.sched_mydata)
         sf2.addStretch()
         root.addWidget(sched_box)
 
@@ -1542,6 +1644,9 @@ class MainWindow(QMainWindow):
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
+        self.sched_mydata.blockSignals(True)
+        self.sched_mydata.setChecked(settings_store.get(self.conn, "daily_mydata") != "0")
+        self.sched_mydata.blockSignals(False)
         for key, status in self._settings_status.items():
             if settings_store.is_set(self.conn, key):
                 status.setText("✓ Αποθηκευμένο")

@@ -137,6 +137,17 @@ def _due_vies(y: int, m: int) -> date:
     return next_business_day(date(y, m, 26))
 
 
+def month_end(y: int, m: int) -> date:
+    return date(y, m, _cal.monthrange(y, m)[1])
+
+
+def month_end_or_next(y: int, m: int) -> date:
+    """Τέλος μήνα· αν είναι αργία/Σαββατοκύριακο → η ΕΠΟΜΕΝΗ εργάσιμη. Έτσι δείχνει το ημερολόγιο ΑΑΔΕ/taxheaven τις
+    ΑΠΔ και τους παρακρατούμενους (π.χ. 31/10/2026 Σάββατο → 2/11/2026 — επαληθεύτηκε 2026-10-22). Ο ΦΠΑ, αντίθετα,
+    λήγει την τελευταία εργάσιμη (30/10/2026)."""
+    return next_business_day(month_end(y, m))
+
+
 RULES: list[Rule] = [
     Rule("vat_monthly", "Δήλωση ΦΠΑ (μηνιαία) — {period}",
          "Περιοδική δήλωση ΦΠΑ και πληρωμή του φόρου έως την τελευταία εργάσιμη ημέρα του επόμενου μήνα.",
@@ -163,25 +174,44 @@ RULES: list[Rule] = [
          "Τριμηνιαία ειδική δήλωση EU OSS / non-EU OSS έως το τέλος του επόμενου μήνα (π.χ. 30/4 για το Α΄ τρίμηνο). "
          "Μόνο για εγγεγραμμένους στο καθεστώς OSS.",
          "https://mitos.gov.gr/index.php/%CE%94%CE%94:%CE%94%CE%AE%CE%BB%CF%89%CF%83%CE%B7_%CE%A6%CE%A0%CE%91", "quarterly",
-         lambda y, m: last_business_day(y, m), due_months=(1, 4, 7, 10), applies=_conditional_vat,
+         month_end, due_months=(1, 4, 7, 10), applies=_conditional_vat,
          hide_if_feed_terms=("oss",), period=_period_quarter),
     Rule("ioss", "Δήλωση ΦΠΑ IOSS (εισαγόμενα αγαθά) — {period}",
          "Μηνιαία δήλωση IOSS έως το τέλος του επόμενου μήνα. Μόνο για εγγεγραμμένους στο καθεστώς IOSS.",
          "https://mitos.gov.gr/index.php/%CE%94%CE%94:%CE%94%CE%AE%CE%BB%CF%89%CF%83%CE%B7_%CE%A6%CE%A0%CE%91", "monthly",
-         lambda y, m: last_business_day(y, m), applies=_conditional_vat, hide_if_feed_terms=("ioss",),
+         month_end, applies=_conditional_vat, hide_if_feed_terms=("ioss",),
          period=_period_month),
     Rule("apd", "ΑΠΔ e-ΕΦΚΑ & πληρωμή εισφορών — {period}",
          "Υποβολή Αναλυτικής Περιοδικής Δήλωσης και καταβολή εισφορών έως το τέλος του επόμενου μήνα. Μόνο για εργοδότες. "
          "Παρατάσεις υποβολής ανακοινώνονται συχνά από τον e-ΕΦΚΑ (η πληρωμή συνήθως μένει ίδια).",
-         "https://www.e-efka.gov.gr/el/deltia-typoy", "monthly", lambda y, m: last_business_day(y, m),
+         "https://www.e-efka.gov.gr/el/deltia-typoy", "monthly", month_end_or_next,
          applies=_conditional, hide_if_feed_terms=("απδ",), period=_period_month),
     Rule("withholding_fees", "Παρακρατούμενος φόρος αμοιβών / εργολάβων — {period}",
          "Δήλωση και απόδοση του φόρου που παρακράτησε ο πελάτης σε αμοιβές επιχειρηματικής δραστηριότητας (20%), "
          "εργολάβους τεχνικών έργων (3%), τόκους/δικαιώματα κ.λπ., έως το τέλος του ΔΕΥΤΕΡΟΥ μήνα από την καταβολή "
          "(άρθρο 60 ΚΦΕ). Η εφαρμογή το βρίσκει από τα παραστατικά myDATA με παρακράτηση (ημερομηνία έκδοσης).",
          "https://www.taxheaven.gr/circulars/17952/arora-parakrathsh-foroy-me-ton-neo-kfe-allages-sthn-ypobolh-dhlwsewn-parakratoymenwn-forwn-enhmerwmeno",
-         "monthly", lambda y, m: last_business_day(y, m), applies=_conditional, hide_if_feed_terms=("παρακρατ", "αμοιβ"),
+         "monthly", month_end_or_next, applies=_conditional, hide_if_feed_terms=("παρακρατ", "64"),
          period=_period_month2, ref_offset=2),
+    Rule("fmy_wages", "Παρακρατούμενος φόρος μισθωτών υπηρεσιών (ΦΜΥ) — {period}",
+         "Δήλωση και απόδοση του φόρου που παρακρατήθηκε σε μισθούς/συντάξεις έως το τέλος του ΔΕΥΤΕΡΟΥ μήνα από την "
+         "καταβολή (το ημερολόγιο ΑΑΔΕ: «περιόδου Αυγούστου» → 2/11). Μόνο για εργοδότες.",
+         "https://www.taxheaven.gr/circulars/17952/arora-parakrathsh-foroy-me-ton-neo-kfe-allages-sthn-ypobolh-dhlwsewn-parakratoymenwn-forwn-enhmerwmeno",
+         "monthly", month_end_or_next, applies=_conditional, hide_if_feed_terms=("παρακρατ", "μισθωτη εργασια"),
+         period=_period_month2, ref_offset=2),
+    Rule("climate_fee", "Τέλος ανθεκτικότητας στην κλιματική κρίση — {period}",
+         "Δήλωση απόδοσης του τέλους ανθεκτικότητας (πρώην φόρος διαμονής) που εισπράχθηκε με ειδικά στοιχεία 8.2, έως την "
+         "τελευταία ημέρα του επόμενου μήνα (myAADE → Τέλη & ειδικοί φόροι). Μόνο για καταλύματα που εκδίδουν 8.2.",
+         "https://www.taxheaven.gr/news/66770/telos-anoektikothtas-pshfiakh-ypobolh-dhlwshs-apodoshs",
+         "monthly", month_end_or_next, applies=_conditional, hide_if_feed_terms=("ανθεκτικοτητας",),
+         period=_period_month),
+    Rule("digital_fee", "Ψηφιακό τέλος συναλλαγής — {period}",
+         "Δήλωση και απόδοση του ψηφιακού τέλους συναλλαγής (ν. 5135/2024, πρώην χαρτόσημο) για τον μήνα που υπήρξε "
+         "συναλλαγή με τέλος, έως την τελευταία ημέρα του επόμενου μήνα (myAADE). Η εφαρμογή το εντοπίζει στα ΕΣΟΔΑ "
+         "του myDATA· δεν υπάρχει ακόμη αυτόματος έλεγχος υποβολής — σημειώστε το χειροκίνητα ως ολοκληρωμένο.",
+         "https://www.taxheaven.gr/news/68790/pshfiako-telos-synallagwn-h-dhlwsh-kai-o-tropos-ypobolhs-ths",
+         "monthly", month_end_or_next, applies=_conditional, hide_if_feed_terms=("ψηφιακου τελους",),
+         period=_period_month),
     Rule("ergani_e4", "ΕΡΓΑΝΗ — Ετήσιος Πίνακας Προσωπικού (Ε4)",
          "Υποβολή του Ε4 από 1 έως 31 Οκτωβρίου κάθε έτους· η προθεσμία παρατείνεται συχνά με υπουργική απόφαση. "
          "Μόνο για εργοδότες.",
@@ -199,17 +229,51 @@ RULES_BY_ID = {r.id: r for r in RULES}
 # ------------------------------------------------------------------ ποιος πελάτης είναι υπόχρεος
 #: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
 _BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4",
-                  "withholding_fees"}
+                  "withholding_fees", "fmy_wages", "climate_fee", "digital_fee"}
 _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
                  "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
                  "oss": "μόνο αν είναι εγγεγραμμένος στο OSS", "ioss": "μόνο αν είναι εγγεγραμμένος στο IOSS",
                  "apd": "μόνο αν απασχολεί προσωπικό", "ergani_e4": "μόνο αν απασχολεί προσωπικό",
-                 "withholding_fees": "μόνο αν παρακράτησε φόρο σε αμοιβές/εργολάβους (λείπουν στοιχεία myDATA)"}
+                 "withholding_fees": "μόνο αν παρακράτησε φόρο σε αμοιβές/εργολάβους (λείπουν στοιχεία myDATA)",
+                 "fmy_wages": "μόνο αν απασχολεί προσωπικό",
+                 "climate_fee": "μόνο αν εκδίδει στοιχεία 8.2 (καταλύματα) — λείπουν στοιχεία myDATA",
+                 "digital_fee": "μόνο αν εισπράττει ψηφιακό τέλος συναλλαγής — λείπουν στοιχεία myDATA"}
 #: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
-_MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding"}
+_MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding", "climate_fee": "climate",
+                "digital_fee": "digital_fee"}
 _MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές στο myDATA", "καμία ενδοκοινοτική συναλλαγή στο myDATA"),
                   "intrastat": ("υπέρβαση κατωφλίου Intrastat (myDATA)", "κάτω από τα κατώφλια Intrastat (myDATA)"),
-                  "withholding_fees": ("παραστατικά με παρακράτηση φόρου στο myDATA", "καμία παρακράτηση στο myDATA")}
+                  "withholding_fees": ("παραστατικά με παρακράτηση φόρου στο myDATA", "καμία παρακράτηση στο myDATA"),
+                  "climate_fee": ("εξέδωσε στοιχεία 8.2 (τέλος ανθεκτικότητας) στο myDATA", "κανένα 8.2 στο myDATA"),
+                  "digital_fee": ("ψηφιακό τέλος συναλλαγής στα έσοδα (myDATA)", "κανένα ψηφιακό τέλος στα έσοδα")}
+
+#: Ποιος έλεγχος υποβολών (easycheck.OBLIGATIONS) απαντά αν υποβλήθηκε η δήλωση κάθε κανόνα. Η χρήση του ελέγχου είναι
+#: το έτος του μήνα αναφοράς (δήλωση εισοδήματος: το προηγούμενο έτος της προθεσμίας).
+RULE_CHECKS: dict[str, tuple[str, ...]] = {
+    "vat_monthly": ("Φ2",), "vat_quarterly": ("Φ2",), "vies": ("Φ4",),
+    "withholding_fees": ("ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ"),
+    "fmy_wages": ("ΦΜΥ",), "climate_fee": ("ΔΙΑΜΟΝΗ",), "income_tax_return": ("E1", "E3", "ΕΙΣΟΔΗΜΑ_ΝΠ"),
+}
+#: Κανόνες που ολοκληρώνονται ΜΟΝΟ χειροκίνητα (δεν υπάρχει ακόμη μέθοδος ελέγχου υποβολής).
+MANUAL_ONLY = {"digital_fee"}
+
+
+def check_year(rule_id: str, ref_month: str) -> int:
+    """Η χρήση του ελέγχου υποβολών για μια προθεσμία: το έτος του μήνα αναφοράς — για τη δήλωση εισοδήματος (λήγει
+    τον Ιούλιο) η ΠΡΟΗΓΟΥΜΕΝΗ χρήση."""
+    y = int(ref_month[:4]) if ref_month else date.today().year
+    return y - 1 if rule_id == "income_tax_return" else y
+
+
+def _check_says_not_obligated(rule_id: str, business: dict[str, Any], ref_month: str) -> bool:
+    """Ο έλεγχος υποβολών της ΑΑΔΕ («Δεν έχετε υποχρεώσεις υποβολής…») για ΟΛΑ τα σχετικά έντυπα της χρήσης."""
+    keys = RULE_CHECKS.get(rule_id)
+    years = (business.get("checks") or {}).get("years") or {}
+    if not keys or not ref_month:
+        return False
+    y = check_year(rule_id, ref_month)
+    found = [years.get((k, y)) for k in keys]
+    return all(v == "not_obligated" for v in found)
 
 
 def vat_period(business: dict[str, Any]) -> str:
@@ -234,17 +298,21 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     if rule_id in ("vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss"):
         if business.get("vat_subject") == 0:
             return "no", "δεν υπάγεται σε ΦΠΑ"
+    if _check_says_not_obligated(rule_id, business, ref_month):
+        return "no", "ΑΑΔΕ: δεν έχει υποχρέωση υποβολής (έλεγχος υποβολών)"
     if rule_id in ("vat_monthly", "vat_quarterly"):
         want = "monthly" if rule_id == "vat_monthly" else "quarterly"
         period = vat_period(business)
         books = business.get("books_category") or ""
         if not period:
             return "maybe", "άγνωστη περίοδος ΦΠΑ (λείπει η κατηγορία βιβλίων)"
+        source = " (περίοδοι Φ2 ΑΑΔΕ)" if business.get("vat_period_source") == "easycheck" else ""
         if period != want:
-            return "no", "υποβάλλει " + ("τριμηνιαία" if period == "quarterly" else "μηνιαία") + " ΦΠΑ"
+            return "no", "υποβάλλει " + ("τριμηνιαία" if period == "quarterly" else "μηνιαία") + " ΦΠΑ" + source
         if business.get("vat_subject") is None:
             return "maybe", "άγνωστη υπαγωγή ΦΠΑ"
-        return "yes", ("μηνιαία" if want == "monthly" else "τριμηνιαία") + " ΦΠΑ" + (f" · βιβλία {books}" if books else "")
+        return "yes", (("μηνιαία" if want == "monthly" else "τριμηνιαία") + " ΦΠΑ" + source
+                       + (f" · βιβλία {books}" if books and not source else ""))
     # Στοιχεία myDATA του μήνα αναφοράς (ρητά ναι/όχι) — υπερισχύουν των σημαιών του Excel. Μόνο για μήνες που
     # έχουν κατέβει· αλλιώς συνεχίζουμε όπως πριν.
     flag_key = _MYDATA_FLAG.get(rule_id)
@@ -253,9 +321,14 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
         if value is not None:
             yes, no = _MYDATA_REASON[rule_id]
             return ("yes", yes) if value else ("no", no)
+    # Τέλη που προκύπτουν ΜΟΝΟ από τα έσοδα του myDATA (8.2, ψηφιακό τέλος): αν έχουν κατέβει μήνες του πελάτη και δεν
+    # εμφανίστηκαν ποτέ, ο μήνας που λείπει δεν γίνεται «υπό προϋποθέσεις» για 150+ πελάτες — «όχι» με αιτιολογία.
+    if rule_id in ("climate_fee", "digital_fee") and business.get("mydata_ever"):
+        if not business["mydata_ever"].get(flag_key):
+            return "no", "δεν έχει εντοπιστεί ποτέ στα έσοδα του myDATA"
     # Σημαίες από την εισαγωγή Excel (db v11): «Μισθοδοσία» = εργοδότης· στοιχεία Intrastat = υποβάλλει Intrastat.
     # NULL = άγνωστο -> μένει «υπό προϋποθέσεις». Ποτέ «όχι» για Intrastat από απουσία στοιχείων.
-    if rule_id in ("apd", "ergani_e4") and business.get("employer") is not None:
+    if rule_id in ("apd", "ergani_e4", "fmy_wages") and business.get("employer") is not None:
         return ("yes", "εργοδότης (μισθοδοσία)") if business["employer"] else ("no", "χωρίς μισθοδοσία")
     if rule_id == "intrastat" and business.get("intrastat"):
         return "yes", "υποβάλλει Intrastat"
@@ -272,6 +345,65 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             form = "Ε1/Ε3"
         return "yes", form
     return "yes", ""
+
+
+SUBMISSION_LABEL = {"submitted": "Υποβλήθηκε", "pending": "Σε εκκρεμότητα", "not_submitted": "ΔΕΝ υποβλήθηκε",
+                    "done": "Ολοκληρώθηκε (χειροκίνητα)", "": "Δεν έχει ελεγχθεί"}
+
+
+def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str) -> dict[str, Any]:
+    """Υποβλήθηκε η δήλωση αυτής της προθεσμίας; {'status': submitted|pending|not_submitted|done|'', 'label', 'amounts',
+    'manual'}. Πηγές: χειροκίνητο «ολοκληρώθηκε» (`obligation_done`) → έλεγχος υποβολών ΑΑΔΕ (`obligation_checks`, ανά
+    μήνα αναφοράς). '' = δεν έχει ελεγχθεί / δεν υπάρχει μέθοδος."""
+    out: dict[str, Any] = {"status": "", "label": SUBMISSION_LABEL[""], "amounts": {}, "manual": rule_id in MANUAL_ONLY,
+                           "checks": [], "done_at": ""}
+    if business is None:
+        return out
+    if (rule_id, ref_month) in (business.get("done") or set()):
+        out.update(status="done", label=SUBMISSION_LABEL["done"],
+                   done_at=(business.get("done_at") or {}).get((rule_id, ref_month), ""))
+    periods = (business.get("checks") or {}).get("periods") or {}
+    found = []
+    for key in RULE_CHECKS.get(rule_id, ()):
+        if rule_id == "income_tax_return":
+            hit = periods.get((key, f"{check_year(rule_id, ref_month)}-12"))
+        elif rule_id == "vat_quarterly":
+            hit = periods.get((key, ref_month))                     # περίοδος τριμήνου = μήνας λήξης του
+        else:
+            hit = periods.get((key, ref_month))
+        if hit:
+            found.append(hit)
+    if out["status"] == "done":
+        out["checks"] = found
+        return out
+    if not found:
+        return out
+    out["checks"] = found
+    statuses = [f["status"] for f in found]
+    status = ("not_submitted" if "not_submitted" in statuses and "submitted" not in statuses
+              else "pending" if "pending" in statuses and "submitted" not in statuses else "submitted")
+    amounts = next((f["amounts"] for f in found if f.get("amounts")), {})
+    out.update(status=status, label=SUBMISSION_LABEL[status], amounts=amounts)
+    return out
+
+
+def amounts_text(amounts: dict[str, Any]) -> str:
+    """«Χρεωστική · οφειλή 1.234,00 € · RF…» — σύντομη περιγραφή των ποσών μιας δήλωσης."""
+    if not amounts:
+        return ""
+
+    def eur(v: float) -> str:
+        return f"{v:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+    parts = [amounts["result"]] if amounts.get("result") else []
+    for key, label in (("total_due", "οφειλή"), ("lump_sum", "εφάπαξ"), ("deduction", "για έκπτωση"),
+                       ("refund", "για επιστροφή")):
+        if amounts.get(key) is not None and (key != "lump_sum" or amounts.get("total_due") is None):
+            parts.append(f"{label} {eur(amounts[key])}")
+    if amounts.get("debt_id"):
+        parts.append(f"ταυτ. οφειλής {amounts['debt_id']}")
+    if amounts.get("amended"):
+        parts.append("τροποποιητική")
+    return " · ".join(parts)
 
 
 def is_legal_entity(legal_form: str) -> bool:
