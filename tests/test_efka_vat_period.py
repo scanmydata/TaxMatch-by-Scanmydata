@@ -162,7 +162,7 @@ def test_should_check_apd_only_for_employers(conn):
 def test_parse_ames_from_pisterg():
     page = ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td><td>ΑΛΦΑ ΙΚΕ</td><td>x</td>'
             '<td>1</td></tr></tbody>')
-    assert efka.parse_ames(page) == [{"ame": "0020012345", "name": "ΑΛΦΑ ΙΚΕ"}]
+    assert [{k: a[k] for k in ("ame", "name")} for a in efka.parse_ames(page)] == [{"ame": "0020012345", "name": "ΑΛΦΑ ΙΚΕ"}]
 
 
 def test_ika_employer_credentials_are_encrypted(conn):
@@ -204,3 +204,60 @@ def test_income_vs_expense_classification():
     assert analysis.is_income({"direction": "outgoing", "invoice_type": "2.1"})
     assert not analysis.is_income({"direction": "outgoing", "invoice_type": "14.3"})     # καταχώρηση λήπτη = έξοδο
     assert not analysis.is_income({"direction": "incoming", "invoice_type": "1.1"})
+
+
+# ---------------------------------------------------------------- Φ4 / Φ5 από το myDATA (αναφορά χρήστη 2026-10-23)
+def _ic_doc(conn, ym, invoice_type, direction):
+    conn.execute("INSERT INTO mydata_docs(afm, mark, direction, invoice_type, issue_date, net, total, fetched_at) "
+                 "VALUES (?,?,?,?,?,?,?,?)", (AFM, f"m{invoice_type}{ym}", direction, invoice_type, f"{ym}-10", 500, 500, "x"))
+    conn.execute("INSERT OR IGNORE INTO mydata_sync(afm, ym, synced_at, n_docs) VALUES (?,?,?,1)", (AFM, ym, "x"))
+
+
+def test_vies_acquisition_only_is_checked_against_f5_not_f4(conn):
+    """Εταιρεία με ΜΟΝΟ απόκτηση (14.1) τον Ιούλιο: έβγαινε «Φ4 ΔΕΝ υποβλήθηκε» — το σωστό έντυπο είναι το Φ5."""
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    _ic_doc(conn, "2026-07", "14.1", "incoming")
+    flags = analysis.month_flags(conn)[AFM]["2026-07"]
+    assert flags["vies"] and flags["vies_in"] and not flags["vies_out"]
+    biz = {"mydata": {"2026-07": flags},
+           "checks": {"periods": {("Φ4", "2026-07"): {"status": "not_submitted", "amounts": {}},
+                                  ("Φ5", "2026-07"): {"status": "submitted", "amounts": {}}}, "years": {}}}
+    assert obligations.vies_forms(biz, "2026-07") == (("Φ5",), True)
+    assert obligations.submission("vies", biz, "2026-07")["status"] == "submitted"
+    assert "αποκτήσεις/λήψεις (Φ5)" in obligations.liability("vies", {**biz, "activity_state": "active", "vat_subject": 1},
+                                                             "2026-07")[1]
+    # παραδόσεις ΚΑΙ αποκτήσεις: θέλει και τα δύο
+    _ic_doc(conn, "2026-08", "14.1", "incoming")
+    _ic_doc(conn, "2026-08", "2.2", "outgoing")
+    both = {"mydata": {"2026-08": analysis.month_flags(conn)[AFM]["2026-08"]},
+            "checks": {"periods": {("Φ4", "2026-08"): {"status": "not_submitted", "amounts": {}},
+                                   ("Φ5", "2026-08"): {"status": "submitted", "amounts": {}}}, "years": {}}}
+    assert obligations.vies_forms(both, "2026-08") == (("Φ4", "Φ5"), True)
+    assert obligations.submission("vies", both, "2026-08")["status"] == "not_submitted"
+    # χωρίς στοιχεία myDATA: αρκεί ένα από τα δύο
+    unknown = {"checks": both["checks"]}
+    assert obligations.vies_forms(unknown, "2026-08") == (("Φ4", "Φ5"), False)
+    assert obligations.submission("vies", unknown, "2026-08")["status"] == "submitted"
+
+
+def test_vat_quarter_notice_filters_clients_and_can_be_marked_read(conn):
+    service.add(conn, AFM, "ΑΛΦΑ")
+    conn.execute("UPDATE businesses SET books_category='Β', vat_subject=1, activity_state='active', start_date='10/01/2024' "
+                 "WHERE afm=?", (AFM,))
+    n = next(n for n in notices.collect(conn) if n.get("dismiss") == "vat_quarter")
+    assert n["afms"] == [AFM]
+    assert not notices.vat_quarter_read(conn)
+    notices.mark_vat_quarter_read(conn)
+    assert notices.vat_quarter_read(conn)
+    assert not any(n.get("dismiss") == "vat_quarter" for n in notices.collect(conn))
+    # νέος επιλέξιμος πελάτης → η ειδοποίηση ξαναεμφανίζεται
+    service.add(conn, "123456783", "ΒΗΤΑ")
+    conn.execute("UPDATE businesses SET books_category='Β', vat_subject=1, activity_state='active', start_date='10/01/2024' "
+                 "WHERE afm='123456783'")
+    assert any(n.get("dismiss") == "vat_quarter" for n in notices.collect(conn))
+
+
+def test_parse_ames_keeps_apd_code():
+    page = ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td><td>ΑΛΦΑ ΙΚΕ</td><td>x</td>'
+            '<td>123</td><td>user</td><td>a@b</td></tr></tbody>')
+    assert efka.parse_ames(page) == [{"ame": "0020012345", "name": "ΑΛΦΑ ΙΚΕ", "apd_code": "123"}]

@@ -10,16 +10,18 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QListWidget, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QListWidget, QMenu, QPushButton,
+    QScrollArea, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
 from .. import debts, mailer, office
 from .email_dialog import EmailDialog
 from .icons import icon
+from .table_filter import cell_menu_actions
+from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
@@ -80,20 +82,19 @@ class DebtsTab(QWidget):
         root.addWidget(self.info)
 
         self.table = QTableWidget(0, len(_COLS))
-        self.table.setHorizontalHeaderLabels(_COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((62, 140, 0, 118, 110, 100, 175, 175, 50)):
-            if width:
-                self.table.setColumnWidth(col, width)
+        self.kit = TableKit(self.table, list(zip(_COLS, (62, 140, 0, 118, 110, 100, 175, 175, 50))), "client_debts",
+                            cell_menu=False, placeholder="Αναζήτηση οφειλής (περιγραφή, ταυτότητα, ποσό…)")
+        root.addWidget(self.kit.bar)
         self.table.horizontalHeaderItem(4).setToolTip("Εμπρόθεσμο υπόλοιπο ΑΑΔΕ · στο ΚΕΑΟ: ό,τι είναι σε ενεργή ρύθμιση")
         self.table.itemSelectionChanged.connect(self._show_details)
-        self.table.doubleClicked.connect(lambda *_: self._open_pdf())
+        self.table.doubleClicked.connect(lambda *_: self._open_card())
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._menu)
+        self.table.setToolTip("Διπλό κλικ ή δεξί κλικ → «Καρτέλα οφειλής» (ανάλυση, δοσολόγιο, ταυτότητα, PDF)")
         root.addWidget(self.table, 2)
         self.inactive = QCheckBox("Εμφάνιση και των μη ενεργών ρυθμίσεων ΚΕΑΟ (ιστορικό — δεν μετρούν πουθενά)")
         self.inactive.toggled.connect(lambda _on: self.reload())
@@ -115,7 +116,8 @@ class DebtsTab(QWidget):
     def reload(self) -> None:
         self._rows = debts.client_debts(self.conn, self.afm, include_inactive=self.inactive.isChecked())
         sync = debts.source_sync(self.conn, self.afm)
-        email = (self.conn.execute("SELECT email FROM businesses WHERE afm=?", (self.afm,)).fetchone() or {"email": ""})["email"]
+        row = self.conn.execute("SELECT email, email_assistant FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        email, assistant = (row["email"], row["email_assistant"]) if row else ("", "")
         parts = []
         for source, label in debts.SOURCES.items():
             s = sync.get(source)
@@ -131,12 +133,18 @@ class DebtsTab(QWidget):
             parts.append(f"ληξιπρόθεσμο ΑΑΔΕ <b style='color:{CURRENT.bad}'>{office.money(aade['overdue'])}</b>")
         if not parts:
             parts.append(f"<span style='color:{CURRENT.muted}'>Δεν έχει γίνει ενημέρωση οφειλών.</span>")
-        parts.append(f"Email πελάτη: <b>{html.escape(email)}</b>" if email else
-                     f"<span style='color:{CURRENT.warn}'>Ο πελάτης δεν έχει email (Προφίλ ή ανάκτηση στοιχείων)</span>")
+        if email:
+            parts.append(f"Email πελάτη: <b>{html.escape(email)}</b>")
+        elif assistant:
+            parts.append(f"<span style='color:{CURRENT.warn}'>Χωρίς προσωπικό email — μόνο του βοηθού "
+                         f"({html.escape(assistant)}), όχι για αυτόματα email</span>")
+        else:
+            parts.append(f"<span style='color:{CURRENT.warn}'>Ο πελάτης δεν έχει email (Προφίλ ή ανάκτηση στοιχείων)</span>")
         if not mailer.configured(self.conn):
             parts.append(f"<span style='color:{CURRENT.warn}'>SMTP: Ρυθμίσεις → Email προς πελάτες</span>")
         self.info.setText(" · ".join(parts))
         t = self.table
+        self.kit.begin()
         t.setRowCount(len(self._rows))
         for i, d in enumerate(self._rows):
             has_pdf = bool(d["pdf_path"]) and Path(d["pdf_path"]).exists()
@@ -149,7 +157,7 @@ class DebtsTab(QWidget):
                      office.money(d["overdue"]) if d["overdue"] else "", office.money(d["non_overdue"]) if d["non_overdue"] else "",
                      office.money(d["total"]) if d["total"] else "", nxt, d["code"] or "—", "PDF" if has_pdf else "—"]
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = SortItem(text)
                 if col in (3, 4, 5):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if col == 3 and d["overdue"]:
@@ -165,6 +173,7 @@ class DebtsTab(QWidget):
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
                 t.setItem(i, col, item)
+        self.kit.end()
         self.details.setText("Επιλέξτε μια οφειλή για λεπτομέρειες (δόσεις, φορέας, ΔΟΥ, προθεσμία πληρωμής)."
                              if self._rows else "Καμία οφειλή.")
         self.history.clear()
@@ -191,8 +200,11 @@ class DebtsTab(QWidget):
 
     def _show_details(self) -> None:
         d = self._selected()
-        if not d:
-            return
+        if d:
+            self.details.setText(self.details_html(d))
+
+    @classmethod
+    def details_html(cls, d: dict[str, Any]) -> str:
         info = d["details"] or {}
         lines = [f"<b>{html.escape(d['title'])}</b>"]
         if d["kind"] == "declaration":
@@ -211,7 +223,7 @@ class DebtsTab(QWidget):
                              f"{office.money(owed.get('additional', 0))}) · σε ενεργές ρυθμίσεις "
                              f"{office.money(owed.get('regulated', 0))}")
             if info.get("outstanding"):
-                lines.append(self._table_html(["Ημερομηνία", "Παραστατικό", "Κύρια", "Πρόσθετα", "Σύνολο"],
+                lines.append(cls._table_html(["Ημερομηνία", "Παραστατικό", "Κύρια", "Πρόσθετα", "Σύνολο"],
                                               [[o["date"], o["document"], o["primary"], o["additional"], o["total"]]
                                                for o in info["outstanding"]]))
         elif d["kind"] in ("keao_arrangement", "keao_inactive"):
@@ -219,7 +231,7 @@ class DebtsTab(QWidget):
             lines.append(" · ".join(x for x in (info.get("carrier"), r.get("info"), r.get("status"),
                                                 f"τόκοι {r['interest']}" if r.get("interest") else "") if x))
             if r.get("instalments"):
-                lines.append(self._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"],
+                lines.append(cls._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"],
                                               [[i["no"], i["due"], i["amount"], i["paid"], i["balance"], i["increments"]]
                                                for i in r["instalments"]]))
         elif d["kind"] == "efka":
@@ -233,8 +245,8 @@ class DebtsTab(QWidget):
                 lines.append(" · ".join(html.escape(c) for c in row if c))
             inst = info.get("installments")
             if inst:
-                lines.append(self._table_html(inst["headers"], inst["rows"]))
-        self.details.setText("<br>".join(x for x in lines if x))
+                lines.append(cls._table_html(inst["headers"], inst["rows"]))
+        return "<br>".join(x for x in lines if x)
 
     # ------------------------------------------------------------------ ενέργειες
     def _fetch(self, want_pdf: bool) -> None:
@@ -253,6 +265,36 @@ class DebtsTab(QWidget):
             toast(self.window_, "Οι οφειλές ενημερώθηκαν." if res["ok"] else res["reason"], "ok" if res["ok"] else "danger")
             self.reload()
         self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self.window_, m, "danger")))
+
+    def _menu(self, pos) -> None:
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        self.table.selectRow(item.row())
+        d = self._selected()
+        if not d:
+            return
+        has_pdf = bool(d["pdf_path"]) and Path(d["pdf_path"]).exists()
+        menu = QMenu(self.table)
+        menu.addAction(icon("info", CURRENT.txt, 16), "Καρτέλα οφειλής…", self._open_card)
+        act = menu.addAction(icon("pdf", CURRENT.txt, 16), "Άνοιγμα PDF", self._open_pdf)
+        act.setEnabled(has_pdf)
+        menu.addAction(icon("download", CURRENT.txt, 16), "Νέα λήψη PDF" if has_pdf
+                       else "Λήψη PDF (ταυτότητα + δοσολόγιο)", lambda: self._fetch(True))
+        if d["code"]:
+            menu.addAction(icon("key", CURRENT.txt, 16), "Αντιγραφή ταυτότητας πληρωμής", lambda: self._copy(d["code"]))
+        menu.addSeparator()
+        cell_menu_actions(menu, self.table, pos, self.kit.col_filter)   # αντιγραφή κελιού / φίλτρο με την τιμή
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy(self, text: str) -> None:
+        QGuiApplication.clipboard().setText(text)
+        toast(self.window_, "Η ταυτότητα πληρωμής αντιγράφηκε.", "ok")
+
+    def _open_card(self) -> None:
+        d = self._selected()
+        if d:
+            DebtCard(self, d).exec()
 
     def _open_pdf(self) -> None:
         d = self._selected()
@@ -273,3 +315,74 @@ class DebtsTab(QWidget):
         if kind == "debts" and not msg.attachments:
             toast(self.window_, "Χωρίς συνημμένα: για ταυτότητες/δοσολόγια πατήστε πρώτα «Λήψη εντύπων (PDF)».", "info")
         EmailDialog(self.window_, self.afm, kind, msg, on_sent=self.reload).exec()
+
+
+class DebtCard(QDialog):
+    """«Καρτέλα οφειλής» (δεξί κλικ / διπλό κλικ): ποσά, δόση που χρωστιέται, ταυτότητα πληρωμής, ανάλυση και
+    δοσολόγιο, με λήψη/άνοιγμα του PDF (Ταυτότητα Οφειλής + δοσολόγιο ως 2η σελίδα)."""
+
+    def __init__(self, tab: DebtsTab, d: dict[str, Any]) -> None:
+        super().__init__(tab.window_)
+        self.tab, self.d = tab, d
+        self.setWindowTitle("Καρτέλα οφειλής")
+        self.resize(760, 620)
+        root = QVBoxLayout(self)
+        title = QLabel(f"{debts.SOURCES.get(d.get('source', 'aade'), '')} · "
+                       f"{debts.KIND_LABEL.get(d['kind'], d['kind'])} — {d['title']}")
+        title.setObjectName("h2")
+        title.setWordWrap(True)
+        root.addWidget(title)
+        grid = QGridLayout()
+        nxt = ""
+        if d.get("next_due"):
+            nxt = d["next_due"] + (f" · {office.money(d['next_amount'])}" if d.get("next_amount") else "")
+            if d.get("instalments"):
+                nxt += f" (απλήρωτες {d['unpaid']} από {d['instalments']})"
+        facts = [("Ληξιπρόθεσμο", office.money(d["overdue"]) if d["overdue"] else "—"),
+                 ("Εμπρόθεσμο", office.money(d["non_overdue"]) if d["non_overdue"] else "—"),
+                 ("Σύνολο", office.money(d["total"]) if d["total"] else "—"),
+                 ("Δόση που χρωστιέται", nxt or "—"),
+                 ("Ταυτότητα πληρωμής", d["code"] or "—")]
+        for row, (label, value) in enumerate(facts):
+            k = QLabel(label + ":")
+            k.setStyleSheet(f"color:{CURRENT.muted}")
+            v = QLabel(f"<b>{html.escape(value)}</b>")
+            v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if label == "Ληξιπρόθεσμο" and d["overdue"]:
+                v.setStyleSheet(f"color:{CURRENT.bad}")
+            grid.addWidget(k, row, 0)
+            grid.addWidget(v, row, 1)
+        grid.setColumnStretch(1, 1)
+        root.addLayout(grid)
+        body = QLabel(DebtsTab.details_html(d))
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+        bar = QHBoxLayout()
+        if d["code"]:
+            copy = QPushButton(icon("key", CURRENT.txt, 16), "  Αντιγραφή ταυτότητας")
+            copy.clicked.connect(lambda: tab._copy(d["code"]))
+            bar.addWidget(copy)
+        has_pdf = bool(d["pdf_path"]) and Path(d["pdf_path"]).exists()
+        get_pdf = QPushButton(icon("download", CURRENT.txt, 16), "  Νέα λήψη PDF" if has_pdf else "  Λήψη PDF")
+        get_pdf.setToolTip("Ταυτότητα Οφειλής με το δοσολόγιο ως 2η σελίδα (λήψη για όλες τις οφειλές του πελάτη)")
+        get_pdf.clicked.connect(self._fetch)
+        bar.addWidget(get_pdf)
+        open_pdf = QPushButton(icon("pdf", CURRENT.txt, 16), "  Άνοιγμα PDF")
+        open_pdf.setEnabled(has_pdf)
+        open_pdf.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(d["pdf_path"])))
+        bar.addWidget(open_pdf)
+        bar.addStretch()
+        close = QPushButton("Κλείσιμο")
+        close.clicked.connect(self.accept)
+        bar.addWidget(close)
+        root.addLayout(bar)
+
+    def _fetch(self) -> None:
+        self.accept()
+        self.tab._fetch(True)

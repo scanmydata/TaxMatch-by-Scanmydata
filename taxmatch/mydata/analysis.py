@@ -206,8 +206,12 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
     for afm, months in synced_months(conn).items():
         for ym in months:
             fees = special_fees(conn, afm, ym)
+            flows = ic_flows(conn, afm, ym)
             out.setdefault(afm, {})[ym] = {
-                "vies": vies(conn, afm, ym, months),
+                "vies": any(flows.values()),
+                # Φ4 = παραδόσεις/παροχές (1.2, 2.2) · Φ5 = αποκτήσεις/λήψεις (14.1, 14.3)
+                "vies_out": bool(flows["goods_out"] or flows["services_out"]),
+                "vies_in": bool(flows["goods_in"] or flows["services_in"]),
                 "intrastat": intrastat(conn, afm, ym, months)["any"],
                 "withholding": bool(withholding(conn, afm, ym)),
                 "climate": fees["climate_docs"] > 0,

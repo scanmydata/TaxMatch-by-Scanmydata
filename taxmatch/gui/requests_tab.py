@@ -10,13 +10,14 @@ from typing import Any
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QTableWidget, QVBoxLayout,
+    QWidget,
 )
 
 from .. import db as dbmod
 from .. import requests_aade as req
 from .icons import icon
+from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
@@ -46,16 +47,12 @@ class RequestsTab(QWidget):
         self.info.setObjectName("muted")
         root.addWidget(self.info)
         self.table = QTableWidget(0, len(_COLS))
-        self.table.setHorizontalHeaderLabels(_COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        h = self.table.horizontalHeader()
-        h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        h.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((26, 120, 120, 110, 0, 200)):
-            if width:
-                self.table.setColumnWidth(col, width)
+        self.kit = TableKit(self.table, list(zip(_COLS, (26, 120, 120, 110, 0, 200))), "client_requests",
+                            placeholder="Αναζήτηση αιτήματος (αριθμός, θέμα, κατάσταση…)")
+        root.addWidget(self.kit.bar)
         self.table.itemSelectionChanged.connect(self._show)
         self.table.doubleClicked.connect(lambda *_: self._open())
         root.addWidget(self.table, 2)
@@ -83,6 +80,7 @@ class RequestsTab(QWidget):
         else:
             self.info.setText("Δεν έχει γίνει ενημέρωση — «Ενημέρωση αιτημάτων».")
         t = self.table
+        self.kit.begin()
         t.setRowCount(len(self._rows))
         for i, r in enumerate(self._rows):
             mark = "●" if not r["seen"] else ("✓" if req.answered({"answer": r["answer"], "status": r["status"]}) else "")
@@ -90,7 +88,7 @@ class RequestsTab(QWidget):
                      " — ".join(x for x in (r["process"], r["topic"]) if x) or "Αίτημα",
                      r["status"] + (" · απορρίφθηκε" if r["rejected"] else "")]
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = SortItem(text)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -104,6 +102,7 @@ class RequestsTab(QWidget):
                     font.setBold(True)
                     item.setFont(font)
                 t.setItem(i, col, item)
+        self.kit.end()
         if not self._rows:
             self.detail.setText("Κανένα αίτημα.")
 

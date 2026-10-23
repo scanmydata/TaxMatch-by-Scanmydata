@@ -20,7 +20,7 @@ from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -32,6 +32,7 @@ from .workers import run_task
 from .aml_case_dialog import AmlCaseDialog
 from .aml_dialog import AmlAssessmentDialog, category_colour
 from .icons import icon
+from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
 from .table_filter import TableColumnFilter, install_cell_menu
@@ -197,6 +198,7 @@ class AmlPage(QWidget):
         self._col_filter.filtersChanged.connect(self._apply_filter)
         self.table.setColumnWidth(1, 220)                    # αρχικό πλάτος αν το παράθυρο είναι στενό (η στήλη «γεμίζει» μόνη της)
         setup_columns(self.table, _COL_SPEC, self.main._prefs, "aml_clients")
+        install_cell_menu(self.table, self._col_filter)        # δεξί κλικ: αντιγραφή / φίλτρο με την τιμή
         box.addWidget(self.table, 1)
         hint = QLabel("Διπλό κλικ: νέα αξιολόγηση (φορτώνει τις επιλογές της προηγούμενης). Οι επανεξετάσεις "
                       "εμφανίζονται και στο Ημερολόγιο. Η διαγραφή πελάτη ΔΕΝ σβήνει το ιστορικό δέουσας επιμέλειας "
@@ -688,26 +690,25 @@ class AmlPage(QWidget):
         top.addWidget(case_pdf)
         box.addLayout(top)
         self.case_table = QTableWidget(0, 8)
-        self.case_table.setHorizontalHeaderLabels(["#", "Είδος", "Παραλαβή", "Πελάτης", "Περιγραφή", "Κατάσταση",
-                                                   "Απόφαση / αποτέλεσμα", "Εκκρεμότητα"])
         self.case_table.verticalHeader().setVisible(False)
         self.case_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.case_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.case_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.case_table.setAlternatingRowColors(True)
-        self.case_table.setSortingEnabled(True)
-        setup_columns(self.case_table, [("#", 44, ""), ("Είδος", 150, ""), ("Παραλαβή", 90, ""), ("Πελάτης", 180, ""),
-                                        ("Περιγραφή", 0, "Διπλό κλικ: άνοιγμα υπόθεσης"), ("Κατάσταση", 120, ""),
-                                        ("Απόφαση / αποτέλεσμα", 180, ""), ("Εκκρεμότητα", 110, "")],
-                      self.main._prefs, "aml_cases")
-        install_cell_menu(self.case_table)
+        self.case_kit = TableKit(self.case_table, [("#", 44), ("Είδος", 150), ("Παραλαβή", 90), ("Πελάτης", 180),
+                                                   ("Περιγραφή", 0), ("Κατάσταση", 120), ("Απόφαση / αποτέλεσμα", 180),
+                                                   ("Εκκρεμότητα", 110)], "aml_cases", prefs=self.main._prefs,
+                                 placeholder="Αναζήτηση υπόθεσης…")
+        self.case_table.horizontalHeaderItem(4).setToolTip("Διπλό κλικ: άνοιγμα υπόθεσης")
         self.case_table.doubleClicked.connect(lambda *_: self._open_case())
+        box.addWidget(self.case_kit.bar)
         box.addWidget(self.case_table, 1)
         return page
 
     def reload_cases(self) -> None:
         rows = cases_mod.list_cases(self.conn, self.case_filter.currentData() or "")
         attention = {c["id"]: c["reason"] for c in cases_mod.attention(self.conn)}
+        self.case_kit.begin()
         self.case_table.setRowCount(len(rows))
         for i, c in enumerate(rows):
             cells = [str(c["id"]), "Ύποπτη συναλλαγή" if c["kind"] == "suspicion" else "Καταγγελία",
@@ -715,7 +716,7 @@ class AmlPage(QWidget):
                      c["description"][:120], content.CASE_STATUS_LABEL.get(c["status"], ""), cases_mod.outcome_label(c),
                      attention.get(c["id"], "")]
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = SortItem(text, int(c["id"]) if col == 0 else None)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, c["id"])
                 if col == 7 and text:
@@ -724,6 +725,7 @@ class AmlPage(QWidget):
                     item.setForeground(QColor(CURRENT.warn))
                 item.setToolTip(text)
                 self.case_table.setItem(i, col, item)
+        self.case_kit.end()
 
     def _selected_case(self) -> Optional[int]:
         row = self.case_table.currentRow()
@@ -975,29 +977,29 @@ class AmlPage(QWidget):
         top.addWidget(delete)
         box.addLayout(top)
         self.reg_table = QTableWidget(0, len(_REG_COLS))
-        self.reg_table.setHorizontalHeaderLabels(_REG_COLS)
         self.reg_table.verticalHeader().setVisible(False)
         self.reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.reg_table.setAlternatingRowColors(True)
-        self.reg_table.setSortingEnabled(True)
-        setup_columns(self.reg_table, [(c, w, "") for c, w in zip(_REG_COLS, (96, 180, 0, 96, 300))],
-                      self.main._prefs, "aml_registers")
-        install_cell_menu(self.reg_table)
+        self.reg_kit = TableKit(self.reg_table, list(zip(_REG_COLS, (96, 180, 0, 96, 300))), "aml_registers",
+                                prefs=self.main._prefs, placeholder="Αναζήτηση εγγραφής…")
+        box.addWidget(self.reg_kit.bar)
         box.addWidget(self.reg_table, 1)
         return page
 
     def reload_registers(self) -> None:
         rows = store.list_register(self.conn, self.reg_filter.currentData() or "")
+        self.reg_kit.begin()
         self.reg_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             for col, text in enumerate((_gr(r["event_date"]), content.REGISTER_LABEL.get(r["kind"], r["kind"]), r["title"],
                                         r["afm"], r["details"], r["outcome"])):
-                item = QTableWidgetItem(text)
+                item = SortItem(text)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, r["id"])
                 item.setToolTip(text)
                 self.reg_table.setItem(i, col, item)
+        self.reg_kit.end()
 
     def _add_register(self) -> None:
         title = self.reg_title.text().strip()

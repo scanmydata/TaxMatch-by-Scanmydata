@@ -237,3 +237,38 @@ def test_companies_never_use_amka_only_employer_ame(conn):
         tried.append(user)
         return {"ok": user == "taxis_u", "reason": "LandPage"}
     assert efka.employer_login_any(conn, AFM, "0020012345", login)["ok"] and tried == ["ika_u", "taxis_u"]
+
+
+# ---------------------------------------------------------------- μέλη ως πελάτες + ατομική επιχείρηση (2026-10-23)
+_RG_XML = ("<env:Envelope><env:Body><srvc:rgWsPublic2AfmMethodResponse><srvc:result><rg_ws_public2_result_rtType>"
+           "<error_rec><error_code/><error_descr/></error_rec><basic_rec><afm>123456783</afm><doy_descr>Α ΑΘΗΝΩΝ</doy_descr>"
+           "<onomasia>ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ</onomasia><commer_title>ΓΙΩΡΓΟΣ ΚΑΦΕ</commer_title>"
+           "<firm_flag_descr>ΕΠΙΤΗΔΕΥΜΑΤΙΑΣ</firm_flag_descr><deactivation_flag>1</deactivation_flag>"
+           "<regist_date>2019-03-01</regist_date><stop_date/><normal_vat_system_flag>Y</normal_vat_system_flag>"
+           "</basic_rec><firm_act_tab><item><firm_act_code>56301000</firm_act_code><firm_act_descr>ΚΑΦΕΤΕΡΙΑ</firm_act_descr>"
+           "<firm_act_kind>1</firm_act_kind></item></firm_act_tab></rg_ws_public2_result_rtType></srvc:result>"
+           "</srvc:rgWsPublic2AfmMethodResponse></env:Body></env:Envelope>")
+
+
+def test_rgwspublic_parse_and_business_state():
+    from taxmatch.business_profiles import rgwspublic
+    res = rgwspublic.parse(_RG_XML)
+    assert res["ok"] and res["firm"] and res["trade_name"] == "ΓΙΩΡΓΟΣ ΚΑΦΕ"
+    assert res["kads"] == [{"code": "56301000", "descr": "ΚΑΦΕΤΕΡΙΑ", "is_main": True}]
+    assert rgwspublic.business_state(res) == "active"
+    assert rgwspublic.business_state(rgwspublic.parse(_RG_XML.replace("<firm_flag_descr>ΕΠΙΤΗΔΕΥΜΑΤΙΑΣ",
+                                                                      "<firm_flag_descr>ΜΗ ΕΠΙΤΗΔΕΥΜΑΤΙΑΣ"))) == "none"
+    assert not rgwspublic.parse("<error_rec><error_code>RG_WS_PUBLIC_WRONG_AFM</error_code></error_rec>")["ok"]
+
+
+def test_members_become_clients_and_individual_business_is_checked(conn):
+    from taxmatch import members
+    from taxmatch.business_profiles import rgwspublic
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    members.store(conn, AFM, [{"afm": "123456783", "name": "ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ", "role": "ΔΙΑΧΕΙΡΙΣΤΗΣ"}], "aade")
+    added = members.sync_member_clients(conn, AFM, rg_lookup=lambda a: rgwspublic.parse(_RG_XML))
+    assert added == ["123456783"]
+    b = conn.execute("SELECT * FROM businesses WHERE afm='123456783'").fetchone()
+    assert b["activity_state"] == "active" and b["trade_name"] == "ΓΙΩΡΓΟΣ ΚΑΦΕ" and b["source"] == "member"
+    assert members.parent_company(conn) == {"123456783": AFM}
+    assert members.sync_member_clients(conn, AFM, check_business=False) == []          # ήδη πελάτης

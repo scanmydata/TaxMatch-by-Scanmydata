@@ -130,6 +130,58 @@ def add_as_client(conn: sqlite3.Connection, company: str, member_afm: str) -> bo
     return service.add(conn, member_afm, row["name"] if row else "", source="member")
 
 
+def sync_member_clients(conn: sqlite3.Connection, company: str,
+                        rg_lookup: Optional[Callable[[str], dict[str, Any]]] = None, check_business: bool = True) -> list[str]:
+    """Κάθε μέλος της εταιρείας γίνεται ΚΑΙ εγγραφή στους πελάτες (εμφανίζεται κάτω από την εταιρεία στη λίστα,
+    ανοίγει κανονικά — ρητό αίτημα χρήστη 2026-10-23) και εξετάζεται αν έχει ατομική επιχείρηση. Επιστρέφει τους νέους.
+    Ατομική επιχείρηση μέλους χωρίς δικούς του κωδικούς: «Αναζήτηση Βασικών Στοιχείων Μητρώου» (RgWsPublic2) με τους
+    ειδικούς κωδικούς του γραφείου — το Μητρώο TAXISnet δείχνει μόνο τον ΑΦΜ του λογαριασμού. Χωρίς αυτούς: άγνωστο."""
+    from .business_profiles import service
+    added = []
+    rows = conn.execute("SELECT member_afm FROM company_members WHERE company_afm=?", (company,)).fetchall()
+    for r in rows:
+        if add_as_client(conn, company, r["member_afm"]):
+            added.append(r["member_afm"])
+    lookup = (rg_lookup or _rg_lookup(conn)) if check_business else None
+    for r in rows:
+        afm = r["member_afm"]
+        if lookup is None or credentials.get(conn, afm):
+            continue                                # με δικούς του κωδικούς: η κανονική ανάκτηση ξέρει περισσότερα
+        res = lookup(afm)
+        if not res.get("ok"):
+            continue
+        from .business_profiles.rgwspublic import business_state
+        state = business_state(res)
+        conn.execute("UPDATE businesses SET activity_state=CASE WHEN ?<>'' THEN ? ELSE activity_state END, "
+                     "cease_date=?, start_date=CASE WHEN ?<>'' THEN ? ELSE start_date END, "
+                     "trade_name=CASE WHEN ?<>'' THEN ? ELSE trade_name END, "
+                     "name=CASE WHEN name='' OR name=afm THEN ? ELSE name END, updated_at=? WHERE afm=?",
+                     (state, state, res.get("stop_date") or "", res.get("start_date") or "", res.get("start_date") or "",
+                      res.get("trade_name") or "", res.get("trade_name") or "", res.get("name") or "", db.utcnow(), afm))
+        if state == "active" and res.get("kads"):
+            service.set_kads(conn, afm, res["kads"])
+    return added
+
+
+def _rg_lookup(conn: sqlite3.Connection) -> Optional[Callable[[str], dict[str, Any]]]:
+    from . import settings_store
+    from .business_profiles import rgwspublic
+    user, password = settings_store.get(conn, "rg_user"), settings_store.get(conn, "rg_pass")
+    if not (user and password):
+        return None
+    return lambda afm: rgwspublic.lookup(afm, user, password)
+
+
+def parent_company(conn: sqlite3.Connection) -> dict[str, str]:
+    """ΑΦΜ μέλους → ΑΦΜ εταιρείας στην οποία εμφανίζεται (λίστα πελατών). Μέλος σε πολλές: η πρώτη αλφαβητικά."""
+    out: dict[str, str] = {}
+    for r in conn.execute("SELECT m.member_afm, m.company_afm FROM company_members m JOIN businesses b ON "
+                          "b.afm=m.member_afm JOIN businesses c ON c.afm=m.company_afm ORDER BY m.company_afm"):
+        if r["member_afm"] != r["company_afm"]:
+            out.setdefault(r["member_afm"], r["company_afm"])
+    return out
+
+
 def remove(conn: sqlite3.Connection, company: str, member_afm: str) -> None:
     conn.execute("DELETE FROM company_members WHERE company_afm=? AND member_afm=?", (company, member_afm))
 
@@ -155,6 +207,8 @@ def from_import(conn: sqlite3.Connection, rows: Iterable[Any]) -> int:
         for company, member in pairs:
             if company in clients and company != member:
                 n += store(conn, company, [{"afm": member, "name": names.get(member, "")}], "excel")
+                # και εγγραφή στους πελάτες (χωρίς δίκτυο εδώ — η ατομική επιχείρηση ελέγχεται με την ανανέωση στοιχείων)
+                sync_member_clients(conn, company, check_business=False)
     return n
 
 

@@ -8,14 +8,14 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
 from .. import members, office
 from ..identifiers import normalize_afm
 from .icons import icon
+from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
@@ -50,16 +50,12 @@ class MembersTab(QWidget):
         bar.addStretch()
         root.addLayout(bar)
         self.table = QTableWidget(0, len(_COLS))
-        self.table.setHorizontalHeaderLabels(_COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        h = self.table.horizontalHeader()
-        h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((28, 95, 0, 190, 70, 125, 150, 160)):
-            if width:
-                self.table.setColumnWidth(col, width)
+        self.kit = TableKit(self.table, list(zip(_COLS, (28, 95, 0, 190, 70, 125, 150, 160))), "client_members",
+                            filterable=range(1, len(_COLS)), placeholder="Αναζήτηση μέλους (ΑΦΜ, όνομα, ιδιότητα…)")
+        root.addWidget(self.kit.bar)
         self.table.doubleClicked.connect(lambda *_: self._open_client())
         root.addWidget(self.table, 1)
         acts = QHBoxLayout()
@@ -96,6 +92,7 @@ class MembersTab(QWidget):
               "μέλους αντλούνται με τους δικούς του κωδικούς — γι' αυτό πρέπει να είναι πελάτης.")
         self._rows = members.company_members(self.conn, self.afm)
         t = self.table
+        self.kit.begin()
         t.setRowCount(len(self._rows))
         for i, m in enumerate(self._rows):
             debt_text = " · ".join(f"{k.upper() if k != 'aade' else 'ΑΑΔΕ'} {office.money(v['total'])}"
@@ -104,7 +101,7 @@ class MembersTab(QWidget):
             cells = ["", m["member_afm"], m["name"] or "—", m["role"], m["share"], _SOURCE.get(m["source"], m["source"]),
                      client, debt_text]
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = SortItem(text)
                 if col == 0:
                     item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                     item.setCheckState(Qt.CheckState.Unchecked)
@@ -113,6 +110,7 @@ class MembersTab(QWidget):
                     item.setForeground(QColor(CURRENT.ok if m["has_creds"] else (CURRENT.warn if m["is_client"]
                                                                                  else CURRENT.muted)))
                 t.setItem(i, col, item)
+        self.kit.end()
 
     def _chosen(self) -> list[dict[str, Any]]:
         checked = [self._rows[self.table.item(r, 0).data(Qt.ItemDataRole.UserRole)] for r in range(self.table.rowCount())

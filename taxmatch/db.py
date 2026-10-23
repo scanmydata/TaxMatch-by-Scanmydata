@@ -541,6 +541,15 @@ MIGRATIONS: list[str] = [
         message   TEXT NOT NULL DEFAULT ''
     )
     """,
+    # v16 (2026-10-23): διακριτικός τίτλος (Μητρώο `commercialtitle`, και για αναζήτηση)· email βοηθού/εκπροσώπου
+    # χωριστά από το προσωπικό (`getLdapInfo`: κύριο = `mail2` που δηλώνει ο ίδιος ο υπόχρεος· `mail` = email εγγραφής
+    # TAXISnet, συχνά του βοηθού/λογιστή· `mailemep` = εκπροσώπου). Όσα είχαν έρθει από `mail`/`mailemep` μετακινούνται.
+    """
+    ALTER TABLE businesses ADD COLUMN trade_name TEXT NOT NULL DEFAULT '';
+    ALTER TABLE businesses ADD COLUMN email_assistant TEXT NOT NULL DEFAULT '';
+    UPDATE businesses SET email_assistant=email, email='', email_origin=''
+        WHERE contact_source='aade' AND email_origin IN ('mail', 'mailemep') AND email<>''
+    """,
 ]
 
 

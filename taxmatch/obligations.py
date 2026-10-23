@@ -258,7 +258,7 @@ _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές σ
 #: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
 _MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding", "climate_fee": "climate",
                 "digital_fee": "digital_fee"}
-_MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές στο myDATA", "καμία ενδοκοινοτική συναλλαγή στο myDATA"),
+_MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές στο myDATA", "καμία ενδοκοινοτική συναλλαγή στο myDATA"),  # βλ. vies_reason
                   "intrastat": ("υπέρβαση κατωφλίου Intrastat (myDATA)", "κάτω από τα κατώφλια Intrastat (myDATA)"),
                   "withholding_fees": ("παραστατικά με παρακράτηση φόρου στο myDATA", "καμία παρακράτηση στο myDATA"),
                   "climate_fee": ("εξέδωσε στοιχεία 8.2 (τέλος ανθεκτικότητας) στο myDATA", "κανένα 8.2 στο myDATA"),
@@ -267,13 +267,36 @@ _MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές σ
 #: Ποιος έλεγχος υποβολών (easycheck.OBLIGATIONS) απαντά αν υποβλήθηκε η δήλωση κάθε κανόνα. Η χρήση του ελέγχου είναι
 #: το έτος του μήνα αναφοράς (δήλωση εισοδήματος: το προηγούμενο έτος της προθεσμίας).
 RULE_CHECKS: dict[str, tuple[str, ...]] = {
-    "vat_monthly": ("Φ2",), "vat_quarterly": ("Φ2",), "vies": ("Φ4",),
+    "vat_monthly": ("Φ2",), "vat_quarterly": ("Φ2",), "vies": ("Φ4", "Φ5"),     # ποιο από τα δύο: vies_forms
     "withholding_fees": ("ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ"),
     "fmy_wages": ("ΦΜΥ",), "climate_fee": ("ΔΙΑΜΟΝΗ",), "income_tax_return": ("E1", "E3", "ΕΙΣΟΔΗΜΑ_ΝΠ"),
     "apd": ("ΑΠΔ",),                       # e-ΕΦΚΑ (οικονομική καρτέλα εργοδότη) — βλ. efka.py
 }
 #: Κανόνες που ολοκληρώνονται ΜΟΝΟ χειροκίνητα (δεν υπάρχει ακόμη μέθοδος ελέγχου υποβολής).
 MANUAL_ONLY = {"digital_fee"}
+
+
+VIES_FORM_LABEL = {"Φ4": "παραδόσεις/παροχές (Φ4)", "Φ5": "αποκτήσεις/λήψεις (Φ5)"}
+
+
+def vies_forms(business: Optional[dict[str, Any]], ref_month: str) -> tuple[tuple[str, ...], bool]:
+    """Ποιοι ανακεφαλαιωτικοί πίνακες οφείλονται τον μήνα: Φ4 = παραδόσεις αγαθών / παροχές υπηρεσιών (εκδοθέντα 1.2,
+    2.2), Φ5 = αποκτήσεις / λήψεις υπηρεσιών (14.1, 14.3) — από το myDATA. (forms, known): χωρίς στοιχεία myDATA του
+    μήνα → και τα δύο, known=False (αρκεί να υποβλήθηκε ένα). Αναφορά χρήστη 2026-10-23: εταιρεία με ΜΟΝΟ απόκτηση
+    έβγαινε «Φ4 ΔΕΝ υποβλήθηκε»."""
+    flags = (((business or {}).get("mydata") or {}).get(ref_month) or {})
+    if "vies_out" not in flags:
+        return ("Φ4", "Φ5"), False
+    forms = tuple(f for f, on in (("Φ4", flags["vies_out"]), ("Φ5", flags["vies_in"])) if on)
+    return forms, True
+
+
+def rule_checks(rule_id: str, business: Optional[dict[str, Any]], ref_month: str) -> tuple[str, ...]:
+    """Τα έντυπα του ελέγχου υποβολών που απαντούν για αυτή την προθεσμία (RULE_CHECKS, με Φ4/Φ5 ανά μήνα)."""
+    if rule_id == "vies":
+        forms, known = vies_forms(business, ref_month)
+        return forms if known else RULE_CHECKS["vies"]
+    return RULE_CHECKS.get(rule_id, ())
 
 
 def check_year(rule_id: str, ref_month: str) -> int:
@@ -285,7 +308,7 @@ def check_year(rule_id: str, ref_month: str) -> int:
 
 def _check_says_not_obligated(rule_id: str, business: dict[str, Any], ref_month: str) -> bool:
     """Ο έλεγχος υποβολών της ΑΑΔΕ («Δεν έχετε υποχρεώσεις υποβολής…») για ΟΛΑ τα σχετικά έντυπα της χρήσης."""
-    keys = RULE_CHECKS.get(rule_id)
+    keys = rule_checks(rule_id, business, ref_month)
     years = (business.get("checks") or {}).get("years") or {}
     if not keys or not ref_month:
         return False
@@ -406,6 +429,10 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
         value = ((business.get("mydata") or {}).get(ref_month) or {}).get(flag_key)
         if value is not None:
             yes, no = _MYDATA_REASON[rule_id]
+            if rule_id == "vies" and value:
+                forms, known = vies_forms(business, ref_month)
+                if known:
+                    yes = "ενδοκοινοτικές " + " και ".join(VIES_FORM_LABEL[f] for f in forms) + " στο myDATA"
             return ("yes", yes) if value else ("no", no)
     # Τέλη που προκύπτουν ΜΟΝΟ από τα έσοδα του myDATA (8.2, ψηφιακό τέλος): αν έχουν κατέβει μήνες του πελάτη και δεν
     # εμφανίστηκαν ποτέ, ο μήνας που λείπει δεν γίνεται «υπό προϋποθέσεις» για 150+ πελάτες — «όχι» με αιτιολογία.
@@ -450,7 +477,7 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str)
                    done_at=(business.get("done_at") or {}).get((rule_id, ref_month), ""))
     periods = (business.get("checks") or {}).get("periods") or {}
     found = []
-    for key in RULE_CHECKS.get(rule_id, ()):
+    for key in rule_checks(rule_id, business, ref_month):
         if rule_id == "income_tax_return":
             hit = periods.get((key, f"{check_year(rule_id, ref_month)}-12"))
         elif rule_id == "vat_quarterly":
@@ -468,6 +495,10 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str)
     statuses = [f["status"] for f in found]
     status = ("not_submitted" if "not_submitted" in statuses and "submitted" not in statuses
               else "pending" if "pending" in statuses and "submitted" not in statuses else "submitted")
+    if rule_id == "vies" and vies_forms(business, ref_month)[1] and status == "submitted" and (
+            len(found) < len(rule_checks(rule_id, business, ref_month)) or set(statuses) != {"submitted"}):
+        # το myDATA λέει ποιοι πίνακες οφείλονται — αν έχει και παραδόσεις και αποκτήσεις, θέλει και τους δύο
+        status = "not_submitted" if "not_submitted" in statuses else "pending"
     amounts = next((f["amounts"] for f in found if f.get("amounts")), {})
     out.update(status=status, label=SUBMISSION_LABEL[status], amounts=amounts)
     return out

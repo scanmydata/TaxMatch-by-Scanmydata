@@ -10,12 +10,13 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QAbstractItemView, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import office
 from .icons import icon
+from .table_kit import interactive
 from .theme import CURRENT
 from .toast import toast
 from .widgets import GrDateEdit
@@ -99,8 +100,8 @@ class ServicesBox(QGroupBox):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(40)   # χώρος για combo/ποσό/ημερομηνία μέσα στο κελί
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        interactive(self.table)                                 # στήλες που σύρονται (πίνακας καταχώρισης: χωρίς ταξινόμηση)
+        self.table.setColumnWidth(0, 320)
         self.table.setColumnWidth(1, 140)
         self.table.setColumnWidth(2, 130)
         self.table.setMinimumHeight(220)
@@ -198,9 +199,8 @@ class ClientFeesWidget(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(40)   # χώρος για combo/ποσό/ημερομηνία μέσα στο κελί
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col, width in ((1, 120), (2, 130), (3, 118), (4, 118), (5, 170)):
+        interactive(self.table)                                 # στήλες που σύρονται (πίνακας καταχώρισης: χωρίς ταξινόμηση)
+        for col, width in ((0, 260), (1, 120), (2, 130), (3, 118), (4, 118), (5, 170)):
             self.table.setColumnWidth(col, width)
         box.addWidget(self.table, 1)
         self.totals = QLabel("")

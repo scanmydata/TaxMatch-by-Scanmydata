@@ -15,14 +15,15 @@ from typing import Any
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QVBoxLayout,
+    QWidget,
 )
 
 from .. import db as dbmod
 from .. import deadlines, obligations, office
 from ..mydata import analysis, credentials as mydata_creds, names, pdfs, store
 from .icons import icon
+from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
@@ -34,20 +35,6 @@ HISTORY_MONTHS = 24                     # για Intrastat χρειάζεται 
 def _months(n: int = 36) -> list[str]:
     today = date.today()
     return store.previous_months(f"{today.year}-{today.month:02d}", n)
-
-
-class _SortItem(QTableWidgetItem):
-    """Κελί με δικό του κλειδί ταξινόμησης (ημερομηνία ISO, ποσό) — το κείμενο «05/03» ή «1.200,00 €» δεν ταξινομείται σωστά."""
-
-    def __init__(self, text: str, key: Any) -> None:
-        super().__init__(text)
-        self._key = key
-
-    def __lt__(self, other) -> bool:  # noqa: D105
-        mine, theirs = self._key, getattr(other, "_key", None)
-        if theirs is None or type(mine) is not type(theirs):
-            return super().__lt__(other)
-        return mine < theirs
 
 
 def year_months(year: int) -> list[str]:
@@ -132,18 +119,14 @@ class MydataTab(QWidget):
         root.addWidget(self.summary)
 
         self.table = QTableWidget(0, len(_COLS))
-        self.table.setHorizontalHeaderLabels(_COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSortingEnabled(True)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        for col, width in enumerate((64, 48, 92, 0, 90, 90, 80, 90, 80, 90)):
-            if width:
-                self.table.setColumnWidth(col, width)
+        self.kit = TableKit(self.table, list(zip(_COLS, (64, 48, 92, 0, 90, 90, 80, 90, 80, 90))), "client_mydata",
+                            prefs=getattr(main, "_prefs", None),
+                            placeholder="Αναζήτηση παραστατικού (αντισυμβαλλόμενος, ΑΦΜ, τύπος, ποσό…)")
+        root.addWidget(self.kit.bar)
         self.table.itemSelectionChanged.connect(self._selection_note)
         self.table.doubleClicked.connect(lambda *_: self._open_selected())
         root.addWidget(self.table, 1)
@@ -305,7 +288,7 @@ class MydataTab(QWidget):
         self._docs = store.month_docs(self.conn, self.afm, ym)
         party = names.name_map(self.conn)
         t = self.table
-        t.setSortingEnabled(False)
+        self.kit.begin()
         t.setRowCount(len(self._docs))
         non_vat = self._non_vat()
         pdf_colour = {"ok": CURRENT.ok, "viewer": CURRENT.accent, "failed": CURRENT.bad, "no_url": CURRENT.muted,
@@ -324,7 +307,7 @@ class MydataTab(QWidget):
                    f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}"
                    + (f" · ψηφιακό τέλος {office.money(d['stamp'])}" if d.get("stamp") else ""))
             for col, text in enumerate(cells):
-                item = _SortItem(text, keys[col]) if col in keys else QTableWidgetItem(text)
+                item = SortItem(text, keys[col]) if col in keys else SortItem(text)
                 item.setToolTip(tip)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
@@ -342,7 +325,7 @@ class MydataTab(QWidget):
                 if d["cancelled"]:
                     item.setForeground(QColor(CURRENT.muted))
                 t.setItem(i, col, item)
-        t.setSortingEnabled(True)
+        self.kit.end()
         self._render_warning()
         self._render_summary(ym)
         self.preview_note.setText(f"{len(self._docs)} παραστατικά" if self._docs else "")

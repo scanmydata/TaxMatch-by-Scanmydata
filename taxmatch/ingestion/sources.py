@@ -51,6 +51,17 @@ SOURCES: list[Source] = [
            publisher="eforiakoi.org", keywords=True, max_items=60,
            note="Συνδικαλιστική ενημέρωση εφοριακών· κυρίως εργασιακά, μόνο περιστασιακά εγκύκλιοι (φιλτράρεται). "
                 "Το feed είναι ~4 MB."),
+    # Νέες πηγές (2026-10-23, ρητό αίτημα «βρες και άλλες πηγές») — επαληθεύτηκαν ζωντανά ότι δίνουν φρέσκο RSS. Δεν
+    # μπήκαν: dikaiologitika.gr (το feed «φορολογικά» σταμάτησε το 2013), ΑΑΔΕ (δεν έχει RSS — μόνο το ημερολόγιο).
+    Source("enomothesia", "e-nomothesia — Νέα νομοθεσία (ΦΕΚ)", "https://www.e-nomothesia.gr/rss.xml",
+           publisher="e-nomothesia.gr", keywords=True,
+           note="Όλοι οι νέοι νόμοι/αποφάσεις (ΦΕΚ)· το θέμα είναι στην περιγραφή — φιλτράρεται με λέξεις-κλειδιά."),
+    Source("mononews_aade", "Mononews — ετικέτα «ΑΑΔΕ»", "https://www.mononews.gr/tag/aade/feed", publisher="mononews.gr",
+           keywords=True, note="Φιλτράρεται: οι επιχειρήσεις της ΑΑΔΕ κατά κυκλωμάτων/λαθρεμπορίου απορρίπτονται."),
+    Source("newmoney_aade", "Newmoney — ετικέτα «ΑΑΔΕ»", "https://www.newmoney.gr/tag/aade/feed/", publisher="newmoney.gr",
+           keywords=True, note="Φιλτράρεται με λέξεις-κλειδιά."),
+    Source("oee", "Οικονομικό Επιμελητήριο (oe-e.gr)", "https://www.oe-e.gr/feed/", publisher="oe-e.gr", keywords=True,
+           default_enabled=False, note="Κυρίως σεμινάρια/ανακοινώσεις του ΟΕΕ — off από προεπιλογή."),
     Source("forin", "forin.gr", "https://www.forin.gr/", publisher="forin.gr", default_enabled=False, available=False,
            note="Προστατεύεται με Cloudflare (έλεγχος ανθρώπου)· δεν λαμβάνεται αυτόματα και δεν παρακάμπτεται."),
 ]

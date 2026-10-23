@@ -72,9 +72,16 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("auto_email_news_days", "Νέα των τελευταίων N ημερών", default="14"),
     SettingDef("daily_debts", "Λήψη οφειλών ΑΑΔΕ στον καθημερινό έλεγχο", default="0"),
     # Μέλη/εκπρόσωποι εταιρειών από το Μητρώο ΑΑΔΕ με την ανάκτηση στοιχείων (members.py) — επιλογή του χρήστη
-    SettingDef("fetch_members", "Άντληση μελών εταιρειών", default="0"),
+    SettingDef("fetch_members", "Άντληση μελών εταιρειών", default="1"),
+    # «Αναζήτηση Βασικών Στοιχείων Μητρώου» (RgWsPublic2) — ειδικοί κωδικοί του γραφείου: ατομική επιχείρηση μελών
+    SettingDef("rg_user", "Ειδικοί κωδικοί Μητρώου (RgWsPublic2) — χρήστης", secret=True),
+    SettingDef("rg_pass", "Ειδικοί κωδικοί Μητρώου (RgWsPublic2) — κωδικός", secret=True),
     # «Τα Αιτήματά μου» της ΑΑΔΕ στον καθημερινό έλεγχο (requests_aade.py) — ειδοποίηση για απαντήσεις/αλλαγές
     SettingDef("daily_requests", "Έλεγχος αιτημάτων ΑΑΔΕ στον καθημερινό έλεγχο", default="0"),
+    # Ειδοποίηση «μπορούν να επανέλθουν στο τρίμηνο» (notices.py): αναγνωσμένη για ΑΥΤΗ την προθεσμία/αυτούς τους
+    # πελάτες· ο αστερίσκος της στήλης ΦΠΑ μένει ώς την επόμενη εκκίνηση, ή μόνιμα με το `vat_option_mark_keep`.
+    SettingDef("notice_vat_quarter_read", "Αναγνωσμένη ειδοποίηση επιστροφής στο τρίμηνο"),
+    SettingDef("vat_option_mark_keep", "Μόνιμος αστερίσκος ΦΠΑ για επιστροφή στο τρίμηνο", default="0"),
 ]}
 
 

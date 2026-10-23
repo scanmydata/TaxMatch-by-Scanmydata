@@ -10,7 +10,7 @@ Reference: `PRODUCT_SPEC.md` και `MIGRATION_PLAN.md` (στο Downloads του
 ## Εντολές
 
 ```bash
-.venv/Scripts/python.exe -m pytest                 # ~435 tests, χωρίς δίκτυο (και GUI tests, offscreen)
+.venv/Scripts/python.exe -m pytest                 # ~450 tests, χωρίς δίκτυο (και GUI tests, offscreen)
 .venv/Scripts/python.exe -m taxmatch               # native GUI (PySide6)
 .venv/Scripts/python.exe -m taxmatch --daily       # headless έλεγχος (ό,τι τρέχει το Task Scheduler)
 .venv/Scripts/python.exe -m taxmatch --serve       # ΕΣΩΤΕΡΙΚΟ: Flask server για tests/ανάπτυξη — ΟΧΙ η πραγματική εφαρμογή
@@ -580,3 +580,36 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    - Χρεωστικές δηλώσεις του ελέγχου υποβολών ΔΕΝ εμφανίζονται όταν υπάρχει λήψη οφειλών ΑΑΔΕ (ζωντανά έβγαιναν και οι
      πληρωμένες της χρονιάς)· χωρίς λήψη μόνο του τελευταίου τριμήνου.
 
+21. **Ανατροφοδότηση v0.7.0 (2026-10-23, ρητά αιτήματα χρήστη — db v16).**
+   - **«Font Capture: Windows - Application Error 0xc06d007e» στη «Λήψη εντύπων»: ΔΕΝ είναι του TaxMatch** — γνωστό bug
+     του Adobe Acrobat Reader 26.002.x (Windows 11) σε κάθε άνοιγμα PDF. Τα 8 PDF είχαν κατέβει σωστά (2 σελίδες το καθένα).
+   - **Φ4 / Φ5:** Φ4 = παραδόσεις/παροχές (1.2/2.2), Φ5 = αποκτήσεις/λήψεις (14.1/14.3). `obligations.vies_forms` από τα
+     `vies_out`/`vies_in` του `mydata.analysis.month_flags`· με γνωστό myDATA θέλει ΟΛΑ τα σχετικά έντυπα, χωρίς myDATA
+     αρκεί ένα. Το easycheck ελέγχει πλέον και Φ5. (Πριν: εταιρεία με ΜΟΝΟ απόκτηση έβγαινε «Φ4 ΔΕΝ υποβλήθηκε».)
+   - **Email:** κύριο = `mail2` (προσωπικό, δηλωμένο από τον υπόχρεο)· `mail` (εγγραφή TAXISnet — στα πραγματικά δεδομένα
+     7 στους 8 πελάτες, ο χρήστης το αναγνώρισε ως «email βοηθού») / `mailemep` → `businesses.email_assistant`. Η v16
+     μετέφερε τα υπάρχοντα. Αυτόματα email ΜΟΝΟ στο κύριο· η χειροκίνητη αποστολή προτείνει το βοηθού αν λείπει το κύριο.
+     Επαληθεύτηκε ζωντανά: για τις δύο εταιρείες του χρήστη το `getLdapInfo` έχει ΜΟΝΟ `mail` (καθόλου `mail2`).
+   - **Διακριτικός τίτλος** = `commercialtitle` του `getMhtrwoEpixeirhshs` (ζωντανά) → `businesses.trade_name`· αναζήτηση
+     πελατών και με αυτόν. (Το ίδιο endpoint έχει και `endokoinotikessynallages` — δεν χρησιμοποιείται ακόμη.)
+   - **Μέλη ως πελάτες:** `members.sync_member_clients` με κάθε ανάκτηση εταιρείας (`fetch_members` πλέον default 1) —
+     εμφανίζονται ΚΑΤΩ από την εταιρεία (▸/▾, `main_window._ClientItem`: η ομάδα μένει ενωμένη σε κάθε ταξινόμηση).
+     Ατομική επιχείρηση μέλους χωρίς δικούς του κωδικούς: `business_profiles/rgwspublic.py` (RgWsPublic2 με ΕΙΔΙΚΟΥΣ
+     κωδικούς γραφείου `rg_user`/`rg_pass`) — **ΔΕΝ έχει δοκιμαστεί ζωντανά** (χωρίς κωδικούς: η κατάσταση μένει άγνωστη).
+   - **Ενιαίοι πίνακες** (`gui/table_kit.py: TableKit`): ταξινόμηση, αναζήτηση, χωνί σε κάθε στήλη, πλάτη που θυμούνται,
+     δεξί κλικ· γέμισμα ΠΑΝΤΑ μέσα σε `kit.begin()/end()` (αλλιώς με ενεργή ταξινόμηση το `setItem(i, …)` πάει σε λάθος
+     γραμμή). Χωρίς ένδειξη ταξινόμησης (-1) ώσπου να πατηθεί επικεφαλίδα — η προεπιλογή της Qt (στήλη 0, φθίνουσα)
+     ταξινομούσε μόνη της. Πίνακες καταχώρισης (αμοιβές, δικαιούχοι, συναλλαγές): μόνο `interactive()` (πλάτος).
+   - Ειδοποίηση ΦΠΑ τριμήνου: «Δείτε τους πελάτες» φιλτράρει (`MainWindow._notice_afms`), «Αναγνώστηκε»
+     (`notices.mark_vat_quarter_read`), «*» στη στήλη ΦΠΑ ώς την επανεκκίνηση ή μόνιμα (`vat_option_mark_keep`).
+   - Ημερολόγιο: κόκκινη κουκκίδα = σίγουρα υπόχρεοι πελάτες (`deadlines.obligated_counts`), υπόμνημα, hover με
+     `QFrame#dayCell` (χωρίς objectName το `QFrame:hover` έπιανε και τα QLabel-chips).
+   - ΑΜΕ: ίδια ροή με τον runner `configs/efka-ame.js` αλλά καθαρό HTTP· προστέθηκαν «Οικοδομοτεχνικών Έργων», `AfmMismatch`,
+     κωδ. ΑΠΔ· η μεθοδολογία `recerse-engineer/out/methodologies/EFKA_AME_retrieval.md` ενημερώθηκε με το HTTP flow.
+   - **Πελάτες → ΕΝΑ κουμπί «Έλεγχοι & ενημέρωση…»** (`gui/checks_dialog.py`) αντί για 5: checkbox ανά έλεγχο (θυμάται την
+     επιλογή)· η «Ανανέωση στοιχείων» προτείνεται όταν λείπουν βασικά στοιχεία για το είδος του πελάτη
+     (`service.missing_basics`: ιδιώτης / ατομική / νομικό πρόσωπο).
+   - **Φίλτρο νέων αυστηρότερο** (`ingestion/filters.py`): ρίζες ΜΟΝΟ στην αρχή λέξης (το «ικα» ταίριαζε μέσα στο
+     «πολιτικα»), ισχυροί (ένας αρκεί) / αδύναμοι (δύο) / αρνητικοί στον τίτλο (κύκλωμα, κατάσχεση…). Ζωντανά: capital.gr
+     99 → 8 άρθρα προς LLM (πριν ~23). Νέες πηγές (ζωντανά επαληθευμένες): e-nomothesia (ΦΕΚ), mononews/newmoney
+     ετικέτα ΑΑΔΕ, ΟΕΕ (off). Απορρίφθηκαν: dikaiologitika (feed του 2013), ΑΑΔΕ (χωρίς RSS).

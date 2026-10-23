@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QTableWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
@@ -30,6 +30,7 @@ from .mydata_tab import MydataTab
 from .office_widgets import ClientFeesWidget
 from .theme import CURRENT
 from .toast import toast
+from .table_kit import SortItem, TableKit
 from .widgets import due_badge, kind_colour
 from .workers import run_task
 
@@ -106,6 +107,10 @@ class ClientDetailDialog(QDialog):
         form = QFormLayout(page)
         self.f_name = QLineEdit()
         form.addRow("Επωνυμία", self.f_name)
+        self.f_trade_name = QLineEdit()
+        self.f_trade_name.setPlaceholderText("από το Μητρώο ΑΑΔΕ με την ανάκτηση στοιχείων")
+        self.f_trade_name.setToolTip("Ο πελάτης βρίσκεται και με τον διακριτικό τίτλο στην αναζήτηση")
+        form.addRow("Διακριτικός τίτλος", self.f_trade_name)
         self.f_legal_form = QLineEdit()
         form.addRow("Νομική μορφή", self.f_legal_form)
         self.f_doy = QLineEdit()
@@ -126,6 +131,12 @@ class ClientDetailDialog(QDialog):
         contact.addWidget(self.f_mobile)
         contact.addWidget(self.f_phone)
         form.addRow("Επικοινωνία", contact)
+        # Προσωπικό email (κύριο, `mail2` του Μητρώου) πάνω· του βοηθού/εκπροσώπου (`mail`/`mailemep`) χωριστά από κάτω
+        self.f_email_assistant = QLineEdit()
+        self.f_email_assistant.setPlaceholderText("email βοηθού / εκπροσώπου (αν βρεθεί στο Μητρώο)")
+        self.f_email_assistant.setToolTip("Δεν χρησιμοποιείται για αυτόματα email — μόνο αν το επιλέξετε στη χειροκίνητη "
+                                          "αποστολή (προτείνεται όταν λείπει το προσωπικό email)")
+        form.addRow("Email βοηθού", self.f_email_assistant)
         self.f_contact_note = QLabel("")
         self.f_contact_note.setObjectName("muted")
         self.f_email_auto = QCheckBox("Αυτόματα email (οφειλές / νέα) σε αυτόν τον πελάτη")
@@ -171,9 +182,37 @@ class ClientDetailDialog(QDialog):
         form.addRow("Σημειώσεις", self.f_notes)
         save = QPushButton("Αποθήκευση")
         save.setObjectName("primary")
+        save.setEnabled(False)
+        save.setToolTip("Ενεργό μόνο όταν αλλάξει κάτι στο προφίλ")
         save.clicked.connect(self._save_profile)
+        self.save_profile_btn = save
+        self._profile_snapshot: tuple = ()
         form.addRow("", save)
+        # Το «Αποθήκευση» ενεργοποιείται ΜΟΝΟ όταν υπάρχει αλλαγή (ρητό αίτημα χρήστη 2026-10-23)
+        for w in (self.f_name, self.f_trade_name, self.f_legal_form, self.f_doy, self.f_address, self.f_email,
+                  self.f_email_assistant, self.f_mobile, self.f_phone, self.f_status):
+            w.textChanged.connect(self._profile_changed)
+        for w in (self.f_books, self.f_vat, self.f_vat_period, self.f_employer, self.f_intrastat):
+            w.currentIndexChanged.connect(self._profile_changed)
+        for w in (self.f_kads, self.f_notes):
+            w.textChanged.connect(self._profile_changed)
+        self.f_email_auto.toggled.connect(self._profile_changed)
         return page
+
+    def _profile_state(self) -> tuple:
+        return (self.f_name.text(), self.f_trade_name.text(), self.f_legal_form.text(), self.f_doy.text(),
+                self.f_address.text(), self.f_email.text(), self.f_email_assistant.text(), self.f_mobile.text(),
+                self.f_phone.text(), self.f_status.text(), self.f_books.currentIndex(), self.f_vat.currentIndex(),
+                self.f_vat_period.currentIndex(), self.f_employer.currentIndex(), self.f_intrastat.currentIndex(),
+                self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked())
+
+    def _profile_changed(self, *_a) -> None:
+        if hasattr(self, "save_profile_btn"):
+            self.save_profile_btn.setEnabled(bool(self._profile_snapshot) and self._profile_state() != self._profile_snapshot)
+
+    def _mark_profile_saved(self) -> None:
+        self._profile_snapshot = self._profile_state()
+        self._profile_changed()
 
     @staticmethod
     def _contact_note(b: dict) -> str:
@@ -182,9 +221,11 @@ class ClientDetailDialog(QDialog):
             return "διορθωμένα χειροκίνητα"
         if b.get("contact_source") != "aade":
             return "θα έρθουν με την ανάκτηση στοιχείων (κωδικοί TAXISnet του ίδιου του πελάτη)"
-        origin = {"mail2": "email επικοινωνίας του υπόχρεου",
+        origin = {"mail2": "προσωπικό email του υπόχρεου",
                   "mailemep": "⚠ email ΕΚΠΡΟΣΩΠΟΥ/ΛΟΓΙΣΤΗ — ο υπόχρεος δεν έχει δηλώσει δικό του",
                   "mail": "παλιό email TAXISnet"}.get(b.get("email_origin") or "", "")
+        if not b.get("email") and b.get("email_assistant"):
+            origin = "⚠ ο υπόχρεος δεν έχει δηλώσει προσωπικό email — υπάρχει μόνο του βοηθού"
         when = (b.get("contact_at") or "")[:10]
         return "Μητρώο ΑΑΔΕ" + (f" · {origin}" if origin else "") + (f" · {when[8:10]}/{when[5:7]}/{when[:4]}" if when else "")
 
@@ -213,11 +254,14 @@ class ClientDetailDialog(QDialog):
             "books_category": self.f_books.currentData(), "status": self.f_status.text().strip(),
             "notes": self.f_notes.toPlainText().strip(),
         }, vat_subject={"1": True, "0": False}.get(vat, None))
-        old = self.conn.execute("SELECT email, mobile, phone FROM businesses WHERE afm=?", (self.afm,)).fetchone()
-        contact = (self.f_email.text().strip().lower(), self.f_mobile.text().strip(), self.f_phone.text().strip())
-        if contact != (old["email"], old["mobile"], old["phone"]):
-            self.conn.execute("UPDATE businesses SET email=?, mobile=?, phone=?, contact_source='manual' WHERE afm=?",
-                              (*contact, self.afm))
+        self.conn.execute("UPDATE businesses SET trade_name=? WHERE afm=?", (self.f_trade_name.text().strip(), self.afm))
+        old = self.conn.execute("SELECT email, email_assistant, mobile, phone FROM businesses WHERE afm=?",
+                                (self.afm,)).fetchone()
+        contact = (self.f_email.text().strip().lower(), self.f_email_assistant.text().strip().lower(),
+                   self.f_mobile.text().strip(), self.f_phone.text().strip())
+        if contact != (old["email"], old["email_assistant"], old["mobile"], old["phone"]):
+            self.conn.execute("UPDATE businesses SET email=?, email_assistant=?, mobile=?, phone=?, contact_source='manual' "
+                              "WHERE afm=?", (*contact, self.afm))
         self.conn.execute("UPDATE businesses SET email_auto=? WHERE afm=?", (int(self.f_email_auto.isChecked()), self.afm))
         period = self.f_vat_period.currentData()
         if period:                                     # ρητή επιλογή χρήστη: η ανάκτηση Μητρώου δεν την πατά
@@ -438,16 +482,16 @@ class ClientDetailDialog(QDialog):
         self.year_summary.setTextFormat(Qt.TextFormat.RichText)
         box.addWidget(self.year_summary)
         self.year_table = QTableWidget(0, 6)
-        self.year_table.setHorizontalHeaderLabels(["Προθεσμία", "Υποχρέωση", "Υπόχρεος", "Υποβολή", "Ποσά δήλωσης", "Αιτιολογία"])
         self.year_table.verticalHeader().setVisible(False)
         self.year_table.setAlternatingRowColors(True)
         self.year_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.year_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        hdr = self.year_table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col, width in ((0, 90), (2, 110), (3, 150), (4, 240), (5, 220)):
-            self.year_table.setColumnWidth(col, width)
+        # ταξινόμηση, αναζήτηση, χωνί σε κάθε στήλη, στήλες που σύρονται και θυμούνται — όπως ο πίνακας πελατών
+        self.year_kit = TableKit(self.year_table, [("Προθεσμία", 90), ("Υποχρέωση", 0), ("Υπόχρεος", 110),
+                                                   ("Υποβολή", 150), ("Ποσά δήλωσης", 240), ("Αιτιολογία", 220)],
+                                 "client_obligations", prefs=getattr(self.main, "_prefs", None),
+                                 placeholder="Αναζήτηση υποχρέωσης (τίτλος, υποβολή, αιτιολογία…)")
+        box.addWidget(self.year_kit.bar)
         self.year_table.itemSelectionChanged.connect(self._show_obligation_detail)
         self.year_table.doubleClicked.connect(lambda *_: self._toggle_done())
         box.addWidget(self.year_table, 3)
@@ -512,6 +556,7 @@ class ClientDetailDialog(QDialog):
         rows = [r for r in all_rows if r["status"] == "yes" or self.show_maybe.isChecked()]
         colours = {"submitted": CURRENT.ok, "done": CURRENT.ok, "pending": CURRENT.warn, "not_submitted": CURRENT.bad}
         t = self.year_table
+        self.year_kit.begin()
         t.setRowCount(len(rows))
         today = date.today().isoformat()
         for i, r in enumerate(rows):
@@ -521,7 +566,7 @@ class ClientDetailDialog(QDialog):
                      "Ναι" if r["status"] == "yes" else "Ίσως", label,
                      obligations.amounts_text(sub["amounts"]), r["reason"]]
             for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
+                item = SortItem(text)
                 item.setToolTip(r["description"])
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, r)
@@ -532,6 +577,7 @@ class ClientDetailDialog(QDialog):
                 if r["status"] == "maybe" and col != 3:
                     item.setForeground(QColor(CURRENT.muted))
                 t.setItem(i, col, item)
+        self.year_kit.end()
         n_yes = sum(1 for r in all_rows if r["status"] == "yes")
         n_maybe = len(all_rows) - n_yes
         n_ok = sum(1 for r in rows if r["submission"]["status"] in ("submitted", "done"))
@@ -731,6 +777,8 @@ class ClientDetailDialog(QDialog):
             full["vat_period_type"] if full["vat_period_source"] == "manual" else "")))
         self.f_vat_note.setText(self._vat_note(full))
         self.f_email.setText(full["email"])
+        self.f_email_assistant.setText(full.get("email_assistant") or "")
+        self.f_trade_name.setText(full.get("trade_name") or "")
         self.f_mobile.setText(full["mobile"])
         self.f_phone.setText(full["phone"])
         self.f_email_auto.setChecked(bool(full["email_auto"]))
@@ -740,6 +788,7 @@ class ClientDetailDialog(QDialog):
             box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
         self.f_status.setText(b["status"])
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
+        self._mark_profile_saved()
         self._reload_checks()
         self.f_notes.setPlainText(b["notes"])
 

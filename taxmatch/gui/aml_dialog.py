@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSplitter, QTableWidget,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -29,6 +29,7 @@ from ..aml.content import (
 )
 from ..business_profiles import credentials as client_creds, service as clients
 from .busy import BusyOverlay
+from .table_kit import interactive
 from .theme import CURRENT
 from .toast import toast
 from .widgets import GrDateEdit, add_reveal
@@ -277,6 +278,7 @@ class AmlAssessmentDialog(QDialog):
         self.ubo_table.verticalHeader().setVisible(False)
         self.ubo_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.ubo_table.setMinimumHeight(150)
+        interactive(self.ubo_table)
         ubox.addWidget(self.ubo_table)
         urow = QHBoxLayout()
         uadd = QPushButton("+ Δικαιούχος")
@@ -316,7 +318,7 @@ class AmlAssessmentDialog(QDialog):
         self.tx_table.setHorizontalHeaderLabels([c[1] for c in _TX_COLUMNS] + ["Αιτιολόγηση"])
         self.tx_table.verticalHeader().setVisible(False)
         self.tx_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tx_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        interactive(self.tx_table)                               # στήλες που σύρονται (πίνακας καταχώρισης)
         last = self.tx_table.horizontalHeaderItem(len(_TX_COLUMNS))
         last.setToolTip("Αιτιολόγηση για ποσά άνω των 50.000 € (προέλευση κεφαλαίων)")
         box.addWidget(self.tx_table, 1)

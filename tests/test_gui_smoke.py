@@ -644,7 +644,7 @@ def _write_clients_xlsx(path):
     wb.save(path)
 
 
-@pytest.mark.parametrize("button_text, expect_lookup, expect_import", [("Εισαγωγή & ενημέρωση στοιχείων", True, True),
+@pytest.mark.parametrize("button_text, expect_lookup, expect_import", [("Ενημέρωση στοιχείων", True, True),
                                                                           ("Μόνο εισαγωγή", False, True), ("Άκυρο", False, False)])
 def test_excel_import_popup_asks_whether_to_update_details_now(window, conn, monkeypatch, tmp_path,
                                                                button_text, expect_lookup, expect_import):
@@ -1149,3 +1149,136 @@ def test_client_card_has_requests_and_members_tabs(window, conn):
     mt._as_clients()                                                # noqa: SLF001
     assert service.get(conn, "123456783") is not None and mt.table.item(0, 6).text() == "ναι, χωρίς κωδικούς"
     dlg.deleteLater()
+
+
+def test_vat_notice_filters_clients_and_read_keeps_asterisk_until_restart(window, conn):
+    """«Δείτε τους πελάτες» της ειδοποίησης ΦΠΑ → Πελάτες ΜΟΝΟ με αυτούς· «Αναγνώστηκε» → η ειδοποίηση φεύγει, ο αστερίσκος
+    στη στήλη ΦΠΑ μένει ώς την επανεκκίνηση (ρητό αίτημα χρήστη 2026-10-23)."""
+    from taxmatch.gui.main_window import _C_AFM, _C_VAT, MainWindow
+    service.add(conn, AFM, "ΑΛΦΑ")
+    service.add(conn, "123456783", "ΒΗΤΑ")
+    conn.execute("UPDATE businesses SET books_category='Β', vat_subject=1, activity_state='active', start_date='10/01/2024' "
+                 "WHERE afm=?", (AFM,))
+    window.reload_all()
+    window._go_from_notice("main.clients_list", [AFM])                      # noqa: SLF001
+    t = window.client_table
+    visible = [t.item(r, _C_AFM).text() for r in range(t.rowCount()) if not t.isRowHidden(r)]
+    assert visible == [AFM] and window.client_clear_filters_btn.isVisible() or visible == [AFM]
+
+    def vat_of(win, afm):
+        tt = win.client_table
+        return next(tt.item(r, _C_VAT).text() for r in range(tt.rowCount()) if tt.item(r, _C_AFM).text() == afm)
+    assert vat_of(window, AFM).endswith("*")
+    window._dismiss_notice("vat_quarter")                                    # noqa: SLF001
+    assert vat_of(window, AFM).endswith("*")                                 # ίδια συνεδρία: μένει
+    window._clear_client_filters()                                           # noqa: SLF001
+    assert sum(not t.isRowHidden(r) for r in range(t.rowCount())) == 2
+    again = MainWindow()                                                     # «επανεκκίνηση»
+    assert not vat_of(again, AFM).endswith("*")
+    from taxmatch import settings_store
+    settings_store.set_value(conn, "vat_option_mark_keep", "1")
+    again.reload_clients()
+    assert vat_of(again, AFM).endswith("*")
+    again.close()
+    again.deleteLater()
+
+
+def test_debt_card_from_context_menu(window, conn):
+    from taxmatch import debts
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.gui.debts_tab import DebtCard
+    service.add(conn, AFM, "ΑΛΦΑ")
+    debts.store(conn, AFM, {"overdue": 0.0, "non_overdue": 300.0, "debts": [
+        {"kind": "arrangement", "ref": "r1", "title": "ΡΥΘΜΙΣΗ 48 ΔΟΣΕΩΝ", "overdue": 0.0, "non_overdue": 300.0,
+         "total": 300.0, "code": "RF99", "pdf_path": "",
+         "details": {"installments": {"headers": ["Α/Α", "Λήξη", "Ποσό"], "rows": [["1", "30/11/2026", "100,00"]]}}}]})
+    dlg = ClientDetailDialog(window, AFM)
+    tab = dlg.debts_tab
+    tab.table.selectRow(0)
+    card = DebtCard(tab, tab._selected())                                    # noqa: SLF001
+    text = " ".join(lbl.text() for lbl in card.findChildren(type(tab.info)))
+    assert "RF99" in text and "30/11/2026" in text and "300,00 €" in text
+    card.deleteLater()
+    dlg.deleteLater()
+
+
+def test_import_preview_table_is_searchable_and_sortable(window, conn, tmp_path):
+    from taxmatch.business_profiles import import_excel
+    from taxmatch.gui.import_dialog import ImportPreviewDialog
+    xlsx = tmp_path / "clients.xlsx"
+    _write_clients_xlsx(xlsx)
+    res = import_excel.parse_file(xlsx.name, xlsx.read_bytes())
+    dlg = ImportPreviewDialog(xlsx, res, service.preview_import(conn, res), 1, True)
+    assert dlg.table.isSortingEnabled()
+    dlg.search.setText("ΖΖΖΖ")
+    assert all(dlg.table.isRowHidden(r) for r in range(dlg.table.rowCount()))
+    dlg.search.setText("")
+    assert not any(dlg.table.isRowHidden(r) for r in range(dlg.table.rowCount()))
+    dlg.deleteLater()
+
+
+def test_members_listed_under_their_company_in_any_sort_order(window, conn):
+    """Μέλη εταιρείας = εγγραφές πελατών κάτω από την εταιρεία (▸/▾), σε ΚΑΘΕ ταξινόμηση (ρητό αίτημα 2026-10-23)."""
+    from PySide6.QtCore import Qt as _Qt
+    from taxmatch import members
+    from taxmatch.gui.main_window import _C_AFM, _C_NAME
+    service.add(conn, AFM, "ΩΜΕΓΑ ΙΚΕ")
+    service.add(conn, "123456783", "ΑΛΦΑ ΜΕΛΟΣ")
+    service.add(conn, "999999999", "ΜΕΣΑΙΟΣ ΠΕΛΑΤΗΣ")
+    conn.execute("UPDATE businesses SET trade_name='ΩΜΕΓΑ ΚΑΦΕ' WHERE afm=?", (AFM,))
+    members.store(conn, AFM, [{"afm": "123456783", "name": "ΑΛΦΑ ΜΕΛΟΣ"}], "aade")
+    window.reload_clients()
+    t = window.client_table
+
+    def order():
+        return [t.item(r, _C_AFM).text() for r in range(t.rowCount())]
+
+    def visible():
+        return [t.item(r, _C_AFM).text() for r in range(t.rowCount()) if not t.isRowHidden(r)]
+    for direction in (_Qt.SortOrder.AscendingOrder, _Qt.SortOrder.DescendingOrder):
+        t.sortItems(_C_NAME, direction)
+        o = order()
+        assert o.index("123456783") == o.index(AFM) + 1
+    assert "123456783" not in visible()                                     # «κλειστή» εταιρεία
+    window._expanded.add(AFM)                                                # noqa: SLF001
+    window._apply_client_filter()                                            # noqa: SLF001
+    assert "123456783" in visible()
+    window.quick_search.setText("ΚΑΦΕ")                                       # διακριτικός τίτλος
+    assert visible() == [AFM]
+    window.quick_search.setText("")
+
+
+def test_single_checks_button_runs_chosen_checks_and_suggests_lookup(window, conn, monkeypatch):
+    """Ένα κουμπί «Έλεγχοι & ενημέρωση…» με popup αντί για πέντε· ελλιπή βασικά στοιχεία ⇒ προτείνεται ανανέωση."""
+    from taxmatch.gui import checks_dialog
+    service.add(conn, AFM, "ΑΛΦΑ")
+    conn.execute("UPDATE businesses SET activity_state='active' WHERE afm=?", (AFM,))
+    window.reload_clients()
+    assert "ΔΟΥ" in service.missing_basics(dict(conn.execute("SELECT * FROM businesses WHERE afm=?", (AFM,)).fetchone()))
+    ran = []
+    monkeypatch.setattr(window, "_start_lookup", lambda afms: ran.append(("lookup", list(afms))))
+    monkeypatch.setattr(window, "on_fetch_debts", lambda: ran.append(("debts",)))
+    monkeypatch.setattr(window, "on_check_submissions", lambda: ran.append(("submissions",)))
+
+    def fake_exec(dlg):
+        assert dlg.boxes["lookup"].isChecked()                        # προτείνεται: λείπουν βασικά στοιχεία
+        dlg.boxes["submissions"].setChecked(False)
+        dlg.boxes["mydata"].setChecked(False)
+        dlg.boxes["requests"].setChecked(False)
+        dlg.boxes["debts"].setChecked(True)
+        dlg._run()                                                    # noqa: SLF001
+        return 1
+    monkeypatch.setattr(checks_dialog.ChecksDialog, "exec", fake_exec)
+    window.on_run_checks()
+    assert ran == [("lookup", [AFM]), ("debts",)]
+
+
+def test_missing_basics_depend_on_client_kind():
+    private = {"afm": "1", "name": "Χ", "activity_state": "none", "doy": "Α ΑΘΗΝΩΝ"}
+    assert service.missing_basics(private) == []
+    sole = {"afm": "2", "name": "Υ", "activity_state": "active", "doy": "Α", "kad_main_code": "56.30",
+            "books_category": "Β", "vat_subject": 1, "vat_period_type": "quarterly", "legal_form": "ΑΤΟΜΙΚΗ"}
+    assert service.missing_basics(sole) == []
+    company = {**sole, "legal_form": "ΙΚΕ", "address": ""}
+    assert service.missing_basics(company) == ["έδρα"]
+    assert service.missing_basics({"afm": "3", "name": ""}) == ["επωνυμία", "κατάσταση (ιδιώτης / επιχείρηση)"]

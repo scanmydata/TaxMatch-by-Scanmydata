@@ -55,7 +55,7 @@ _FMY = "&periodType=oneMonth&typeBtn=Μήνας"
 OBLIGATIONS: dict[str, Obligation] = {o.key: o for o in (
     Obligation("Φ2", "ΦΠΑ Φ2 (περιοδική)", "vat", "vatF2"),
     Obligation("Φ4", "ΦΠΑ Φ4 (ανακεφαλαιωτικός VIES)", "vat", "vatF4"),
-    Obligation("Φ5", "ΦΠΑ Φ5 (Intrastat/ΦΠΑ)", "vat", "vatF5"),
+    Obligation("Φ5", "ΦΠΑ Φ5 (ανακεφαλαιωτικός αποκτήσεων)", "vat", "vatF5"),
     Obligation("ΕΙΣΟΔΗΜΑ_ΝΠ", "Δήλωση φορολογίας εισοδήματος Ν.Π. (Ν)", "income", "incomeN"),
     Obligation("ΜΥΦ", "Συγκεντρωτικές καταστάσεις (ΜΥΦ)", "kvs", "kvsD13"),
     Obligation("E1", "Δήλωση φορολογίας εισοδήματος (Ε1)", kind="income", code_prefix="E1-", requires_date=True),
@@ -423,10 +423,11 @@ def default_keys(business: dict[str, Any], withheld_keys: Optional[set[str]] = N
         keys.append("Φ2")
         # Φ4 (ανακεφαλαιωτικός VIES) για ΚΑΘΕ υπόχρεο ΦΠΑ — πριν μόνο με σημαία Intrastat από το Excel, οπότε ο έλεγχος
         # «ενδοκοινοτικών» δεν γινόταν σχεδόν ποτέ (αναφορά χρήστη 2026-10-22). Όποιος δεν έχει, η ΑΑΔΕ απαντά «Δεν έχετε
-        # υποχρεώσεις υποβολής» → «δεν είναι υπόχρεος».
-        keys.append("Φ4")
+        # υποχρεώσεις υποβολής» → «δεν είναι υπόχρεος». Φ5 = αποκτήσεις/λήψεις υπηρεσιών (το Φ4 είναι μόνο οι
+        # παραδόσεις/παροχές) — ποιο από τα δύο οφείλεται κάθε μήνα το λέει το myDATA (obligations.vies_forms).
+        keys += ["Φ4", "Φ5"]
     elif business.get("intrastat"):
-        keys.append("Φ4")
+        keys += ["Φ4", "Φ5"]
     if business.get("employer") != 0 and state != "none":
         keys.append("ΦΜΥ")                       # άγνωστο ή εργοδότης: ο έλεγχος το ξεκαθαρίζει («δεν είναι υπόχρεος»)
     if is_legal_entity(business.get("legal_form") or ""):

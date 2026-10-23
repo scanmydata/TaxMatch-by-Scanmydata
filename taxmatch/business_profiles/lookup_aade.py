@@ -285,6 +285,7 @@ def build_profile(target: str, login_afm: str, userdata: str, fysiko: str, epix:
         "cease_date": cease_date,
         "cease_reason": _tag(epix, "aitiadiakophs") if has_epix else "",
         "business_start": _tag(epix, "hmenarxhs") if has_epix else "",
+        "trade_name": _tag(epix, "commercialtitle") if has_epix else "",   # διακριτικός τίτλος
         "doy": (_tag(epix, "doydescription") if business_open else "") or _tag(fysiko, "armodiadoy")
                or _tag(epix, "doydescription"),
         "active": client_active,
@@ -299,15 +300,20 @@ _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$")
 
 
 def parse_contact(ldap: str) -> Dict[str, str]:
-    """Στοιχεία επικοινωνίας από το `getLdapInfo/{afm}` του Μητρώου (port του ScanMyData Tax Center `aade-profile.js`,
-    επαληθευμένο ζωντανά εκεί): email από `mail2` → `mailemep` → `mail`· κινητό από `mobilenumber` → `mobilenumberemep`
-    (ΜΟΝΟ ελληνικό 69xxxxxxxx — λάθος αριθμός θα έστελνε φορολογικά στοιχεία σε τρίτο)· σταθερό από `phonenumber`."""
-    out = {"email": "", "mobile": "", "phone": "", "origin": ""}
-    for name in ("mail2", "mailemep", "mail"):
-        candidate = _tag(ldap, name)
-        if candidate and _EMAIL.match(candidate):
-            out["email"] = candidate.lower()
-            out["origin"] = name          # mail2 = του υπόχρεου · mailemep = εκπροσώπου/λογιστή · mail = παλιό TAXISnet
+    """Στοιχεία επικοινωνίας από το `getLdapInfo/{afm}` του Μητρώου (port του ScanMyData Tax Center `aade-profile.js`):
+    **κύριο email = `mail2`**, αυτό που δήλωσε ο ίδιος ο υπόχρεος (προσωπικό)· **email βοηθού** = `mailemep`
+    (εκπρόσωπος/λογιστής) ή `mail` (email εγγραφής TAXISnet — συχνά του βοηθού/γραφείου). Πριν το `mail`/`mailemep`
+    έμπαινε ως κύριο όταν έλειπε το `mail2` — αναφορά χρήστη 2026-10-23 («φέρνει το email βοηθού»). Κινητό από
+    `mobilenumber` → `mobilenumberemep` (ΜΟΝΟ ελληνικό 69xxxxxxxx — λάθος αριθμός θα έστελνε φορολογικά στοιχεία σε
+    τρίτο)· σταθερό από `phonenumber`."""
+    out = {"email": "", "mobile": "", "phone": "", "origin": "", "email_assistant": "", "assistant_origin": ""}
+    personal = _tag(ldap, "mail2")
+    if personal and _EMAIL.match(personal):
+        out["email"], out["origin"] = personal.lower(), "mail2"
+    for name in ("mailemep", "mail"):
+        candidate = (_tag(ldap, name) or "").lower()
+        if candidate and _EMAIL.match(candidate) and candidate != out["email"]:
+            out["email_assistant"], out["assistant_origin"] = candidate, name
             break
     for name in ("mobilenumber", "mobilenumberemep"):
         digits = re.sub(r"^0030|^30(?=69)", "", re.sub(r"\D", "", _tag(ldap, name)))

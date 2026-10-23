@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import sqlite3
 from typing import Any, Callable, Optional
@@ -17,7 +18,7 @@ from .vat_profile import interpret_vat_profile
 
 log = logging.getLogger(__name__)
 
-EDITABLE = ("name", "legal_form", "status", "address", "doy", "books_category", "vat_period_type", "notes")
+EDITABLE = ("name", "legal_form", "status", "address", "doy", "books_category", "vat_period_type", "notes", "trade_name")
 
 
 # ------------------------------------------------------------------ CRUD
@@ -36,8 +37,8 @@ def list_all(conn: sqlite3.Connection, q: str = "", kad: str = "", books: str = 
     sql = ["SELECT b.*, (SELECT COUNT(*) FROM business_kad k WHERE k.afm=b.afm) AS kad_count FROM businesses b WHERE 1=1"]
     args: list[Any] = []
     if q:
-        sql.append("AND (b.afm LIKE ? OR UPPER(b.name) LIKE ?)")
-        args += [f"%{q.strip()}%", f"%{q.strip().upper()}%"]
+        sql.append("AND (b.afm LIKE ? OR UPPER(b.name) LIKE ? OR UPPER(b.trade_name) LIKE ?)")
+        args += [f"%{q.strip()}%", f"%{q.strip().upper()}%", f"%{q.strip().upper()}%"]
     if books:
         sql.append("AND b.books_category = ?")
         args.append(books)
@@ -310,7 +311,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         attempted = True
         try:
             # Μέλη εταιρείας (ρύθμιση «Άντληση μελών εταιρειών») — μόνο με τους κωδικούς της ίδιας της εταιρείας
-            with_members = who == "client" and settings_store.get(conn, "fetch_members") == "1"
+            with_members = (who == "client" and settings_store.get(conn, "fetch_members") == "1"
+                            and "with_members" in inspect.signature(aade_fetch).parameters)
             a = aade_fetch(user, pwd, afm, with_members=True) if with_members else aade_fetch(user, pwd, afm)
         except requests.RequestException as exc:
             errors.append(f"ΑΑΔΕ: σφάλμα δικτύου ({str(exc)[:120]})")
@@ -440,12 +442,21 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         sets.append("phone=CASE WHEN contact_source='manual' THEN phone ELSE ? END")
         sets.append("contact_source=CASE WHEN contact_source='manual' THEN 'manual' ELSE 'aade' END")
         sets.append("email_origin=CASE WHEN contact_source='manual' THEN email_origin ELSE ? END")
+        sets.append("email_assistant=CASE WHEN contact_source='manual' THEN email_assistant ELSE ? END")
         sets.append("contact_at=?")
         args += [contact.get("email", ""), contact.get("mobile", ""), contact.get("phone", ""), contact.get("origin", ""),
-                 now]
+                 contact.get("email_assistant", ""), now]
+    if aade and aade.get("trade_name") is not None and "trade_name" in aade:
+        sets.append("trade_name=?")
+        args.append(aade.get("trade_name") or "")
     if aade and aade.get("members") is not None:
         from .. import members as members_mod
         members_mod.store(conn, afm, aade["members"], "aade")
+        try:
+            # τα μέλη γίνονται και εγγραφές πελατών + έλεγχος ατομικής επιχείρησης (RgWsPublic2, αν υπάρχουν κωδικοί)
+            members_mod.sync_member_clients(conn, afm)
+        except Exception as exc:                       # noqa: BLE001 — τα μέλη είναι επιπλέον· ποτέ αποτυχία ανάκτησης
+            log.warning("μέλη %s: %s", afm, exc)
     if kads:
         set_kads(conn, afm, kads)
     elif aade and aade.get("business_state") in ("ceased", "none"):
@@ -490,3 +501,34 @@ def enrich_pending(conn: sqlite3.Connection, limit: int = 20, session: Optional[
             elif issue["code"] == "bad_creds_office":
                 stats["bad_office_creds"] += 1
     return stats
+
+
+def missing_basics(b: dict[str, Any]) -> list[str]:
+    """Βασικά στοιχεία που λείπουν και χρειάζεται η εφαρμογή, ανάλογα με το είδος του πελάτη — ιδιώτης / επιχειρηματίας
+    (ατομική) / επιχείρηση (νομικό πρόσωπο). Κενό = πλήρης. Για τον διάλογο «Έλεγχοι & ενημέρωση»: αν λείπει κάτι,
+    προτείνεται «Ανανέωση στοιχείων» (ρητό αίτημα χρήστη 2026-10-23)."""
+    from ..obligations import is_legal_entity, vat_period
+    out = []
+    if not (b.get("name") or "").strip() or b.get("name") == b.get("afm"):
+        out.append("επωνυμία")
+    state = b.get("activity_state") or ""
+    if not state:
+        return out + ["κατάσταση (ιδιώτης / επιχείρηση)"]
+    if not (b.get("doy") or "").strip():
+        out.append("ΔΟΥ")
+    if state == "none":                                    # ιδιώτης: δεν χρειάζεται τίποτε επιχειρηματικό
+        return out
+    if state == "active" and not (b.get("kad_main_code") or "").strip():
+        out.append("κύριος ΚΑΔ")
+    if not (b.get("books_category") or "").strip() and not (b.get("books_category_raw") or "").strip():
+        out.append("κατηγορία βιβλίων")
+    if b.get("vat_subject") is None:
+        out.append("καθεστώς ΦΠΑ")
+    elif b.get("vat_subject") == 1 and state == "active" and not vat_period(b):
+        out.append("περίοδος ΦΠΑ")
+    if is_legal_entity(b.get("legal_form") or "") or b.get("kind") == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ":
+        if not (b.get("address") or "").strip():
+            out.append("έδρα")
+    elif not (b.get("legal_form") or "").strip() and state == "active":
+        out.append("νομική μορφή")
+    return out

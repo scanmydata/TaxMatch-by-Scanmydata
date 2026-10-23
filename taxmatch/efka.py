@@ -10,7 +10,7 @@
   Παραστατικού · Περίοδος · Χρέωση · Πίστωση · Υπόλοιπο. Κίνηση ΑΠΔ για μια περίοδο = η ΑΠΔ του μήνα υποβλήθηκε.
 * **ΑΜΕ** (`EFKA_AME_retrieval.md`, runner `configs/efka-ame.js`): «Πιστοποίηση Εργοδοτών» (`apps.e-efka.gov.gr/ePistErg`)
   → «Κοινών Επιχειρήσεων» → `AMEs.xhtml` → `#AMEsForm:AMEsResults_data`, 1ο κελί. Ο runner το κάνει με BROWSER (JS
-  redirects, υποχρεωτικό «Παράλειψη» ενημέρωσης στοιχείων)· εδώ είναι μια προσπάθεια με καθαρό HTTP (ίδια βήματα με το
+  redirects, υποχρεωτικό «Παράλειψη» ενημέρωσης στοιχείων)· εδώ με καθαρό HTTP, ζωντανά επαληθευμένο (ίδια βήματα με το
   `LoginEfkaOldWayTaxinet` του TaxSystem) — αν αποτύχει, ο ΑΜΕ δίνεται από το Excel (στήλη «ΑΜΕ») ή χειροκίνητα.
   Με κωδικούς **ΙΚΑ εργοδότη** (Excel) η σύνδεση eAccess γίνεται με `j_security_check` (runner `efkaErgodLogin`).
 
@@ -55,6 +55,7 @@ REASONS_EL = {
     "NoTransactions": "Δεν φόρτωσε η οικονομική καρτέλα εργοδότη (άλλαξε η σελίδα;).",
     "AmeNotFound": "Δεν βρέθηκε ΑΜΕ (ο πελάτης δεν είναι εγγεγραμμένος εργοδότης;).",
     "NoPistErg": "Δεν άνοιξε η «Πιστοποίηση Εργοδοτών» του e-ΕΦΚΑ.",
+    "AfmMismatch": "Οι κωδικοί TAXISnet ανήκουν σε άλλο ΑΦΜ από τον πελάτη.",
 }
 
 
@@ -476,7 +477,7 @@ def _eaccess_taxis(http: _HyperHttp, user: str, password: str, afm: str) -> dict
     afm1 = (re.search(r'id="gsisTabView:afm1"[^>]*value="(\d{9})"', page) or
             re.search(r'name="gsisTabView:afm1"[^>]*value="(\d{9})"', page))
     if afm1 and afm1.group(1) != afm:
-        return {"ok": False, "reason": "InvalidCredentials"}          # κωδικοί άλλου ΑΦΜ
+        return {"ok": False, "reason": "AfmMismatch"}                 # κωδικοί άλλου ΑΦΜ (runner: AfmMismatch)
     if not btn:
         return {"ok": False, "reason": "NoPistErg"}
     resp = http.follow("POST", APPS + "/eAccess/gsis/login.xhtml", {
@@ -507,7 +508,9 @@ def parse_ames(page: str) -> list[dict[str, str]]:
     for tr in re.finditer(r'<tr\b[^>]*data-ri="(\d+)"[^>]*>(.*?)</tr>', page[at:], re.S | re.I):
         cells = [strip_tags(c) for c in re.findall(r"<td\b[^>]*>(.*?)</td>", tr.group(2), re.S | re.I)]
         if cells and re.fullmatch(r"\d+", cells[0]):
-            out.append({"ame": normalize_ame(cells[0]), "name": cells[1] if len(cells) > 1 else ""})
+            # στήλες όπως ο runner (efka-ame.js): ΑΜΕ · Επωνυμία · … · Κωδ. ΑΠΔ (4η)
+            out.append({"ame": normalize_ame(cells[0]), "name": cells[1] if len(cells) > 1 else "",
+                        "apd_code": cells[3] if len(cells) > 3 else ""})
     return out
 
 
@@ -530,10 +533,15 @@ def _skip_eprofile(http: _HyperHttp, page: dict[str, Any]) -> dict[str, Any]:
     return page
 
 
+AME_KINDS = ("Κοινών Επιχειρήσεων", "Οικοδομοτεχνικών Έργων")
+
+
 def retrieve_ame(conn: sqlite3.Connection, afm: str,
                  http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> dict[str, Any]:
     """ΑΜΕ από την «Πιστοποίηση Εργοδοτών» με κωδικούς ΙΚΑ εργοδότη (αν υπάρχουν) ή TAXISnet του πελάτη· αποθηκεύεται.
-    {ok, ame, reason}. ΔΕΝ έχει δοκιμαστεί ζωντανά (ο runner χρειάστηκε browser) — αποτυχία δεν είναι σφάλμα χρήστη."""
+    {ok, ame, reason, all}. Ίδια βήματα με τον runner `configs/efka-ame.js` (εκεί με browser), εδώ με καθαρό HTTP —
+    ΕΠΑΛΗΘΕΥΤΗΚΕ ζωντανά 2026-10-22 με TAXISnet (καρτέλα eAccess `gsisTabView_activeIndex=1`). Η είσοδος με κωδικούς
+    ΙΚΑ εργοδότη (`j_security_check`) δεν έχει δοκιμαστεί ζωντανά."""
     http = http_factory()
     try:
         ika = ika_credentials(conn, afm)
@@ -549,11 +557,18 @@ def retrieve_ame(conn: sqlite3.Connection, afm: str,
         page = _skip_eprofile(http, http.follow("GET", APPS + "/ePistErg"))
         if "ePistErg" not in page["url"]:
             return {"ok": False, "ame": "", "reason": REASONS_EL["NoPistErg"]}
-        link = next((a.group(1) for a in re.finditer(r'<a\b[^>]*href="([^"]*)"[^>]*>(.*?)</a>', page["text"], re.S | re.I)
-                     if "Κοινών Επιχειρήσεων" in strip_tags(a.group(2))), "")
-        ames_page = http.follow("GET", urljoin(page["url"], _html.unescape(link)) if link
-                                else APPS + "/ePistErg/secure/AMEs.xhtml")
-        found = parse_ames(ames_page["text"])
+        found = []
+        # «Κοινών Επιχειρήσεων» πρώτα· αν δεν έχει ΑΜΕ, «Οικοδομοτεχνικών Έργων» (runner: docKind=oikodomotexnikon)
+        for kind in AME_KINDS:
+            link = next((a.group(1) for a in re.finditer(r'<a\b[^>]*href="([^"]*)"[^>]*>(.*?)</a>', page["text"],
+                                                         re.S | re.I) if kind in strip_tags(a.group(2))), "")
+            if not link and kind != AME_KINDS[0]:
+                continue
+            ames_page = http.follow("GET", urljoin(page["url"], _html.unescape(link)) if link
+                                    else APPS + "/ePistErg/secure/AMEs.xhtml")
+            found = [{**a, "kind": kind} for a in parse_ames(ames_page["text"])]
+            if found:
+                break
     except Exception as exc:                      # noqa: BLE001 — δίκτυο / αλλαγή σελίδας: ποτέ crash
         log.warning("efka ame %s: %s", afm, exc)
         return {"ok": False, "ame": "", "reason": f"Η ανάκτηση ΑΜΕ δεν ολοκληρώθηκε ({str(exc)[:80]})."}

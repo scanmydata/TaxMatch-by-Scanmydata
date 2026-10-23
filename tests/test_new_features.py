@@ -503,3 +503,14 @@ def test_mydata_columns_like_timologio_never_etimologio_or_web_password(conn):
     out = service.import_result(conn, res)
     assert out["mydata"] == 2 and mydata_creds.get(conn, AFM) == ("md_u", key)
 
+
+
+def test_keyword_prefilter_is_stricter_for_general_portals():
+    """Ρίζες στην αρχή λέξης + ισχυροί/αδύναμοι/αρνητικοί όροι (αναφορά χρήστη 2026-10-23, «καλύτερο φιλτράρισμα»)."""
+    assert not filters.is_tax_relevant("Μητσοτάκης: Δηλώσεις για τα πολιτικά και δικαστικά")       # «ικα»/«δηλωσ» μόνα
+    assert not filters.is_tax_relevant("Η ΑΑΔΕ εξάρθρωσε κύκλωμα λαθρεμπορίου καυσίμων")
+    assert not filters.is_tax_relevant("Ελπίδες για συμφωνία στη Μέση Ανατολή")
+    assert filters.is_tax_relevant("Τα υπερόπλα της ΑΑΔΕ για την κλοπή ΦΠΑ από μεγάλες εταιρίες")
+    assert filters.is_tax_relevant("Ψηφιακό πελατολόγιο: νέοι κλάδοι")
+    assert filters.is_tax_relevant("Νόμος 5349/2026", "Τροποποιήσεις του Κώδικα Φορολογικής Διαδικασίας")
+    assert filters.is_tax_relevant("Νέα προθεσμία πληρωμής για επιχειρήσεις")                  # δύο αδύναμοι

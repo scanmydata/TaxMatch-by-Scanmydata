@@ -9,10 +9,12 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QDialog, QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem,
+    QVBoxLayout,
 )
 
 from ..business_profiles.import_excel import ImportResult
+from .table_kit import TableKit
 from .theme import CURRENT
 
 _COLS = ["ΑΦΜ", "Επωνυμία", "Κωδικοί στο αρχείο", "Ενέργεια", "Τι αλλάζει"]
@@ -62,7 +64,11 @@ class ImportPreviewDialog(QDialog):
         # Πρώτα όσοι υπάρχουν ήδη και αλλάζουν — αυτούς πρέπει να δει ο χρήστης.
         order = sorted(preview, key=lambda p: {"update": 0, "new": 1, "same": 2}[p["action"]])
         self.table = QTableWidget(len(order), len(_COLS))
-        self.table.setHorizontalHeaderLabels(_COLS)
+        self.kit = TableKit(self.table, list(zip(_COLS, (95, 300, 200, 220, 0))), "import_preview",
+                            placeholder="Αναζήτηση (ΑΦΜ, επωνυμία, ενέργεια, αλλαγές…)")
+        self.search = self.kit.search
+        root.addWidget(self.kit.bar)
+        self.kit.begin()
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -87,8 +93,7 @@ class ImportPreviewDialog(QDialog):
                     item.setForeground(QColor(CURRENT.bad))
                     item.setToolTip("Ο ΑΦΜ δεν περνά τον έλεγχο ψηφίου ελέγχου")
                 self.table.setItem(i, col, item)
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.kit.end()
         root.addWidget(self.table, 1)
 
         hint = QLabel(f"Τίποτα δεν γράφεται πριν πατήσετε εισαγωγή. Η «ενημέρωση στοιχείων» (ΑΑΔΕ → ΓΕΜΗ → VIES) αφορά "
@@ -99,7 +104,8 @@ class ImportPreviewDialog(QDialog):
         root.addWidget(hint)
         buttons = QHBoxLayout()
         buttons.addStretch()
-        both = QPushButton("Εισαγωγή & ενημέρωση στοιχείων")
+        both = QPushButton("Ενημέρωση στοιχείων")
+        both.setToolTip("Εισαγωγή των πελατών και ανάκτηση των στοιχείων τους (ΑΑΔΕ → ΓΕΜΗ → VIES) στο παρασκήνιο")
         both.setObjectName("primary")
         both.setDefault(True)
         both.clicked.connect(lambda: self._done("lookup"))

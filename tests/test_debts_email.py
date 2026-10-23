@@ -129,9 +129,12 @@ def test_contact_from_ldap_info():
     xml = ("<r><mail>OLD@x.gr</mail><mail2>Info@Alfa.gr</mail2><mobilenumber>+30 6912345678</mobilenumber>"
            "<phonenumber>2101234567</phonenumber></r>")
     assert lookup_aade.parse_contact(xml) == {"email": "info@alfa.gr", "mobile": "6912345678", "phone": "2101234567",
-                                              "origin": "mail2"}
+                                              "origin": "mail2", "email_assistant": "old@x.gr", "assistant_origin": "mail"}
     assert lookup_aade.parse_contact("<r><mail>όχι-email</mail><mobilenumber>2101234567</mobilenumber></r>") == {
-        "email": "", "mobile": "", "phone": "", "origin": ""}
+        "email": "", "mobile": "", "phone": "", "origin": "", "email_assistant": "", "assistant_origin": ""}
+    # Χωρίς προσωπικό (mail2): το email εγγραφής TAXISnet ΔΕΝ γίνεται κύριο — πάει στο «email βοηθού» (αναφορά 2026-10-23)
+    only_mail = lookup_aade.parse_contact("<r><mail>Info@Office.gr</mail></r>")
+    assert only_mail["email"] == "" and only_mail["email_assistant"] == "info@office.gr"
 
 
 def test_rent_documents_do_not_create_digital_fee_obligation(conn):

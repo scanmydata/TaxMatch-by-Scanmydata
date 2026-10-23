@@ -285,6 +285,26 @@ def clients_for_event(conn: sqlite3.Connection, ev: dict[str, Any]) -> Optional[
     return _liable(ev, _businesses(conn))
 
 
+def obligated_counts(conn: sqlite3.Connection, events: list[dict[str, Any]],
+                     afm: Optional[str] = None) -> dict[tuple[str, Any], int]:
+    """(kind, id) → πόσοι πελάτες είναι ΣΙΓΟΥΡΑ υπόχρεοι (status 'yes') σε κάθε προθεσμία/γεγονός του ημερολογίου —
+    για την κόκκινη κουκκίδα του μηνιαίου ημερολογίου (ρητό αίτημα χρήστη 2026-10-23). Οι πελάτες διαβάζονται ΜΙΑ
+    φορά για όλα τα γεγονότα. `afm`: μόνο αυτός ο πελάτης (φίλτρο πελάτη του ημερολογίου). Νέα/ΔΕ δεν μετρούν."""
+    targets = [e for e in events if e["kind"] in ("rule", "general")]
+    if not targets:
+        return {}
+    businesses = _businesses(conn)
+    if afm:
+        businesses = [b for b in businesses if b["afm"] == afm]
+    out: dict[tuple[str, Any], int] = {}
+    for ev in targets:
+        found = _liable(ev, businesses) or []
+        n = sum(1 for c in found if c["status"] == "yes")
+        if n:
+            out[(ev["kind"], ev["id"])] = n
+    return out
+
+
 def clients_for_article(conn: sqlite3.Connection, article_id: int) -> list[dict[str, Any]]:
     rows = conn.execute("SELECT m.afm, b.name, m.matched_reason, m.confidence FROM matches m "
                         "JOIN businesses b ON b.afm=m.afm WHERE m.article_id=? ORDER BY m.confidence DESC, b.name",

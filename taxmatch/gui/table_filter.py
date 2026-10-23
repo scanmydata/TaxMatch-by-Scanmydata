@@ -302,20 +302,6 @@ def install_cell_menu(table: QTableWidget, column_filter=None) -> None:
     table.customContextMenuRequested.connect(show)
 
 
-def install_cell_menu(table: QTableWidget, column_filter=None) -> None:
-    """Δεξί κλικ σε πίνακα **χωρίς** δικό του μενού: αντιγραφή και φίλτρο."""
-    from PySide6.QtWidgets import QMenu
-
-    def show(pos) -> None:
-        menu = QMenu(table)
-        cell_menu_actions(menu, table, pos, column_filter)
-        if menu.actions():
-            menu.exec(table.viewport().mapToGlobal(pos))
-
-    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-    table.customContextMenuRequested.connect(show)
-
-
 class TableColumnFilter(QObject):
     """Γρήγορο φίλτρο στηλών για οποιονδήποτε ``QTableWidget``.
 

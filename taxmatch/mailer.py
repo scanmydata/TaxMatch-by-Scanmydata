@@ -238,7 +238,7 @@ def compose_debts(conn: sqlite3.Connection, afm: str) -> Optional[Message]:
     closing = ("Στα συνημμένα θα βρείτε τις ταυτότητες οφειλής και τα δοσολόγια για την πληρωμή (e-banking/ΔΙΑΣ, με τον "
                "κωδικό πληρωμής). " if files else "") + "Για οποιαδήποτε διευκρίνιση είμαστε στη διάθεσή σας."
     text, page = _wrap(intro, blocks_t, blocks_h, closing, _signature(conn))
-    return Message(c.get("email") or "", f"Οφειλές — {c.get('name') or afm}", text, page, files,
+    return Message(c.get("email") or c.get("email_assistant") or "", f"Οφειλές — {c.get('name') or afm}", text, page, files,
                    debts.fingerprint(rows), len(rows))
 
 
@@ -275,7 +275,7 @@ def compose_news(conn: sqlite3.Connection, afm: str, days: int = 30, only_new: b
              "που αφορούν τη δραστηριότητά σας:")
     closing = "Επικοινωνήστε μαζί μας αν χρειάζεται κάποια ενέργεια από μέρους σας."
     text, page = _wrap(intro, ["\n\n".join(lines_t)], [f"<ul>{''.join(lines_h)}</ul>"], closing, _signature(conn))
-    return Message(c.get("email") or "", f"Ενημέρωση — {len(rows)} {'νέο' if len(rows) == 1 else 'νέα'} που σας αφορούν",
+    return Message(c.get("email") or c.get("email_assistant") or "", f"Ενημέρωση — {len(rows)} {'νέο' if len(rows) == 1 else 'νέα'} που σας αφορούν",
                    text, page, [], ",".join(sorted(str(r["article_id"]) for r in rows)), len(rows))
 
 

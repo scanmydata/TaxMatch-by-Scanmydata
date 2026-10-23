@@ -4,6 +4,7 @@ HTTP κλήση, κανένα token. Ό,τι αγγίζει δίκτυο/LLM/Α�
 from __future__ import annotations
 
 import calendar as pycal
+import html
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, efka, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
+from .. import members as members_mod
 from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
 from ..business_profiles import credentials as client_creds, import_excel, lookup_aade, service as clients, vies
@@ -45,6 +47,7 @@ from .icons import dot_icon, icon, logo_pixmap
 from .manual import ensure_manual
 from .news_dialog import NewsDialog
 from .side_menu import SideMenu
+from .table_kit import SortItem, TableKit, sort_key
 from .table_filter import TableColumnFilter, install_cell_menu
 from .theme import CURRENT, apply_theme, paint_title_bar
 from .toast import ProgressToast, toast
@@ -89,6 +92,37 @@ class _NumItem(QTableWidgetItem):
         return self._value < getattr(other, "_value", 0.0)
 
 
+class _ClientItem(QTableWidgetItem):
+    """Κελί του πίνακα πελατών: τα ΜΕΛΗ μιας εταιρείας μένουν ΠΑΝΤΑ ακριβώς κάτω από αυτήν, όποια ταξινόμηση κι αν
+    επιλεγεί (ρητό αίτημα χρήστη 2026-10-23 — «dropdown κάτω από την εταιρεία»). Η σύγκριση γίνεται πρώτα με την τιμή
+    της ΕΤΑΙΡΕΙΑΣ στη στήλη (`group_key`, ίδια για εταιρεία και μέλη της), μετά: εταιρεία πρώτα, μέλη μετά. Στη
+    φθίνουσα ταξινόμηση η Qt καλεί `r < l` — γι' αυτό η σειρά μέσα στην ομάδα αντιστρέφεται εδώ, ώστε να μένει ίδια."""
+
+    def __init__(self, text: str = "", key: Any = None) -> None:
+        super().__init__(text)
+        self.key = key if key is not None else sort_key(text)
+        self.group_key: Any = self.key
+        self.group_afm = ""
+        self.child = False
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        if not isinstance(other, _ClientItem):
+            return super().__lt__(other)
+        mine, theirs = (self.group_key, self.group_afm), (other.group_key, other.group_afm)
+        if mine != theirs:
+            try:
+                return mine < theirs
+            except TypeError:
+                return str(mine) < str(theirs)
+        a, b = (self.child, self.key), (other.child, other.key)
+        table = self.tableWidget()
+        descending = table is not None and table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+        try:
+            return (b < a) if descending else (a < b)
+        except TypeError:
+            return (str(b) < str(a)) if descending else (str(a) < str(b))
+
+
 class _DayCell(QFrame):
     """Ένα κελί ημέρας στο grid του μηνιαίου ημερολογίου: αριθμός + μέχρι `_CELL_CHIPS` πραγματικά events
     (μικρά chips, χρωματισμένα κατά είδος — νέα/κανόνας/ημερολόγιο), όπως έδειχνε το παλιό web UI (`.cal .ev`)
@@ -106,8 +140,12 @@ class _DayCell(QFrame):
         bg = CURRENT.panel if in_month else "transparent"
         border = CURRENT.line if in_month else "transparent"
         ring = f"2px solid {CURRENT.accent_deep}" if is_today else f"1px solid {border}"
-        hover = f"QFrame:hover {{ border-color:{CURRENT.accent}; }}" if in_month else ""
-        self.setStyleSheet(f"QFrame {{ background:{bg}; border:{ring}; border-radius:8px; }} {hover}")
+        # Hover (ρητό αίτημα 2026-10-23 — «καλύτερο effect»): ανοιχτότερο φόντο + έντονο περίγραμμα σε ΟΛΟ το κελί.
+        # Με objectName: το «QFrame:hover» χωρίς αυτό έπιανε και τα παιδιά (QLabel είναι QFrame) — κάθε chip άναβε μόνο του.
+        self.setObjectName("dayCell")
+        hover = (f"QFrame#dayCell:hover {{ background:{CURRENT.tile_hover}; border:2px solid {CURRENT.accent}; }}"
+                 if in_month else "")
+        self.setStyleSheet(f"QFrame#dayCell {{ background:{bg}; border:{ring}; border-radius:8px; }} {hover}")
 
         box = QVBoxLayout(self)
         box.setContentsMargins(6, 4, 6, 4)
@@ -121,8 +159,11 @@ class _DayCell(QFrame):
         box.addWidget(num)
 
         for ev in events[:_CELL_CHIPS]:
-            chip = QLabel(ev["title"])
-            chip.setToolTip(ev["title"])
+            n = ev.get("obligated") or 0
+            # κόκκινη κουκκίδα: υπάρχουν πελάτες που είναι ΣΙΓΟΥΡΑ υπόχρεοι σε αυτή την προθεσμία
+            chip = QLabel((f"<span style='color:{CURRENT.bad}'>●</span> " if n else "") + html.escape(ev["title"]))
+            chip.setTextFormat(Qt.TextFormat.RichText)
+            chip.setToolTip(ev["title"] + (f"\n● {n} {'υπόχρεος πελάτης' if n == 1 else 'υπόχρεοι πελάτες'}" if n else ""))
             # Ignored: ο τίτλος ΔΕΝ επιβάλλει πλάτος στη στήλη. Πριν, ένας μακρύς τίτλος «φούσκωνε» τη στήλη της ημέρας
             # του και οι στήλες χωρίς γεγονότα (π.χ. Τετάρτη/Κυριακή) στρίμωχναν (αναφορά χρήστη 2026-10-22).
             chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -207,6 +248,12 @@ class MainWindow(QMainWindow):
         else:
             self._prefs = QSettings("scanmydata", "TaxMatch")
         self._tasks: list[Any] = []                        # κρατά ζωντανά τα background tasks (βλ. workers.run_task)
+        # «Δείτε τους πελάτες» από ειδοποίηση: η λίστα δείχνει ΜΟΝΟ αυτούς ώσπου να σβηστούν τα φίλτρα
+        self._notice_afms: Optional[set[str]] = None
+        # Η ειδοποίηση «επιστροφή στο τρίμηνο» αναγνώστηκε σε ΑΥΤΗ τη συνεδρία → ο αστερίσκος ΦΠΑ μένει ώς την επανεκκίνηση
+        self._vat_read_session = False
+        self._expanded: set[str] = set()                    # εταιρείες με ανοιχτά τα μέλη τους στη λίστα πελατών
+        self._client_parents: dict[str, str] = {}
         self.jobs = JobQueue(self)                          # μακριές εργασίες σε σειρά, με διακοπή (gui/job_queue.py)
         self._tour: Optional[Tour] = None
         self._title_bar_done = False
@@ -356,8 +403,17 @@ class MainWindow(QMainWindow):
             text.setStyleSheet(f"color:{colour};")
             row.addWidget(text, 1)
             btn = QPushButton(n["label"])
-            btn.clicked.connect(lambda _=False, endpoint=n["endpoint"]: self._go_from_notice(endpoint))
+            if n.get("afms"):
+                btn.setToolTip("Ανοίγει τους Πελάτες φιλτραρισμένους σε αυτούς της ειδοποίησης")
+            btn.clicked.connect(lambda _=False, endpoint=n["endpoint"], afms=n.get("afms"):
+                                self._go_from_notice(endpoint, afms))
             row.addWidget(btn)
+            if n.get("dismiss"):
+                read = QPushButton("Αναγνώστηκε")
+                read.setToolTip("Κρύβει την ειδοποίηση· οι πελάτες κρατούν έναν αστερίσκο «*» στη στήλη ΦΠΑ ώς την "
+                                "επόμενη εκκίνηση (ή μόνιμα: Ρυθμίσεις → «Μόνιμος αστερίσκος ΦΠΑ»)")
+                read.clicked.connect(lambda _=False, key=n["dismiss"]: self._dismiss_notice(key))
+                row.addWidget(read)
             self.notices_box.addWidget(frame)
 
     def _aml_notices(self) -> list[dict]:
@@ -377,9 +433,20 @@ class MainWindow(QMainWindow):
                                 + "; ".join(f"#{c['id']} {c['reason']}" for c in pending[:3]) + "."})
         return out
 
-    def _go_from_notice(self, endpoint: str) -> None:
+    def _go_from_notice(self, endpoint: str, afms: Optional[list[str]] = None) -> None:
         page = {"main.settings": "settings", "main.clients_list": "clients", "aml": "aml"}.get(endpoint, "dashboard")
         self._show_page(page)
+        if page == "clients" and afms:
+            self._notice_afms = set(afms)
+            self._apply_client_filter()
+
+    def _dismiss_notice(self, key: str) -> None:
+        if key == "vat_quarter":
+            notices_mod.mark_vat_quarter_read(self.conn)
+            self._vat_read_session = True
+            toast(self, "Η ειδοποίηση κρύφτηκε — ο αστερίσκος «*» στη στήλη ΦΠΑ μένει ώς την επόμενη εκκίνηση.", "ok")
+        self._reload_notices()
+        self.reload_clients()
 
     # ------------------------------------------------------------------ Αρχική
     def _dashboard_page(self) -> QWidget:
@@ -536,37 +603,22 @@ class MainWindow(QMainWindow):
         self.client_clear_filters_btn.clicked.connect(self._clear_client_filters)
         self.client_clear_filters_btn.setVisible(False)
         selbar.addWidget(self.client_clear_filters_btn)
+        self.client_notice_label = QLabel("")
+        self.client_notice_label.setStyleSheet(f"color:{CURRENT.accent};")
+        self.client_notice_label.setVisible(False)
+        selbar.addWidget(self.client_notice_label)
         selbar.addStretch()
         selbar.addWidget(self._reload_button(lambda: self.reload_clients(), "Ξαναδιαβάζει τον πίνακα πελατών"))
         root.addLayout(selbar)
 
         actbar = QHBoxLayout()
-        lookup_btn = QPushButton("  Ανανέωση στοιχείων")
-        lookup_btn.setToolTip("Ανάκτηση στοιχείων (ΑΑΔΕ → ΓΕΜΗ → VIES) για τους επιλεγμένους — ή για όλους αν δεν έχει "
-                              "επιλεγεί κανείς")
-        lookup_btn.clicked.connect(self.on_refresh_selected_clients)
-        actbar.addWidget(lookup_btn)
-        check_btn = QPushButton("  Έλεγχος υποβολών")
-        check_btn.setToolTip("Ρωτά την ΑΑΔΕ αν έχουν υποβληθεί οι δηλώσεις του τρέχοντος έτους (Φ2 με ποσά, ΦΜΥ, "
-                             "εισοδήματος, ΜΥΦ…) για τους επιλεγμένους — ή για όλους με κωδικούς TAXISnet. Μόνο ανάγνωση.")
-        check_btn.clicked.connect(self.on_check_submissions)
-        actbar.addWidget(check_btn)
-        mydata_btn = QPushButton("  Λήψη myDATA")
-        mydata_btn.setToolTip("Παραστατικά των 3 τελευταίων μηνών από το myDATA (χωρίς PDF) για τους επιλεγμένους — ή για "
-                              "όλους με κωδικούς myDATA. Ενημερώνει παρακρατήσεις, VIES και Intrastat στο Ημερολόγιο.")
-        mydata_btn.clicked.connect(self.on_fetch_mydata)
-        actbar.addWidget(mydata_btn)
-        debts_btn = QPushButton("  Λήψη οφειλών")
-        debts_btn.setToolTip("Οφειλές ΑΑΔΕ (εκτός/σε ρύθμιση), ΚΕΑΟ ανά φορέα και τρέχουσες εισφορές e-ΕΦΚΑ — μόνο τα "
-                             "στοιχεία — για τους επιλεγμένους ή όλους με κωδικούς TAXISnet. Τα έντυπα (PDF) από την "
-                             "καρτέλα του πελάτη. Μόνο ανάγνωση.")
-        debts_btn.clicked.connect(self.on_fetch_debts)
-        actbar.addWidget(debts_btn)
-        req_btn = QPushButton("  Αιτήματα ΑΑΔΕ")
-        req_btn.setToolTip("«Τα Αιτήματά μου» (myAADE) για τους επιλεγμένους — ή όλους με κωδικούς: τι απαντήθηκε, τι "
-                           "περιμένει ενέργεια του πελάτη. Μόνο ανάγνωση.")
-        req_btn.clicked.connect(self.on_fetch_requests)
-        actbar.addWidget(req_btn)
+        # ΕΝΑ κουμπί για όλους τους ελέγχους (ρητό αίτημα χρήστη 2026-10-23): popup με επιλογές — gui/checks_dialog.py
+        checks_btn = QPushButton(icon("refresh", CURRENT.txt, 16), "  Έλεγχοι && ενημέρωση…")
+        checks_btn.setObjectName("primary")
+        checks_btn.setToolTip("Ανανέωση στοιχείων, έλεγχος υποβολών, myDATA, οφειλές, αιτήματα ΑΑΔΕ — για τους επιλεγμένους "
+                              "ή, αν δεν έχει επιλεγεί κανείς, για όλους")
+        checks_btn.clicked.connect(self.on_run_checks)
+        actbar.addWidget(checks_btn)
         actbar.addStretch()
         del_btn = QPushButton("  Διαγραφή επιλεγμένων")
         del_btn.setObjectName("danger")
@@ -582,12 +634,13 @@ class MainWindow(QMainWindow):
         self.client_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.client_table.setSortingEnabled(True)
         self.client_table.doubleClicked.connect(self._open_selected_client)
+        self.client_table.itemClicked.connect(self._toggle_members)
         # apply_fn=self._apply_client_filter: το TableColumnFilter ξαναφιλτράρει μόνο του και ασύγχρονα μετά από
         # κάθε ξαναγέμισμα/ταξινόμηση του πίνακα (βλ. docstring της κλάσης) — χωρίς αυτό θα καλούσε το δικό του
         # `apply()` που δεν ξέρει τίποτα για το πεδίο αναζήτησης και θα έσβηνε ό,τι είχε κρύψει αυτή.
         # _apply_client_filter() συνδυάζει και τα δύο κριτήρια και είναι η ΜΟΝΗ συνάρτηση που αγγίζει setRowHidden.
         self._client_col_filter = TableColumnFilter(self.client_table,
-                                                    (_C_NAME, _C_KIND, _C_STATE, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS),
+                                                    range(_C_AFM, len(_CLIENT_COLS)),     # χωνί σε κάθε στήλη
                                                     apply_fn=lambda: self._apply_client_filter())
         self._client_col_filter.filtersChanged.connect(self._apply_client_filter)
         setup_columns(self.client_table, _CLIENT_COLS, self._prefs, "clients")
@@ -616,6 +669,14 @@ class MainWindow(QMainWindow):
         counts = {r["afm"]: r["n"] for r in self.conn.execute("SELECT afm, COUNT(*) AS n FROM matches GROUP BY afm")}
         fees = office.monthly_totals(self.conn)
         checks = easycheck.summary(self.conn, date.today().year)
+        # «*» στη στήλη ΦΠΑ: Β΄ σε μηνιαίο που μπορεί να επανέλθει στο τρίμηνο — ώσπου να αναγνωστεί η ειδοποίηση, μετά ώς
+        # την επόμενη εκκίνηση, ή πάντα με τη ρύθμιση `vat_option_mark_keep`
+        parents = members_mod.parent_company(self.conn)             # μέλος → εταιρεία (εμφανίζεται κάτω της)
+        with_children = set(parents.values())
+        vat_option, vat_deadline = notices_mod.vat_quarter_eligible(self.conn)
+        if (vat_option and not self._vat_read_session and settings_store.get(self.conn, "vat_option_mark_keep") != "1"
+                and notices_mod.vat_quarter_read(self.conn)):
+            vat_option = []
         table = self.client_table
         # Τσεκαρισμένοι πελάτες, επιλεγμένη γραμμή και θέση κύλισης επιβιώνουν από το ξαναγέμισμα — ο πίνακας
         # ανανεώνεται πλέον και μόνος του όσο τρέχει η ανάκτηση στοιχείων (αναφορά χρήστη 2026-10-22).
@@ -629,7 +690,7 @@ class MainWindow(QMainWindow):
         table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             c = creds.get(r["afm"])
-            check = QTableWidgetItem()
+            check = _ClientItem("", (0, ""))
             check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             check.setCheckState(Qt.CheckState.Checked if r["afm"] in checked else Qt.CheckState.Unchecked)
             check.setData(Qt.ItemDataRole.UserRole, r["afm"])
@@ -648,25 +709,61 @@ class MainWindow(QMainWindow):
                 _C_KAD: r["kad_main_code"] or "—", _C_BOOKS: r["books_category"] or "—", _C_VAT: vat,
                 _C_LOOKUP: lookup_label, _C_CREDS: creds_label, _C_MATCHES: str(counts.get(r["afm"], 0)),
             }
+            name_key = sort_key(cells[_C_NAME])
+            if r["afm"] in with_children:
+                n_members = sum(1 for p in parents.values() if p == r["afm"])
+                cells[_C_NAME] = ("▾ " if r["afm"] in self._expanded else "▸ ") + cells[_C_NAME]
+            elif r["afm"] in parents:
+                cells[_C_NAME] = "↳ " + cells[_C_NAME]
             for col, text in cells.items():
-                item = QTableWidgetItem(text)
+                item = _ClientItem(text, name_key if col == _C_NAME else None)
+                if col == _C_NAME and r["afm"] in with_children:
+                    item.setToolTip(f"{n_members} {'μέλος' if n_members == 1 else 'μέλη'} — κλικ στο ▸/▾ για εμφάνιση/"
+                                    "απόκρυψη· διπλό κλικ ανοίγει την καρτέλα")
+                elif col == _C_NAME and r["afm"] in parents:
+                    item.setToolTip("Μέλος εταιρείας — ανοίγει κανονικά με διπλό κλικ")
+                    item.setForeground(QColor(CURRENT.muted))
+                if col == _C_NAME and r["trade_name"]:
+                    item.setData(Qt.ItemDataRole.UserRole + 1, r["trade_name"])   # αναζήτηση και με διακριτικό τίτλο
+                    item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") + f"Διακριτικός τίτλος: {r['trade_name']}")
                 if col == _C_STATE and state_label == "Διακοπή":
                     item.setForeground(QColor(CURRENT.bad))
                 elif col == _C_STATE and state_label == "Ενεργή":
                     item.setForeground(QColor(CURRENT.ok))
                 if col == _C_CREDS and creds_label == "Πρόβλημα":
                     item.setForeground(QColor(CURRENT.bad))
+                if col == _C_VAT and r["afm"] in vat_option:
+                    item.setText(vat + " *")
+                    item.setForeground(QColor(CURRENT.accent))
+                    item.setToolTip("Μπορεί να επανέλθει στον τριμηνιαίο ΦΠΑ (24 μήνες από την έναρξη, Α.1049/2025) — "
+                                    f"δήλωση επιλογής στο myAADE έως {vat_deadline.strftime('%d/%m/%Y')}")
                 table.setItem(i, col, item)
             fee = fees.get(r["afm"])
-            fee_item = _NumItem(office.money(fee) if fee else "—", fee or 0.0)
+            fee_item = _ClientItem(office.money(fee) if fee else "—", (0, fee or 0.0))
             fee_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(i, _C_FEE, fee_item)
             c = checks.get(r["afm"], {})
             missing = c.get("not_submitted", 0)
-            check_item = _NumItem(f"✓{c.get('submitted', 0)} ✗{missing}" if c else "—", missing if c else -1)
+            check_item = _ClientItem(f"✓{c.get('submitted', 0)} ✗{missing}" if c else "—", (0, missing if c else -1))
             if missing:
                 check_item.setForeground(QColor(CURRENT.bad))
             table.setItem(i, _C_CHECKS, check_item)
+        # ομάδα: τα κελιά κάθε μέλους ταξινομούνται με τις τιμές της εταιρείας του
+        row_of = {table.item(i, _C_AFM).text(): i for i in range(table.rowCount())}
+        for i in range(table.rowCount()):
+            afm = table.item(i, _C_AFM).text()
+            parent = parents.get(afm)
+            parent_row = row_of.get(parent) if parent else None
+            for col in range(table.columnCount()):
+                item = table.item(i, col)
+                if not isinstance(item, _ClientItem):
+                    continue
+                if parent_row is not None:
+                    owner = table.item(parent_row, col)
+                    item.group_key, item.group_afm, item.child = getattr(owner, "key", item.key), parent, True
+                else:
+                    item.group_key, item.group_afm = item.key, afm
+        self._client_parents = {a: p for a, p in parents.items() if p in row_of}
         table.setSortingEnabled(True)
         resort(table, _C_NAME)
         table.blockSignals(False)
@@ -683,18 +780,47 @@ class MainWindow(QMainWindow):
         (θα ξανάγραφε το setRowHidden αγνοώντας την αναζήτηση, βλ. σχόλιο στο `_clients_page`)."""
         needle = self.quick_search.text().strip().lower()
         col_filters = self._client_col_filter.filters
+        parents = getattr(self, "_client_parents", {})
         for row in range(self.client_table.rowCount()):
+            name_item = self.client_table.item(row, _C_NAME)
+            trade = (name_item.data(Qt.ItemDataRole.UserRole + 1) or "") if name_item else ""
             text_ok = not needle or any(needle in (self.client_table.item(row, c).text() or "").lower()
-                                        for c in range(1, self.client_table.columnCount()))
+                                        for c in range(1, self.client_table.columnCount())) or needle in trade.lower()
+            parent = parents.get(self.client_table.item(row, _C_AFM).text())
+            if parent and parent not in self._expanded and not needle and self._notice_afms is None:
+                text_ok = False                               # μέλος «κλειστής» εταιρείας
             col_ok = all(not allowed or self.client_table.item(row, c).text() in allowed
                         for c, allowed in col_filters.items())
-            self.client_table.setRowHidden(row, not (text_ok and col_ok))
-        active = len([c for c, v in col_filters.items() if v]) + (1 if needle else 0)
+            notice_ok = self._notice_afms is None or self.client_table.item(row, _C_AFM).text() in self._notice_afms
+            self.client_table.setRowHidden(row, not (text_ok and col_ok and notice_ok))
+        active = (len([c for c, v in col_filters.items() if v]) + (1 if needle else 0)
+                  + (1 if self._notice_afms is not None else 0))
+        self.client_notice_label.setVisible(self._notice_afms is not None)
+        if self._notice_afms is not None:
+            self.client_notice_label.setText(f"Εμφανίζονται οι {len(self._notice_afms)} πελάτες της ειδοποίησης")
         self.client_clear_filters_btn.setVisible(bool(active))
         self.client_clear_filters_btn.setText(f"Διαγραφή φίλτρων ({active})")
         self._sync_client_selection_label()
 
+    def _toggle_members(self, item: QTableWidgetItem) -> None:
+        """Κλικ στο ▸/▾ μιας εταιρείας: εμφάνιση/απόκρυψη των μελών της κάτω από αυτήν."""
+        if item.column() != _C_NAME or not item.text()[:1] in ("▸", "▾"):
+            return
+        rect = self.client_table.visualItemRect(item)
+        pos = self.client_table.viewport().mapFromGlobal(QCursor.pos())
+        if pos.x() - rect.left() > 26:                             # μόνο το βελάκι — αλλού είναι κανονική επιλογή
+            return
+        afm = self.client_table.item(item.row(), _C_AFM).text()
+        if afm in self._expanded:
+            self._expanded.discard(afm)
+            item.setText("▸" + item.text()[1:])
+        else:
+            self._expanded.add(afm)
+            item.setText("▾" + item.text()[1:])
+        self._apply_client_filter()
+
     def _clear_client_filters(self) -> None:
+        self._notice_afms = None
         self.quick_search.clear()                              # το σήμα textChanged ξαναφιλτράρει
         self._client_col_filter.clear()
         self._apply_client_filter()
@@ -781,6 +907,24 @@ class MainWindow(QMainWindow):
             clients.delete(self.conn, afm)
         self.reload_clients()
         self._refresh_status_bar()
+
+    def on_run_checks(self) -> None:
+        """«Έλεγχοι & ενημέρωση…»: popup με τους ελέγχους· κάθε επιλεγμένος τρέχει όπως το παλιό του κουμπί (ουρά εργασιών)."""
+        from .checks_dialog import ChecksDialog
+        selected = self._selected_client_afms()
+        afms = selected or [self.client_table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole)
+                            for r in range(self.client_table.rowCount())]
+        rows = {r["afm"]: r for r in clients.list_all(self.conn)}
+        incomplete = {a: m for a in afms if a in rows for m in [clients.missing_basics(rows[a])] if m}
+        scope = (f"{len(selected)} επιλεγμένοι πελάτες" if len(selected) > 1 else "1 επιλεγμένος πελάτης"
+                 ) if selected else f"Όλοι οι πελάτες ({len(afms)})"
+        dlg = ChecksDialog(self, scope, incomplete, {a: (rows[a]["name"] if a in rows else a) for a in afms})
+        if not dlg.exec():
+            return
+        actions = {"lookup": lambda: self._start_lookup(afms), "submissions": self.on_check_submissions,
+                   "mydata": self.on_fetch_mydata, "debts": self.on_fetch_debts, "requests": self.on_fetch_requests}
+        for key in dlg.chosen:
+            actions[key]()
 
     def on_refresh_selected_clients(self) -> None:
         afms = self._selected_client_afms() or [self.client_table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole) for r in range(self.client_table.rowCount())]
@@ -1192,6 +1336,7 @@ class MainWindow(QMainWindow):
         self.cal_empty_label.setObjectName("muted")
         self.cal_empty_label.setVisible(False)
         grid_root.addWidget(self.cal_empty_label)
+        grid_root.addWidget(self._calendar_legend())
         root.addWidget(grid_box, 1)
         self.cal_stack.addWidget(month_page)
 
@@ -1313,10 +1458,31 @@ class MainWindow(QMainWindow):
         else:
             self._render_cal_month()
 
+    def _calendar_legend(self) -> QWidget:
+        """Οριζόντιο υπόμνημα χρωμάτων κάτω από το μηνιαίο ημερολόγιο (ρητό αίτημα χρήστη 2026-10-23)."""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(2, 6, 2, 0)
+        row.setSpacing(16)
+        for colour, text, mark in ((kind_colour("rule"), "προθεσμία (κανόνας)", "▌"),
+                                   (kind_colour("general"), "ημερολόγιο ΑΑΔΕ/taxheaven", "▌"),
+                                   (kind_colour("news"), "νέο που αφορά πελάτες", "▌"),
+                                   (kind_colour("aml"), "δέουσα επιμέλεια", "▌"),
+                                   (CURRENT.bad, "υπάρχουν υπόχρεοι πελάτες", "●"),
+                                   (CURRENT.accent_deep, "σήμερα", "▢")):
+            lbl = QLabel(f"<span style='color:{colour}; font-size:14px'>{mark}</span> {html.escape(text)}")
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setObjectName("muted")
+            row.addWidget(lbl)
+        row.addStretch()
+        return holder
+
     def _render_cal_month(self) -> None:
         self.cal_stack.setCurrentIndex(0)
         by_day: dict[str, list[dict]] = {}
+        counts = deadlines.obligated_counts(self.conn, self._cal_events, afm=self.cal_client.currentData() or None)
         for ev in self._cal_events:
+            ev["obligated"] = counts.get((ev["kind"], ev["id"]), 0)
             by_day.setdefault(ev["date"], []).append(ev)
         self.cal_empty_label.setVisible(not by_day)
 
@@ -1532,16 +1698,15 @@ class MainWindow(QMainWindow):
         root.addLayout(top)
 
         self.news_table = QTableWidget(0, len(_NEWS_COLS))
-        self.news_table.setHorizontalHeaderLabels([c[0] for c in _NEWS_COLS])
         self.news_table.verticalHeader().setVisible(False)
         self.news_table.setAlternatingRowColors(True)
         self.news_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.news_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.news_table.setSortingEnabled(True)
         self.news_table.doubleClicked.connect(self._open_selected_news)
-        self._news_col_filter = TableColumnFilter(self.news_table, (0, 3))  # Πηγή, Κατάσταση
-        setup_columns(self.news_table, _NEWS_COLS, self._prefs, "news")
-        install_cell_menu(self.news_table, self._news_col_filter)
+        self._news_kit = TableKit(self.news_table, [(c[0], c[1]) for c in _NEWS_COLS], "news", prefs=self._prefs,
+                                  placeholder="Αναζήτηση άρθρου (τίτλος, πηγή, κατάσταση…)")
+        self._news_col_filter = self._news_kit.col_filter
+        root.addWidget(self._news_kit.bar)
         root.addWidget(self.news_table, 1)
         return page
 
@@ -1559,7 +1724,7 @@ class MainWindow(QMainWindow):
         sql += " ORDER BY COALESCE(a.published_at,a.fetched_at) DESC LIMIT 300"
         rows = self.conn.execute(sql, args).fetchall()
         table = self.news_table
-        table.setSortingEnabled(False)
+        self._news_kit.begin()
         table.setRowCount(len(rows))
         status_labels = {"pending": "σε αναμονή", "done": "αναλύθηκε", "failed": "αποτυχία", "irrelevant": "άσχετο",
                          "skipped": "φιλτραρίστηκε", "duplicate": "διπλότυπο"}
@@ -1570,8 +1735,8 @@ class MainWindow(QMainWindow):
             title_item.setData(Qt.ItemDataRole.UserRole, dict(a))
             table.setItem(i, 2, title_item)
             table.setItem(i, 3, QTableWidgetItem(status_labels.get(a["extraction_status"], a["extraction_status"])))
-            table.setItem(i, 4, QTableWidgetItem(str(a["n_matches"])))
-        table.setSortingEnabled(True)
+            table.setItem(i, 4, SortItem(str(a["n_matches"]), int(a["n_matches"])))
+        self._news_kit.end()
         resort(table, 1)
 
     @staticmethod
@@ -1623,7 +1788,10 @@ class MainWindow(QMainWindow):
         self._settings_status: dict[str, QLabel] = {}
         for key, label, echo in (("groq_api_key", "Groq API key", True), ("openrouter_api_key", "OpenRouter API key", True),
                                  ("business_portal_key", "Business Portal (ΓΕΜΗ) API key", True),
-                                 ("aade_user", "TAXISnet χρήστης γραφείου", False), ("aade_pass", "TAXISnet κωδικός γραφείου", True)):
+                                 ("aade_user", "TAXISnet χρήστης γραφείου", False), ("aade_pass", "TAXISnet κωδικός γραφείου", True),
+                                 # ειδικοί κωδικοί «Αναζήτηση Βασικών Στοιχείων Μητρώου» — ατομική επιχείρηση μελών εταιρειών
+                                 ("rg_user", "Ειδικοί κωδικοί Μητρώου — χρήστης", False),
+                                 ("rg_pass", "Ειδικοί κωδικοί Μητρώου — κωδικός", True)):
             field = QLineEdit()
             if echo:
                 field.setEchoMode(QLineEdit.EchoMode.Password)
@@ -1729,6 +1897,12 @@ class MainWindow(QMainWindow):
         self.fetch_members.toggled.connect(
             lambda on: settings_store.set_value(self.conn, "fetch_members", "1" if on else "0"))
         sf2.addWidget(self.fetch_members)
+        self.vat_mark_keep = QCheckBox("Μόνιμος αστερίσκος ΦΠΑ")
+        self.vat_mark_keep.setToolTip("Ο αστερίσκος «*» στη στήλη ΦΠΑ για όσους μπορούν να επανέλθουν στον τριμηνιαίο μένει "
+                                      "και μετά το «Αναγνώστηκε» και την επανεκκίνηση (αλλιώς σβήνει με την επανεκκίνηση)")
+        self.vat_mark_keep.toggled.connect(
+            lambda on: (settings_store.set_value(self.conn, "vat_option_mark_keep", "1" if on else "0"), self.reload_clients()))
+        sf2.addWidget(self.vat_mark_keep)
         sf2.addStretch()
         root.addWidget(sched_box)
         self.email_box = EmailSettingsBox(self.conn, self)
@@ -1783,7 +1957,8 @@ class MainWindow(QMainWindow):
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
         for box, key, on_default in ((self.sched_mydata, "daily_mydata", True), (self.sched_requests, "daily_requests", False),
-                                     (self.fetch_members, "fetch_members", False)):
+                                     (self.fetch_members, "fetch_members", False),
+                                     (self.vat_mark_keep, "vat_option_mark_keep", False)):
             box.blockSignals(True)
             box.setChecked(settings_store.get(self.conn, key) == "1" or (on_default and settings_store.get(self.conn, key) != "0"))
             box.blockSignals(False)

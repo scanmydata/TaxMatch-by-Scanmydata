@@ -20,8 +20,40 @@ def _names(conn: sqlite3.Connection, afms: list[str]) -> str:
     return ", ".join(out) + (f" και άλλοι {more}" if more > 0 else "")
 
 
+def vat_quarter_eligible(conn: sqlite3.Connection) -> tuple[list[str], Any]:
+    """Β΄ κατηγορίας σε υποχρεωτικά μηνιαίο ΦΠΑ που συμπλήρωσαν 24 μήνες (Α.1049/2025) — μπορούν να επανέλθουν στο
+    τρίμηνο. ([ΑΦΜ], προθεσμία δήλωσης επιλογής | None)."""
+    from .obligations import quarter_option
+    eligible, deadline = [], None
+    for r in conn.execute("SELECT * FROM businesses WHERE books_category='Β' AND coalesce(vat_subject,1)<>0 "
+                          "AND activity_state='active' ORDER BY name"):
+        opt = quarter_option(dict(r))
+        if opt and opt["by_law"] and opt["eligible_now"]:
+            eligible.append(r["afm"])
+            deadline = opt["deadline"]
+    return eligible, deadline
+
+
+def _vat_quarter_stamp(afms: list[str], deadline: Any) -> str:
+    return f"{deadline.isoformat() if deadline else ''}|{','.join(sorted(afms))}"
+
+
+def vat_quarter_read(conn: sqlite3.Connection) -> bool:
+    """Έχει «αναγνωστεί» η ειδοποίηση για τους ΤΩΡΙΝΟΥΣ πελάτες και την ΤΩΡΙΝΗ προθεσμία; (νέος πελάτης ή νέα
+    προθεσμία = ξαναεμφανίζεται)."""
+    afms, deadline = vat_quarter_eligible(conn)
+    return bool(afms) and settings_store.get(conn, "notice_vat_quarter_read") == _vat_quarter_stamp(afms, deadline)
+
+
+def mark_vat_quarter_read(conn: sqlite3.Connection) -> None:
+    afms, deadline = vat_quarter_eligible(conn)
+    settings_store.set_value(conn, "notice_vat_quarter_read", _vat_quarter_stamp(afms, deadline))
+
+
 def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """[{level: danger|warn|info, text, endpoint, args, label}] — το template φτιάχνει το link από το endpoint."""
+    """[{level: danger|warn|info, text, endpoint, args, label, afms?, dismiss?}] — το template φτιάχνει το link από το
+    endpoint· `afms` = οι πελάτες της ειδοποίησης (το gui φιλτράρει τη λίστα σε αυτούς)· `dismiss` = κλειδί για
+    «Αναγνώστηκε»."""
     out: list[dict[str, Any]] = []
 
     # ---- LLM (η ανάλυση άρθρων είναι ό,τι παράγει τα matches)
@@ -45,18 +77,14 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     bad = [r["afm"] for r in conn.execute("SELECT afm FROM client_credentials WHERE check_status='invalid' ORDER BY afm")]
     if bad:
         out.append({"level": "danger", "endpoint": "main.clients_list", "args": {"_anchor": "badcreds"}, "label": "Δείτε τους πελάτες",
+                    "afms": bad,
                     "text": f"Λάθος ή κλειδωμένοι κωδικοί TAXISnet σε {len(bad)} "
                             f"{'πελάτη' if len(bad) == 1 else 'πελάτες'}: {_names(conn, bad)}."})
 
     # ---- Β΄ κατηγορίας σε υποχρεωτικά μηνιαίο ΦΠΑ που συμπλήρωσαν 24 μήνες (Α.1049/2025) — μπορούν να επανέλθουν στο τρίμηνο
-    from .obligations import quarter_option
-    eligible, deadline = [], None
-    for r in conn.execute("SELECT * FROM businesses WHERE books_category='Β' AND coalesce(vat_subject,1)<>0 "
-                          "AND activity_state='active' ORDER BY name"):
-        opt = quarter_option(dict(r))
-        if opt and opt["by_law"] and opt["eligible_now"]:
-            eligible.append(r["afm"])
-            deadline = opt["deadline"]
+    eligible, deadline = vat_quarter_eligible(conn)
+    if eligible and settings_store.get(conn, "notice_vat_quarter_read") == _vat_quarter_stamp(eligible, deadline):
+        eligible = []                                   # «Αναγνώστηκε» για αυτούς τους πελάτες / αυτή την προθεσμία
     # ---- «Τα Αιτήματά μου» ΑΑΔΕ: απαντήσεις/αλλαγές που δεν έχει δει ο χρήστης (requests_aade.py)
     from .requests_aade import CHANGE_LABEL, unseen
     pending = unseen(conn)
@@ -66,10 +94,12 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         waiting = sum(1 for r in pending if r["change"] == "waiting_client")
         parts = [f"{answered} απαντήθηκαν" if answered else "", f"{waiting} περιμένουν ενέργεια του πελάτη" if waiting else ""]
         out.append({"level": "warn" if waiting else "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
+                    "afms": afms,
                     "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}): "
                             f"{_names(conn, afms)} — καρτέλα πελάτη → «Αιτήματα ΑΑΔΕ»."})
     if eligible:
         out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
+                    "afms": eligible, "dismiss": "vat_quarter",
                     "text": f"{len(eligible)} {'πελάτης' if len(eligible) == 1 else 'πελάτες'} Β΄ κατηγορίας σε μηνιαίο ΦΠΑ "
                             f"μπορ{'εί' if len(eligible) == 1 else 'ούν'} να επανέλθ{'ει' if len(eligible) == 1 else 'ουν'} "
                             f"στον τριμηνιαίο (24 μήνες από την έναρξη) — δήλωση επιλογής στο myAADE έως "
