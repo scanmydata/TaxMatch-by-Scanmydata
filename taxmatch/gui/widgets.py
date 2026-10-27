@@ -20,8 +20,8 @@ from PySide6.QtCore import (
     QTime,
     QTimer,
 )
-from PySide6.QtGui import QColor, QPainter, QValidator
-from PySide6.QtWidgets import QCheckBox, QDateEdit, QHeaderView, QLineEdit, QTableWidget
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QValidator
+from PySide6.QtWidgets import QCheckBox, QDateEdit, QDialog, QHeaderView, QLineEdit, QTableWidget, QWidget
 
 from .theme import CURRENT
 
@@ -471,3 +471,41 @@ def setup_columns(
         table._fill_column = _FillColumn(  # type: ignore[attr-defined]
             table, fill, prefs, key, save
         )
+
+
+def _available(widget: QWidget):
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen else None
+
+
+def fit_to_screen(dialog: QWidget, width: int = 0, height: int = 0) -> None:
+    """Μέγεθος παραθύρου που ΧΩΡΑ στην οθόνη (ρητό αίτημα 2026-10-27: «κάποια popup είναι τεράστια»): το ζητούμενο
+    `width`×`height` (0 = όσο χρειάζεται το περιεχόμενο), το πολύ 92% του διαθέσιμου χώρου (χωρίς τη γραμμή εργασιών)."""
+    hint = dialog.sizeHint()
+    w, h = width or hint.width(), height or hint.height()
+    area = _available(dialog)
+    if area is not None:
+        w, h = min(w, int(area.width() * 0.92)), min(h, int(area.height() * 0.92))
+    dialog.resize(max(w, 200), max(h, 120))
+
+
+class ScreenFit(QObject):
+    """Φίλτρο σε ΟΛΗ την εφαρμογή: κάθε διάλογος που ανοίγει μένει μέσα στον διαθέσιμο χώρο της οθόνης — μικραίνει
+    αν είναι μεγαλύτερος και μετακινείται ώστε να φαίνεται ολόκληρος (μικρές οθόνες laptop, κλίμακα 125–150%)."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt API)
+        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj.isWindow():
+            area = _available(obj)
+            if area is not None:
+                frame = obj.frameGeometry()
+                extra_w, extra_h = frame.width() - obj.width(), frame.height() - obj.height()
+                w = min(obj.width(), area.width() - extra_w - 8)
+                h = min(obj.height(), area.height() - extra_h - 8)
+                if (w, h) != (obj.width(), obj.height()):
+                    obj.setMinimumSize(min(obj.minimumWidth(), w), min(obj.minimumHeight(), h))
+                    obj.resize(w, h)
+                x = min(max(obj.x(), area.left()), area.right() - w - extra_w)
+                y = min(max(obj.y(), area.top()), area.bottom() - h - extra_h)
+                if (x, y) != (obj.x(), obj.y()):
+                    obj.move(x, y)
+        return False

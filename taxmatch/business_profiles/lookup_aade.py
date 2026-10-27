@@ -45,6 +45,7 @@ class _HyperHttp:
     def __init__(self, timeout: float = 60.0):
         self.jar: Dict[str, Dict[str, str]] = {}
         self.timeout = timeout
+        self.last_url = ""                     # τελευταία σελίδα — «Συνέχεια στον browser» (handoff.py)
         # Keep-alive: ένα login + Μητρώο = 10-25 αιτήματα (με τις ανακατευθύνσεις του OAM) στους ίδιους 2-3 hosts·
         # χωρίς Session κάθε αίτημα άνοιγε νέα σύνδεση TLS — το μεγαλύτερο μέρος του χρόνου της «Ανανέωσης
         # στοιχείων» (αναφορά χρήστη 2026-10-22). Τα cookies τα κρατά ΜΟΝΟ το δικό μας jar (ίδια συμπεριφορά με τα
@@ -122,6 +123,7 @@ class _HyperHttp:
         ctype = (res.headers.get("Content-Type") or "").lower()
         is_pdf = "application/pdf" in ctype or content[:4] == b"%PDF"
         # `content`/`is_pdf`: για εκτυπώσεις (μητρώο, δηλώσεις) — βλ. aml/retrieval.py
+        self.last_url = cur
         return {"url": cur, "status": res.status_code, "text": "" if is_pdf else res.text,
                 "content": content, "ct": ctype, "is_pdf": is_pdf}
 

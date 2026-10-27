@@ -56,6 +56,8 @@ REASONS_EL = {
     "AmeNotFound": "Δεν βρέθηκε ΑΜΕ (ο πελάτης δεν είναι εγγεγραμμένος εργοδότης;).",
     "NoPistErg": "Δεν ολοκληρώθηκε η είσοδος στην «Πιστοποίηση Εργοδοτών» του e-ΕΦΚΑ. Ελέγξτε τους κωδικούς και την πρόσβαση εργοδότη.",
     "AfmMismatch": "Οι κωδικοί TAXISnet ανήκουν σε άλλο ΑΦΜ από τον πελάτη.",
+    "NoToken": "Το myAMKA δεν ολοκλήρωσε τη σύνδεση (amka.gr).",
+    "NotFound": "Το myAMKA δεν επέστρεψε ΑΜΚΑ για αυτόν τον λογαριασμό.",
 }
 
 
@@ -104,6 +106,62 @@ def set_amka(conn: sqlite3.Connection, afm: str, amka: str) -> bool:
     conn.execute("INSERT INTO efka_credentials(afm, amka, updated_at) VALUES (?,?,?) ON CONFLICT(afm) DO UPDATE SET "
                  "amka=excluded.amka, updated_at=excluded.updated_at", (afm, crypto.enc(digits), db.utcnow()))
     return True
+
+
+MYAMKA_APP = "https://www.amka.gr/app"
+
+
+def _amka_values(node: Any, acc: list[str]) -> None:
+    """11ψήφιοι αριθμοί με μορφή ΑΜΚΑ (ΗΗ ≤ 31, ΜΜ ≤ 12) μέσα σε οποιοδήποτε JSON (runner `collectAmka`)."""
+    if isinstance(node, (str, int)) and not isinstance(node, bool):
+        t = str(node)
+        if re.fullmatch(r"\d{11}", t) and 1 <= int(t[:2]) <= 31 and 1 <= int(t[2:4]) <= 12 and t not in acc:
+            acc.append(t)
+    elif isinstance(node, list):
+        for x in node:
+            _amka_values(x, acc)
+    elif isinstance(node, dict):
+        for x in node.values():
+            _amka_values(x, acc)
+
+
+def fetch_amka(user: str, password: str, http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> dict[str, Any]:
+    """ΑΜΚΑ του φυσικού προσώπου από το myAMKA (www.amka.gr/app) με τους κωδικούς TAXISnet του — port του runner
+    `configs/amka-retrieve.js` (`myAmkaLogin` + `CTZ_GetPersonAmka`). ΜΟΝΟ ανάγνωση. {ok, amka} ή {ok: False, reason}."""
+    import json
+    http = http_factory()
+    http.follow("GET", MYAMKA_APP + "/oauth/login")             # → σελίδα σύνδεσης GSIS
+    g = _gsis(http, user, password)
+    if not g["ok"]:
+        return g
+    tok = http.follow("GET", MYAMKA_APP + "/oauth/token")
+    token = (tok.get("text") or "").strip()
+    if tok.get("status") != 200 or not token or "<html" in token[:200].lower():
+        return {"ok": False, "reason": "NoToken"}
+    res = http.post_raw(MYAMKA_APP + "/api/AmkaCitizenAppService/CTZ_GetPersonAmka", "{}",
+                        {"Authorization": "ctaf2 " + token})
+    if res["status"] != 200:
+        return {"ok": False, "reason": f"API_{res['status']}"}
+    try:
+        data = json.loads(res["text"])
+    except ValueError:
+        return {"ok": False, "reason": "BadJson"}
+    found: list[str] = []
+    _amka_values(data.get("amkaList") if isinstance(data, dict) and data.get("amkaList") else data, found)
+    return {"ok": True, "amka": found[0]} if found else {"ok": False, "reason": "NotFound"}
+
+
+def retrieve_amka(conn: sqlite3.Connection, afm: str, http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> dict[str, Any]:
+    """Ανάκτηση + αποθήκευση (κρυπτογραφημένα) του ΑΜΚΑ, με τους ΔΙΚΟΥΣ του κωδικούς TAXISnet — μόνο αν λείπει."""
+    if get_amka(conn, afm):
+        return {"ok": True, "amka": get_amka(conn, afm), "existing": True}
+    creds = taxis_credentials.get(conn, afm)
+    if not creds:
+        return {"ok": False, "reason": "NoCredentials"}
+    res = fetch_amka(creds[0], creds[1], http_factory)
+    if res.get("ok"):
+        set_amka(conn, afm, res["amka"])
+    return res
 
 
 def ika_user(conn: sqlite3.Connection, afm: str) -> str:
@@ -862,7 +920,10 @@ def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Opti
                             "periods": [], "detail": login["reason"]})
             continue
         messages = []
+        teka = conn.execute("SELECT teka FROM businesses WHERE afm=?", (afm,)).fetchone()
         for key, (label, new_url, old_url) in APD_FUNDS.items():
+            if key == "ΑΠΔ_ΤΕΚΑ" and not (teka and teka["teka"]):
+                continue                               # ΤΕΚΑ μόνο αν έχει επιλεγεί στο Προφίλ
             try:
                 found = apd_submissions(login["http"], new_url if login["portal"] == "new" else old_url, year)
             except Exception as exc:                   # noqa: BLE001
@@ -878,8 +939,14 @@ def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Opti
                     messages.append(f"{label}: οικονομική καρτέλα")
                     continue
             if found is None:
+                # η σύνδεση πέτυχε αλλά η σελίδα δεν ήρθε — συχνά ο e-ΕΦΚΑ ζητά επιβεβαίωση στοιχείων επικοινωνίας:
+                # ο χρήστης μπορεί να συνεχίσει στον browser από εδώ (handoff.py)
+                from . import handoff
+                handoff.remember(f"{label} · ΑΜΕ {ame}", afm, login["http"],
+                                 new_url if login["portal"] == "new" else old_url)
                 entries.append({"obligation": f"{key}#{ame}", "label": f"{label} · ΑΜΕ {ame}", "status": "error",
-                                "periods": [], "detail": "Δεν φόρτωσε η σελίδα υποβολών ΑΠΔ (άλλαξε η σελίδα;)"})
+                                "periods": [], "detail": "Δεν φόρτωσε η σελίδα υποβολών ΑΠΔ μετά τη σύνδεση (ίσως ζητά "
+                                                         "επιβεβαίωση στοιχείων) — «Συνέχεια στον browser»."})
                 messages.append(f"{label}: σφάλμα")
                 continue
             entries.append(submissions_entry(key, ame, found["rows"], year, found["payment_id"], today))

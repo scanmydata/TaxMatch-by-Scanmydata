@@ -98,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import i18n
     app._greek_translator = i18n.install(app)  # noqa: SLF001 - πρέπει να μείνει ζωντανός, βλ. i18n.install
+    from .widgets import ScreenFit
+    app._screen_fit = ScreenFit(app)  # noqa: SLF001 — κάθε διάλογος χωρά στην οθόνη
+    app.installEventFilter(app._screen_fit)  # noqa: SLF001
 
     from .theme import CURRENT, apply_theme, install_title_bar_painter
     install_title_bar_painter(app)

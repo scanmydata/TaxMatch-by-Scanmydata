@@ -13,8 +13,12 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
+import time
+
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QProgressBar, QPushButton, QVBoxLayout, QWidget,
+)
 
 from .theme import CURRENT
 
@@ -22,7 +26,8 @@ _DEFAULT_MS = {"ok": 4200, "info": 4200, "warn": 6000, "danger": 5000}
 
 
 class _ToastItem(QFrame):
-    def __init__(self, message: str, level: str, progress: bool = False) -> None:
+    def __init__(self, message: str, level: str, progress: bool = False, title: str = "",
+                 actions: list | None = None) -> None:
         super().__init__()
         self.setObjectName("toastItem")
         self.set_level(level)
@@ -30,6 +35,13 @@ class _ToastItem(QFrame):
         row.setContentsMargins(12, 10, 6, 10)
         col = QVBoxLayout()
         col.setSpacing(6)
+        # Επικεφαλίδα: ΠΟΙΟΝ αφορά το μήνυμα (π.χ. πελάτης της καρτέλας που έκλεισε) — «καλύτερη πληροφόρηση», 2026-10-27
+        self.title = QLabel(title)
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet(f"color:{CURRENT.muted}; border:none; background:transparent; font-size:11px; "
+                                 "font-weight:600;")
+        self.title.setVisible(bool(title))
+        col.addWidget(self.title)
         self.label = QLabel(message)
         self.label.setWordWrap(True)
         self.label.setStyleSheet(f"color:{CURRENT.txt}; border:none; background:transparent;")
@@ -41,6 +53,10 @@ class _ToastItem(QFrame):
             self.bar.setFixedHeight(16)
             self.bar.setFormat("%p%")
             col.addWidget(self.bar)
+        for text, fn in actions or []:                   # κουμπιά ενεργειών (π.χ. «Συνέχεια στον browser»)
+            btn = QPushButton(text)
+            btn.clicked.connect(fn)
+            col.addWidget(btn)
         row.addLayout(col, 1)
         self.close_btn = QPushButton("×")
         self.close_btn.setFlat(True)
@@ -104,8 +120,9 @@ class ToastHost(QWidget):
             self.setGeometry(max(0, x), y, self._WIDTH, max(h, 1))
         self.raise_()
 
-    def add(self, message: str, level: str, ms: int, progress: bool = False) -> _ToastItem:
-        item = _ToastItem(message, level, progress)
+    def add(self, message: str, level: str, ms: int, progress: bool = False, title: str = "",
+            actions: list | None = None) -> _ToastItem:
+        item = _ToastItem(message, level, progress, title, actions)
         self._box.addWidget(item)
         item.close_btn.clicked.connect(lambda: self._remove(item))
         self.show()
@@ -143,14 +160,74 @@ def _host_for(window: QWidget) -> ToastHost:
     return host
 
 
-def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = None) -> None:
-    """Δείχνει ένα πλευρικό μήνυμα πάνω στο `window` (`MainWindow` ή οποιοδήποτε `QDialog`).
+def main_window() -> QWidget | None:
+    """Το κύριο παράθυρο της εφαρμογής (το ορατό QMainWindow), ή None (π.χ. tests χωρίς παράθυρο)."""
+    app = QApplication.instance()
+    if app is None:
+        return None
+    wins = [w for w in app.topLevelWidgets() if isinstance(w, QMainWindow)]
+    return next((w for w in wins if w.isVisible()), wins[0] if wins else None)
+
+
+def _valid(widget: QWidget | None) -> bool:
+    if widget is None:
+        return False
+    try:
+        widget.isVisible()
+        return True
+    except RuntimeError:                                 # το C++ αντικείμενο έχει καταστραφεί
+        return False
+
+
+def context_of(window: QWidget | None) -> str:
+    """Ποιον αφορά ένα παράθυρο: `toast_context` (π.χ. «ΑΛΦΑ ΙΚΕ · 094014201» στην καρτέλα πελάτη) ή ο τίτλος του."""
+    if not _valid(window):
+        return ""
+    return getattr(window, "toast_context", "") or (window.windowTitle() if isinstance(window, QDialog) else "")
+
+
+def target_window(window: QWidget | None) -> tuple[QWidget | None, str]:
+    """Πού δείχνεται ένα μήνυμα: στο ίδιο το παράθυρο όσο είναι ανοιχτό· αν είναι διάλογος που ΕΚΛΕΙΣΕ (ή χάθηκε) —
+    η εργασία που ξεκίνησε εκεί συνεχίζει — στο κύριο παράθυρο, με επικεφαλίδα ποιον αφορά (ρητό αίτημα 2026-10-27)."""
+    top = window.window() if _valid(window) else None          # καρτέλα μέσα σε διάλογο → ο διάλογος
+    if top is not None and (top.isVisible() or not isinstance(top, QDialog)):
+        return window, ""
+    main = main_window()
+    return (main if _valid(main) else None), context_of(top)
+
+
+def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = None, title: str = "",
+          actions: list | None = None) -> None:
+    """Δείχνει ένα πλευρικό μήνυμα πάνω στο `window` (`MainWindow` ή οποιοδήποτε `QDialog`) — ή στο κύριο παράθυρο, αν
+    ο διάλογος έχει κλείσει στο μεταξύ (βλ. `target_window`).
 
     `level`: "info" (μπλε — «ξεκίνησε μια ενέργεια») | "ok" (πράσινο) | "warn" (πορτοκαλί) | "danger" (κόκκινο, εξαφανίζεται μόνο του μετά από 5"). Πάντα
     κλείνει και χειροκίνητα με το «×». `ms=0` το αφήνει μέχρι να κλείσει μόνο χειροκίνητα — δεν το χρησιμοποιούμε
-    πια για σφάλματα (ο χρήστης θέλει να εξαφανίζονται μόνα τους), κρατιέται μόνο ως δυνατότητα.
+    πια για σφάλματα (ο χρήστης θέλει να εξαφανίζονται μόνα τους), κρατιέται μόνο ως δυνατότητα. `title`: επικεφαλίδα.
     """
-    _host_for(window).add(message, level, _DEFAULT_MS.get(level, 4200) if ms is None else ms)
+    target, context = target_window(window)
+    if target is None:
+        return
+    ms = _DEFAULT_MS.get(level, 4200) if ms is None else ms
+    if context and ms:
+        ms += 2000                                       # ήρθε από παράθυρο που δεν βλέπει πια ο χρήστης: λίγο περισσότερο
+    if actions and ms:
+        ms = max(ms, 20000)                              # με κουμπιά: χρόνος να τα πατήσει ο χρήστης
+    _host_for(target).add(message, level, ms, title=title or context, actions=actions)
+
+
+class _Follow(QObject):
+    """Όταν ο διάλογος όπου ζει ένα `ProgressToast` κρύβεται/κλείνει, το toast περνά στο κύριο παράθυρο."""
+
+    def __init__(self, owner: "ProgressToast", window: QWidget) -> None:
+        super().__init__(window)
+        self._owner = owner
+        window.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if event.type() in (QEvent.Type.Hide, QEvent.Type.Close):
+            QTimer.singleShot(0, self._owner.follow_main)
+        return False
 
 
 class ProgressToast:
@@ -165,11 +242,43 @@ class ProgressToast:
         self._window = window
         self._message, self._done, self._total = message, None, None
         self._on_cancel, self._cancelled = on_cancel, False
+        self._started = time.monotonic()
+        self._title = ""
         self._host = _host_for(window)
         self._item = self._build()
+        self._finished = False
+        if isinstance(window.window(), QDialog):
+            self._follow = _Follow(self, window.window())
+        # χρόνος που πέρασε, ανά δευτερόλεπτο — ξέρει ο χρήστης ότι κάτι γίνεται ακόμη κι αν δεν αλλάζει το βήμα
+        self._clock = QTimer()
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._tick)
+        self._clock.start()
+
+    def _elapsed(self) -> str:
+        sec = int(time.monotonic() - self._started)
+        return f"{sec // 60}:{sec % 60:02d}"
+
+    def _text(self) -> str:
+        return f"{self._message}\n⏱ {self._elapsed()}"
+
+    def _tick(self) -> None:
+        if self._finished or not self._alive():
+            return
+        self._item.label.setText(self._text())
+
+    def follow_main(self) -> None:
+        """Ο διάλογος έκλεισε ενώ η εργασία τρέχει: συνεχίζει στο κύριο παράθυρο, με επικεφαλίδα ποιον αφορά."""
+        if self._finished:
+            return
+        main = main_window()
+        top = self._window.window() if _valid(self._window) else None
+        if main is not None and main is not self._window and not (top is not None and top.isVisible()):
+            self._title = context_of(top)
+            self.move_to(main)
 
     def _build(self) -> _ToastItem:
-        item = self._host.add(self._message, "info", 0, progress=True)
+        item = self._host.add(self._text(), "info", 0, progress=True, title=self._title)
         self.cancel_btn: QPushButton | None = None
         if self._on_cancel is not None:
             btn = QPushButton("Διακοπή μετά τον τρέχοντα πελάτη")
@@ -224,15 +333,18 @@ class ProgressToast:
             self._done, self._total = done, total
         if not self._alive():
             return
-        self._item.label.setText(message)
+        self._item.label.setText(self._text())
         if total and self._item.bar is not None:
             self._item.bar.setRange(0, total)
             self._item.bar.setValue(max(0, min(done or 0, total)))
 
     def finish(self, message: str, level: str = "ok") -> None:
+        self._finished = True
+        self._clock.stop()
+        message = f"{message}\n⏱ σε {self._elapsed()}"
         if not self._alive():
             try:
-                toast(self._window, message, level)
+                toast(self._window, message, level, title=self._title)
             except RuntimeError:
                 pass
             return

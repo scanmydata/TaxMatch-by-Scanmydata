@@ -24,6 +24,7 @@ from .table_filter import cell_menu_actions
 from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
+from .widgets import fit_to_screen
 from .workers import run_task
 
 _COLS = ["Πύλη", "Είδος", "Περιγραφή", "Ληξιπρόθεσμο", "Εμπρόθεσμο", "Σύνολο", "Οφειλόμενη δόση",
@@ -214,9 +215,7 @@ class DebtsTab(QWidget):
             lines.append(" · ".join(x for x in (info.get("carrier"), r.get("info"), r.get("status"),
                                                 f"τόκοι {r['interest']}" if r.get("interest") else "") if x))
             if r.get("instalments") and include_schedules:
-                lines.append(cls._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"],
-                                              [[i["no"], i["due"], i["amount"], i["paid"], i["balance"], i["increments"]]
-                                               for i in r["instalments"]]))
+                lines.append(cls.installment_html(d))
         elif d["kind"] == "efka":
             lines.append(f"Μήνας {html.escape(info.get('month', ''))} · εμπρόθεσμη πληρωμή έως "
                          f"{html.escape(info.get('due', ''))}")
@@ -238,10 +237,12 @@ class DebtsTab(QWidget):
             regulation = info.get("regulation") or {}
             installments = regulation.get("instalments") or []
             if installments:
-                return cls._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"],
+                from .. import keao
+                return cls._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Μένει", "Προσαυξήσεις"],
                                        [[item.get("no", ""), item.get("due", ""), item.get("amount", ""),
-                                         item.get("paid", ""), item.get("balance", ""), item.get("increments", "")]
-                                        for item in installments])
+                                         item.get("paid", ""), office.money(keao.unpaid(item)) if keao.unpaid(item) else "—",
+                                         item.get("increments", "")]
+                                        for item in installments], limit=400)
         installments = info.get("installments") or {}
         if installments.get("rows"):
             return cls._table_html(installments.get("headers") or [], installments["rows"])
@@ -324,10 +325,13 @@ class DebtCard(QDialog):
         super().__init__(tab.window_)
         self.tab, self.d = tab, d
         self.setWindowTitle("Καρτέλα οφειλής")
-        self.resize(760, 620)
         root = QVBoxLayout(self)
-        title = QLabel(f"{debts.SOURCES.get(d.get('source', 'aade'), '')} · "
-                       f"{debts.KIND_LABEL.get(d['kind'], d['kind'])} — {d['title']}")
+        info = d.get("details") or {}
+        name = d["title"]
+        if d["kind"] == "carrier" and info.get("category"):
+            name = f"{d['title']} — {info['category']}"
+        source, kind = debts.SOURCES.get(d.get("source", "aade"), ""), debts.KIND_LABEL.get(d["kind"], d["kind"])
+        title = QLabel(f"{kind if kind.startswith(source) else f'{source} · {kind}'} — {name}")
         title.setObjectName("h2")
         title.setWordWrap(True)
         root.addWidget(title)
@@ -337,22 +341,61 @@ class DebtCard(QDialog):
             nxt = d["next_due"] + (f" · {office.money(d['next_amount'])}" if d.get("next_amount") else "")
             if d.get("instalments"):
                 nxt += f" (απλήρωτες {d['unpaid']} από {d['instalments']})"
-        facts = [("Ληξιπρόθεσμο", office.money(d["overdue"]) if d["overdue"] else "—"),
-                 ("Εμπρόθεσμο", office.money(d["non_overdue"]) if d["non_overdue"] else "—"),
-                 ("Σύνολο", office.money(d["total"]) if d["total"] else "—"),
-                 ("Οφειλόμενη δόση", nxt or "—"),
-                 ("Ταυτότητα πληρωμής", d["code"] or "—")]
+        def money(v: float) -> str:
+            return office.money(v) if v else "—"
+        if d["kind"] == "carrier":
+            # ΚΕΑΟ φορέας (port KeaoCard.kt): εκτός ρύθμισης + ό,τι μένει στις ενεργές ρυθμίσεις· το «Υπόλοιπο» της
+            # καρτέλας χρεώσεων είναι λογιστικό (δεν περιέχει προσαυξήσεις/τόκους ρύθμισης) — φαίνεται χωριστά
+            owed, totals = info.get("owed") or {}, info.get("totals") or {}
+            facts = [("Εκτός ρύθμισης", money(d["overdue"])), ("Σε ενεργές ρυθμίσεις (μένουν)", money(d["non_overdue"])),
+                     ("Συνολική οφειλή", money(d["total"]) if not owed.get("fallback") else
+                      (totals.get("balance") or "—") + " (υπόλοιπο καρτέλας)"),
+                     ("Υπόλοιπο καρτέλας χρεώσεων", totals.get("balance") or "—"),
+                     ("ΑΜΟ / ΑΜ", " / ".join(x for x in (info.get("amo"), info.get("am")) if x) or "—"),
+                     ("Υποκατάστημα", info.get("branch") or "—"),
+                     ("Ταυτότητα οφειλέτη", d["code"] or "—")]
+        elif d["kind"] in ("keao_arrangement", "keao_inactive"):
+            reg = info.get("regulation") or {}
+            facts = [("Ρύθμιση", " · ".join(x for x in (reg.get("info"), reg.get("pay_type"), reg.get("status")) if x) or "—"),
+                     ("Σύνολο ρύθμισης", reg.get("total") or "—"),
+                     ("Ληξιπρόθεσμες δόσεις", money(d["overdue"])),
+                     ("Μελλοντικές δόσεις", money(d["non_overdue"])),
+                     ("Μένουν συνολικά", money(d["total"]) if d["kind"] == "keao_arrangement" else "— (μη ενεργή)"),
+                     ("Επόμενη δόση", nxt or "—"),
+                     ("Ταυτότητα οφειλέτη", d["code"] or "—")]
+        else:
+            facts = [("Ληξιπρόθεσμο", money(d["overdue"])),
+                     ("Εμπρόθεσμο", money(d["non_overdue"])),
+                     ("Σύνολο", money(d["total"])),
+                     ("Οφειλόμενη δόση", nxt or "—"),
+                     ("Ταυτότητα πληρωμής", d["code"] or "—")]
         for row, (label, value) in enumerate(facts):
             k = QLabel(label + ":")
             k.setStyleSheet(f"color:{CURRENT.muted}")
             v = QLabel(f"<b>{html.escape(value)}</b>")
             v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            if label == "Ληξιπρόθεσμο" and d["overdue"]:
+            if label in ("Ληξιπρόθεσμο", "Εκτός ρύθμισης", "Ληξιπρόθεσμες δόσεις") and d["overdue"]:
                 v.setStyleSheet(f"color:{CURRENT.bad}")
             grid.addWidget(k, row, 0)
             grid.addWidget(v, row, 1)
         grid.setColumnStretch(1, 1)
+        grid.setVerticalSpacing(6)
         root.addLayout(grid)
+        if d["kind"] == "carrier":
+            regs = [r for r in tab._rows if r["kind"] == "keao_arrangement"
+                    and r["ref"].startswith(d["ref"] + "|")]
+            if regs:
+                head = QLabel("Ενεργές ρυθμίσεις του φορέα")
+                head.setObjectName("h2")
+                root.addWidget(head)
+                body = QLabel(DebtsTab._table_html(
+                    ["Ρύθμιση", "Μένουν", "Ληξιπρόθεσμο", "Επόμενη δόση", "Δόσεις"],
+                    [[r["title"], office.money(r["total"]), office.money(r["overdue"]) if r["overdue"] else "—",
+                      (f"{r['next_due']} · {office.money(r['next_amount'])}" if r.get("next_due") else "—"),
+                      f"{r['unpaid']}/{r['instalments']}"] for r in regs]))
+                body.setTextFormat(Qt.TextFormat.RichText)
+                body.setWordWrap(True)
+                root.addWidget(body)
         schedule = DebtsTab.installment_html(d)
         self.schedule_scroll = None
         if schedule:
@@ -366,7 +409,7 @@ class DebtCard(QDialog):
             schedule_body.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             schedule_scroll = QScrollArea()
             schedule_scroll.setWidgetResizable(True)
-            schedule_scroll.setMaximumHeight(190)
+            schedule_scroll.setMinimumHeight(140)
             schedule_scroll.setWidget(schedule_body)
             root.addWidget(schedule_scroll)
             self.schedule_scroll = schedule_scroll
@@ -388,6 +431,8 @@ class DebtCard(QDialog):
         self.more_scroll.setWidget(more_body)
         self.more_scroll.setVisible(False)
         root.addWidget(self.more_scroll, 1)
+        if self.schedule_scroll is None:
+            root.addStretch(1)                         # τα λίγα πεδία μένουν πάνω — όχι «απλωμένα» σε όλο το ύψος
         bar = QHBoxLayout()
         if d["code"]:
             copy = QPushButton(icon("key", CURRENT.txt, 16), "  Αντιγραφή ταυτότητας")
@@ -407,6 +452,7 @@ class DebtCard(QDialog):
         close.clicked.connect(self.accept)
         bar.addWidget(close)
         root.addLayout(bar)
+        fit_to_screen(self, 760, 640 if self.schedule_scroll is not None else 0)
 
     def _toggle_more(self, expanded: bool) -> None:
         self.more_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)

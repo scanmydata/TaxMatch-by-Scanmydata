@@ -25,6 +25,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote, urlencode, urljoin
 
@@ -166,9 +167,10 @@ def income_submission(menu_text: str, o: Obligation, raw: str = "") -> tuple[boo
 
 # ------------------------------------------------------------------ μηχανή (με τη σύνδεση του lookup_aade)
 class _Ctx:
-    def __init__(self, http, afm: str = "") -> None:
+    def __init__(self, http, afm: str = "", want_pdf: bool = False) -> None:
         self.http = http
         self.afm = afm                     # για την αποθήκευση PDF ταυτοτήτων οφειλής (κενό = χωρίς PDF)
+        self.want_pdf = want_pdf           # και το PDF κάθε υποβληθείσας δήλωσης (viewPdf.htm) — επιλογή του χρήστη
 
     def get(self, url: str) -> str:
         return self.http.follow("GET", url)["text"]
@@ -346,14 +348,45 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
     finals = [d for d in mine if d["final"] == "Οριστική"]
     submitted = bool(finals) if o.search_type else None
     effective = (finals or mine or [None])[-1]           # τροποποιητική υπερισχύει της αρχικής (τελευταία οριστική)
-    if o.key not in AMOUNT_KEYS or not effective or not effective["db_id"]:
+    if not effective or not effective["db_id"]:
         return submitted, {}
-    if known and known.get("registration_no") == effective["db_id"] and (
+    if o.key not in AMOUNT_KEYS:
+        amounts: dict[str, Any] = {}
+    elif known and known.get("registration_no") == effective["db_id"] and (
             known.get("pdf_checked") or known.get("result") != "Χρεωστική" or not ctx.afm):
-        return submitted, known                         # χρεωστική χωρίς PDF ταυτότητας: ξαναδιαβάζεται μία φορά
-    amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
-    amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
+        amounts = dict(known)                           # χρεωστική χωρίς PDF ταυτότητας: ξαναδιαβάζεται μία φορά
+    else:
+        amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
+        amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
+    if ctx.want_pdf and ctx.afm and effective["final"] == "Οριστική":
+        old = (known or {}).get("submission_pdf", "")
+        if old and Path(old).exists() and (known or {}).get("registration_no") == effective["db_id"]:
+            amounts["submission_pdf"] = old
+        else:
+            pdf = submission_pdf(ctx, o, effective["db_id"], args)
+            if pdf:
+                amounts["submission_pdf"] = pdf
+        amounts.setdefault("registration_no", effective["db_id"])
     return submitted, amounts
+
+
+def submission_pdf(ctx: _Ctx, o: Obligation, db_id: str, args: dict[str, str]) -> str:
+    """PDF της υποβληθείσας δήλωσης (`viewPdf.htm`, runner `configs/aade-declarations.js` — Hyper.Server
+    `GetGeneralType1Year`) → <data>/submissions/<ΑΦΜ>/<έτος>/. '' αν δεν ήρθε PDF. Μόνο ανάγνωση."""
+    from . import config
+    if not hasattr(ctx.http, "follow"):
+        return ""
+    res = ctx.http.follow("POST", f"{AADE}/taxisnet/{o.category}/protected/viewPdf.htm",
+                          {"declarationDatabaseId": db_id, "declarationType": o.filter})
+    if not res.get("is_pdf"):
+        return ""
+    year = (args.get("year") or "")[:4] or str(date.today().year)
+    start = re.sub(r"\D", "", args.get("periodStart") or "")[:8] or db_id
+    folder = config.data_dir() / "submissions" / ctx.afm / year
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{re.sub(r'[^0-9A-Za-zΑ-Ωα-ω_]', '_', o.key)}_{ctx.afm}_{start}_{db_id}.pdf"
+    path.write_bytes(res["content"])
+    return str(path)
 
 
 def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = None,
@@ -505,7 +538,7 @@ def _only_liable_fee_periods(conn: sqlite3.Connection, afm: str, year: int, entr
 
 
 def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None, keys: Optional[list[str]] = None,
-                 login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
+                 login_fn: Callable[[str, str], dict] = lookup_aade.aade_login, want_pdf: bool = False) -> dict[str, Any]:
     """Login με τους κωδικούς ΤΟΥ ΠΕΛΑΤΗ, έλεγχος, αποθήκευση στο `obligation_checks`. Επιστρέφει {ok, reason, entries}."""
     year = year or date.today().year
     creds = credentials.get(conn, afm)
@@ -517,7 +550,7 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
     if not login.get("ok"):
         return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet."),
                 "entries": []}
-    ctx, cache, entries = _Ctx(login["http"], afm), {}, []
+    ctx, cache, entries = _Ctx(login["http"], afm, want_pdf), {}, []
     stored: dict[str, dict[str, dict]] = {}
     for r in conn.execute("SELECT obligation, period, amounts_json FROM obligation_checks WHERE afm=? AND year=? "
                           "AND status='submitted'", (afm, year)):
@@ -527,6 +560,8 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
             entries.append(check_obligation(ctx, key, year, cache, stored.get(key)))
         except Exception as exc:                        # noqa: BLE001 — μία υποχρέωση δεν ρίχνει τις υπόλοιπες
             log.warning("easycheck %s/%s: %s", afm, key, exc)
+            from . import handoff
+            handoff.remember(f"ΑΑΔΕ — {OBLIGATIONS[key].label}", afm, login["http"])
             entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
                             "detail": str(exc)[:200]})
     entries = [_only_liable_fee_periods(conn, afm, year, e) for e in entries]

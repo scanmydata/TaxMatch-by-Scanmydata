@@ -20,6 +20,7 @@ from datetime import date
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urljoin
 
+from .textutil import strip_accents
 from . import db
 from .business_profiles import credentials, lookup_aade
 from .identifiers import normalize_afm
@@ -226,6 +227,30 @@ def parent_company(conn: sqlite3.Connection) -> dict[str, str]:
         if r["member_afm"] != r["company_afm"]:
             out.setdefault(r["member_afm"], r["company_afm"])
     return out
+
+
+def member_roles(conn: sqlite3.Connection) -> dict[str, str]:
+    """ΑΦΜ μέλους → ρόλος (όπως στο Μητρώο ΑΑΔΕ, π.χ. «ΜΕΛΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ · ΝΟΜΙΜΟΣ ΕΚΠΡΟΣΩΠΟΣ»)."""
+    out: dict[str, str] = {}
+    for r in conn.execute("SELECT member_afm, role FROM company_members WHERE coalesce(role,'')<>'' ORDER BY company_afm"):
+        out.setdefault(r["member_afm"], r["role"])
+    return out
+
+
+def short_role(role: str) -> str:
+    """Σύντομη μορφή για τη στήλη «Είδος» της λίστας πελατών: ο σημαντικότερος ρόλος."""
+    r = strip_accents(role or "").upper()
+    if not r:
+        return ""
+    if "ΝΟΜΙΜ" in r and "ΕΚΠΡΟΣ" in r:
+        return "Νόμιμος εκπρόσωπος"
+    if "ΔΙΑΧΕΙΡΙΣΤ" in r:
+        return "Διαχειριστής"
+    if "ΜΕΤΟΧ" in r:
+        return "Μέτοχος"
+    if "ΕΤΑΙΡ" in r:
+        return "Εταίρος"
+    return "Μέλος"
 
 
 def remove(conn: sqlite3.Connection, company: str, member_afm: str) -> None:

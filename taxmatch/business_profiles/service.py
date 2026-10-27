@@ -5,6 +5,7 @@ import json
 import inspect
 import logging
 import sqlite3
+import re
 from typing import Any, Callable, Optional
 
 import requests
@@ -289,7 +290,8 @@ def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str,
 
 
 def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[requests.Session] = None,
-                     aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile) -> dict[str, Any]:
+                     aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile,
+                     amka_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> dict[str, Any]:
     """Ανάκτηση στοιχείων πελάτη. Σειρά: Μητρώο ΑΑΔΕ (ΚΑΔ, κατάσταση/διακοπή, ΔΟΥ, ΦΠΑ, βιβλία, είδος) → ΓΕΜΗ ως fallback
     (ΚΑΔ όταν λείπουν, νομική μορφή νομικών προσώπων) → VIES (επωνυμία). Κάθε πηγή είναι προαιρετική.
     Επιστρέφει {'status', 'errors', 'sources', 'issues'} και ενημερώνει τη γραμμή. `issues`: [{'code', 'message'}] με
@@ -419,6 +421,10 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         # Καμία πηγή ρυθμισμένη, ή μόνο παροδικά σφάλματα δικτύου: ο πελάτης μένει 'pending' και ξαναδοκιμάζεται.
         return {"status": "pending", "errors": errors, "sources": [], "issues": issues}
 
+    if not aade and gemi_state.get("state") == "ceased" and \
+            is_individual_form(fields.get("legal_form") or current["legal_form"]):
+        _as_private_person(conn, afm, fields)
+
     now = db.utcnow()
     sets, args = [], []
     for k, v in fields.items():
@@ -470,12 +476,28 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
             members_mod.sync_member_clients(conn, afm)
         except Exception as exc:                       # noqa: BLE001 — τα μέλη είναι επιπλέον· ποτέ αποτυχία ανάκτησης
             log.warning("μέλη %s: %s", afm, exc)
+    if amka_fetch is None and aade_fetch is lookup_aade.fetch_company_profile:     # πραγματική ανάκτηση (όχι tests)
+        from .. import efka
+        amka_fetch = efka.retrieve_amka
+    if amka_fetch is not None and aade and aade.get("kind") != "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ" and credentials.get(conn, afm):
+        # Φυσικό πρόσωπο (ιδιώτης, μέλος, ατομική) με δικούς του κωδικούς: και ο ΑΜΚΑ από το myAMKA, αν λείπει — τον
+        # θέλουν ΚΕΑΟ / εισφορές e-ΕΦΚΑ (ρητό αίτημα 2026-10-27). Ποτέ αποτυχία της ανάκτησης στοιχείων εξαιτίας του.
+        from .. import efka
+        try:
+            amka = amka_fetch(conn, afm)
+            if amka.get("ok") and not amka.get("existing"):
+                sources.append("myAMKA")
+            elif not amka.get("ok"):
+                errors.append("ΑΜΚΑ: " + efka.REASONS_EL.get(amka.get("reason", ""), amka.get("reason", "")))
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("ΑΜΚΑ %s: %s", afm, exc)
     if kads:
         set_kads(conn, afm, kads)
     elif aade and aade.get("business_state") in ("ceased", "none"):
         set_kads(conn, afm, [])                    # κλειστή/χωρίς επιχείρηση: δεν υπάρχουν ενεργά ΚΑΔ
     have_kads = bool(kads) or bool(conn.execute("SELECT 1 FROM business_kad WHERE afm=?", (afm,)).fetchone())
-    kad_optional = bool(aade) and aade.get("business_state") in ("ceased", "none")
+    kad_optional = (bool(aade) and aade.get("business_state") in ("ceased", "none")) or \
+        fields.get("legal_form") == "ΙΔΙΩΤΗΣ"
     row = conn.execute("SELECT name FROM businesses WHERE afm=?", (afm,)).fetchone()
     complete = (have_kads or kad_optional) and bool(fields.get("name") or row["name"])
     status = "failed" if not sources else ("ok" if complete else "partial")
@@ -486,6 +508,53 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     args += [status, "; ".join(errors), json.dumps(raw, ensure_ascii=False)[:200_000], now, now, afm]
     conn.execute(f"UPDATE businesses SET {', '.join(sets)} WHERE afm=?", args)
     return {"status": status, "errors": errors, "sources": sources, "issues": issues}
+
+
+def is_individual_form(form: Optional[str]) -> bool:
+    return "ΑΤΟΜΙΚ" in strip_accents(form or "").upper()
+
+
+def clean_gemi_name(name: str) -> str:
+    """«(ΔΙΑΓΡΑΦΗΚΕ)ΕΛΕΥΘΕΡΙΟΣ …» → «ΕΛΕΥΘΕΡΙΟΣ …» — το ΓΕΜΗ βάζει το πρόθεμα στις διαγραμμένες εγγραφές."""
+    return re.sub(r"^\s*\(\s*ΔΙΑΓΡΑΦ[^)]*\)\s*", "", name or "", flags=re.IGNORECASE).strip()
+
+
+def _as_private_person(conn: sqlite3.Connection, afm: str, fields: dict[str, Any]) -> None:
+    """Φυσικό πρόσωπο με ατομική επιχείρηση διαγραμμένη στο ΓΕΜΗ = ΙΔΙΩΤΗΣ (όπως το Μητρώο ΑΑΔΕ: «φυσικό πρόσωπο με
+    κλειστή επιχείρηση είναι ΙΔΙΩΤΗΣ»), χωρίς ενεργούς ΚΑΔ. Ως όνομα: του Μητρώου μελών ΑΑΔΕ (αν είναι μέλος), αλλιώς
+    του ΓΕΜΗ χωρίς το «(ΔΙΑΓΡΑΦΗΚΕ)» (αναφορά χρήστη 2026-10-27)."""
+    fields["legal_form"] = "ΙΔΙΩΤΗΣ"
+    member = conn.execute("SELECT name FROM company_members WHERE member_afm=? AND name<>'' LIMIT 1", (afm,)).fetchone()
+    name = member["name"] if member else clean_gemi_name(fields.get("name") or "")
+    if name:
+        fields["name"] = name
+    set_kads(conn, afm, [])
+
+
+def reapply_cached_gemi(conn: sqlite3.Connection) -> int:
+    """Εφαρμόζει τον κανόνα «διαγραμμένη ατομική = ιδιώτης» σε όσους έχουν ήδη απάντηση ΓΕΜΗ στη βάση χωρίς Μητρώο ΑΑΔΕ
+    — ώστε να διορθωθούν χωρίς νέα «Ανανέωση στοιχείων». Καλείται στην εκκίνηση· φθηνό (μόνο τοπικά δεδομένα)."""
+    n = 0
+    for r in conn.execute("SELECT afm, name, legal_form, lookup_raw FROM businesses "
+                          "WHERE lookup_raw LIKE '%business_portal%' AND legal_form<>'ΙΔΙΩΤΗΣ'").fetchall():
+        try:
+            raw = json.loads(r["lookup_raw"] or "{}")
+        except ValueError:
+            continue
+        if raw.get("aade") or not raw.get("business_portal"):
+            continue
+        bp = raw["business_portal"]
+        c = portal.parse_company(bp.get("search") or bp) if isinstance(bp, dict) else {}
+        if c.get("state") != "ceased" or not is_individual_form(c.get("legal_form") or r["legal_form"]):
+            continue
+        fields: dict[str, Any] = {"name": c.get("name") or r["name"]}
+        _as_private_person(conn, r["afm"], fields)
+        conn.execute("UPDATE businesses SET name=?, legal_form=?, activity_state='ceased', cease_date=?, cease_reason=?, "
+                     "updated_at=? WHERE afm=?",
+                     (fields["name"], fields["legal_form"], c.get("status_date") or "",
+                      f"ΓΕΜΗ: {c.get('status') or ''}", db.utcnow(), r["afm"]))
+        n += 1
+    return n
 
 
 def enrich_pending(conn: sqlite3.Connection, limit: int = 20, session: Optional[requests.Session] = None,

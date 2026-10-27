@@ -48,6 +48,28 @@ def vat_quarter_read(conn: sqlite3.Connection) -> bool:
 def mark_vat_quarter_read(conn: sqlite3.Connection) -> None:
     afms, deadline = vat_quarter_eligible(conn)
     settings_store.set_value(conn, "notice_vat_quarter_read", _vat_quarter_stamp(afms, deadline))
+    _add_marks(conn, "vat", afms)
+
+
+#: Αστερίσκοι ανά πελάτη μετά το «Αναγνώστηκε» (ρητό αίτημα χρήστη 2026-10-27): μένουν στη λίστα πελατών — στη στήλη
+#: ΦΠΑ (επιστροφή στο τρίμηνο) ή στον ΚΑΔ (παρεπιδημούντες) — ώσπου ο χρήστης να ανοίξει την καρτέλα του πελάτη.
+MARK_KEYS = {"vat": "notice_marks_vat", "parepid": "notice_marks_parepid"}
+
+
+def marks(conn: sqlite3.Connection, kind: str) -> set[str]:
+    return {a for a in (settings_store.get(conn, MARK_KEYS[kind]) or "").split(",") if a}
+
+
+def _add_marks(conn: sqlite3.Connection, kind: str, afms: list[str]) -> None:
+    settings_store.set_value(conn, MARK_KEYS[kind], ",".join(sorted(marks(conn, kind) | set(afms))))
+
+
+def clear_marks(conn: sqlite3.Connection, afm: str) -> None:
+    """Η καρτέλα του πελάτη άνοιξε: οι αστερίσκοι του σβήνουν."""
+    for kind, key in MARK_KEYS.items():
+        current = marks(conn, kind)
+        if afm in current:
+            settings_store.set_value(conn, key, ",".join(sorted(current - {afm})))
 
 
 def parepid_candidates(conn: sqlite3.Connection) -> list[str]:
@@ -68,7 +90,9 @@ def parepid_read(conn: sqlite3.Connection) -> bool:
 
 
 def mark_parepid_read(conn: sqlite3.Connection) -> None:
-    settings_store.set_value(conn, "notice_parepid_read", ",".join(parepid_candidates(conn)))
+    afms = parepid_candidates(conn)
+    settings_store.set_value(conn, "notice_parepid_read", ",".join(afms))
+    _add_marks(conn, "parepid", afms)
 
 
 def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:

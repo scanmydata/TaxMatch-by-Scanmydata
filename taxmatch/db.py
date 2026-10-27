@@ -602,6 +602,13 @@ MIGRATIONS: list[str] = [
         SELECT afm, ame_oikodomotexnikon, 'oikodom', 'efka', updated_at FROM efka_credentials
         WHERE ame_oikodomotexnikon<>''
     """,
+    # v20 — ΑΠΔ ΤΕΚΑ μόνο με ρητή επιλογή στο Προφίλ (ρητό αίτημα χρήστη 2026-10-27): NULL/0 = ούτε υποχρέωση ούτε
+    # έλεγχος. Όσοι έχουν ΗΔΗ υποβολές ΤΕΚΑ από τον έλεγχο ξεκινούν επιλεγμένοι.
+    """
+    ALTER TABLE businesses ADD COLUMN teka INTEGER;
+    UPDATE businesses SET teka=1 WHERE afm IN (SELECT afm FROM obligation_checks
+        WHERE obligation LIKE 'ΑΠΔ_ΤΕΚΑ%' AND status IN ('submitted', 'not_submitted', 'pending'));
+    """,
 ]
 
 

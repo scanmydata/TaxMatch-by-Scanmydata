@@ -46,6 +46,17 @@ class ChecksDialog(QDialog):
             note.setContentsMargins(26, 0, 0, 4)
             root.addWidget(note)
             self.boxes[key] = box
+            if key == "submissions":
+                # PDF των υποβληθέντων δηλώσεων (ρητό αίτημα 2026-10-27) — επιλογή, γιατί κοστίζει χρόνο
+                self.pdf_box = QCheckBox("και λήψη PDF των υποβληθεισών δηλώσεων (Φ2, Φ4/Φ5, ΦΜΥ, Intrastat…)")
+                self.pdf_box.setToolTip("Αποθηκεύονται στον φάκελο δεδομένων → submissions\\<ΑΦΜ>\\<χρήση>· ανοίγουν από "
+                                        "την καρτέλα πελάτη → Προθεσμίες & υποβολές. Μία φορά ανά δήλωση.")
+                self.pdf_box.setChecked(str(self._prefs.value("checks/submissions_pdf", "0")) == "1")
+                self.pdf_box.setContentsMargins(26, 0, 0, 4)
+                self.pdf_box.setStyleSheet("margin-left:26px;")
+                box.toggled.connect(self.pdf_box.setEnabled)
+                self.pdf_box.setEnabled(box.isChecked())
+                root.addWidget(self.pdf_box)
         if incomplete:
             # ελλιπή βασικά στοιχεία → προτείνεται ανανέωση, με το ποιοι και τι λείπει
             self.boxes["lookup"].setChecked(True)
@@ -72,8 +83,13 @@ class ChecksDialog(QDialog):
             box.toggled.connect(lambda _on: run.setEnabled(any(b.isChecked() for b in self.boxes.values())))
         run.setEnabled(any(b.isChecked() for b in self.boxes.values()))
 
+    @property
+    def want_pdf(self) -> bool:
+        return self.pdf_box.isChecked() and self.boxes["submissions"].isChecked()
+
     def _run(self) -> None:
         self.chosen = [k for k, _t, _tip in CHECKS if self.boxes[k].isChecked()]
+        self._prefs.setValue("checks/submissions_pdf", "1" if self.pdf_box.isChecked() else "0")
         for key, box in self.boxes.items():
             if key != "lookup":                          # η ανανέωση προτείνεται κάθε φορά από τα ελλιπή στοιχεία
                 self._prefs.setValue(f"checks/{key}", "1" if box.isChecked() else "0")

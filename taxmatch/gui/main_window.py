@@ -10,12 +10,13 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
@@ -26,7 +27,8 @@ from PySide6.QtWidgets import (
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, efka, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
-from .. import fee_portals
+from .. import fee_portals, handoff
+from .. import intrastat as intrastat_mod
 from .. import fiscal
 from .. import members as members_mod
 from ..aml import cases as aml_cases, store as aml_store
@@ -63,6 +65,34 @@ from .workers import run_task
 log = logging.getLogger(__name__)
 
 _W_CHK, _W_STATUS = 0, 6           # πίνακας «Εργασίες / Υπόχρεοι» του Ημερολογίου
+
+
+class _WorkCard(QFrame):
+    """Κάρτα εργασίας του Ημερολογίου (Ανά εργασία → Εργασίες): κείμενο που αναδιπλώνεται, κλικ = υπόχρεοι."""
+    clicked = Signal()
+
+    def __init__(self, text: str, colour: str) -> None:
+        super().__init__()
+        self.setObjectName("workCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        self.setStyleSheet(f"QFrame#workCard {{ background:{CURRENT.panel}; border:1px solid {CURRENT.line}; "
+                           f"border-radius:10px; }} QFrame#workCard:hover {{ border:1px solid {colour}; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(f"color:{colour}; border:none; background:transparent;")
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        label.setMinimumHeight(60)
+        lay.addWidget(label)
+
+    def mouseReleaseEvent(self, event) -> None:          # noqa: N802 — Qt API
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 _CLIENT_COLS = [
     ("", 30, "Επιλέξτε για μαζικές ενέργειες"), ("ΑΦΜ", 90, ""), ("Επωνυμία", 0, "Διπλό κλικ για την καρτέλα"),
@@ -251,6 +281,11 @@ class MainWindow(QMainWindow):
             self.resize(1340, 840)
 
         self.conn = dbmod.connect()
+        try:
+            # διαγραμμένη ατομική στο ΓΕΜΗ = ιδιώτης — διορθώνει ήδη αποθηκευμένους χωρίς νέα ανάκτηση (τοπικά δεδομένα)
+            clients.reapply_cached_gemi(self.conn)
+        except Exception as exc:                       # noqa: BLE001 — ποτέ εμπόδιο στο άνοιγμα της εφαρμογής
+            log.warning("reapply_cached_gemi: %s", exc)
         # Προτιμήσεις οθόνης (θέμα, πλάτη/σειρά στηλών). Με `TAXMATCH_DATA_DIR` (tests, δοκιμές με προσωρινά δεδομένα)
         # γράφονται ΔΙΠΛΑ στη βάση — πριν πήγαιναν πάντα στο μητρώο του χρήστη και κάθε test «πατούσε» τα πλάτη
         # στηλών/το θέμα της πραγματικής εγκατάστασης.
@@ -262,7 +297,6 @@ class MainWindow(QMainWindow):
         # «Δείτε τους πελάτες» από ειδοποίηση: η λίστα δείχνει ΜΟΝΟ αυτούς ώσπου να σβηστούν τα φίλτρα
         self._notice_afms: Optional[set[str]] = None
         # Η ειδοποίηση «επιστροφή στο τρίμηνο» αναγνώστηκε σε ΑΥΤΗ τη συνεδρία → ο αστερίσκος ΦΠΑ μένει ώς την επανεκκίνηση
-        self._vat_read_session = False
         self._expanded: set[str] = set()                    # εταιρείες με ανοιχτά τα μέλη τους στη λίστα πελατών
         # Χρήση εργασίας (fiscal.py — ίδιοι κανόνες με το timologio): χειροκίνητη επιλογή μόνο μέσα στο έτος της
         self._fiscal_year = fiscal.resolve_year(self._prefs.value("fiscal/year", 0, type=int),
@@ -478,12 +512,12 @@ class MainWindow(QMainWindow):
     def _dismiss_notice(self, key: str) -> None:
         if key == "parepid":
             notices_mod.mark_parepid_read(self.conn)
-            toast(self, "Η ειδοποίηση κρύφτηκε — οι πελάτες βρίσκονται και με το φίλτρο «Πιθανοί υπόχρεοι τέλους "
-                        "παρεπιδημούντων».", "ok")
+            toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη «Κύριος ΚΑΔ» ώσπου να ανοίξετε "
+                        "την καρτέλα τους — και βρίσκονται με το φίλτρο «Πιθανοί υπόχρεοι τέλους παρεπιδημούντων».", "ok")
         if key == "vat_quarter":
             notices_mod.mark_vat_quarter_read(self.conn)
-            self._vat_read_session = True
-            toast(self, "Η ειδοποίηση κρύφτηκε — ο αστερίσκος «*» στη στήλη ΦΠΑ μένει ώς την επόμενη εκκίνηση.", "ok")
+            toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη ΦΠΑ ώσπου να ανοίξετε την "
+                        "καρτέλα τους.", "ok")
         self._reload_notices()
         self.reload_clients()
 
@@ -738,15 +772,17 @@ class MainWindow(QMainWindow):
         counts = {r["afm"]: r["n"] for r in self.conn.execute("SELECT afm, COUNT(*) AS n FROM matches GROUP BY afm")}
         fees = office.monthly_totals(self.conn)
         checks = easycheck.summary(self.conn, self._fiscal_year)
-        # «*» στη στήλη ΦΠΑ: Β΄ σε μηνιαίο που μπορεί να επανέλθει στο τρίμηνο — ώσπου να αναγνωστεί η ειδοποίηση, μετά ώς
-        # την επόμενη εκκίνηση, ή πάντα με τη ρύθμιση `vat_option_mark_keep`
+        # «*» στη στήλη ΦΠΑ (επιστροφή στο τρίμηνο) / στον ΚΑΔ (παρεπιδημούντες): όσο φαίνεται η ειδοποίηση, και μετά το
+        # «Αναγνώστηκε» ώσπου να ανοιχτεί η καρτέλα του πελάτη (`notices.marks` / `clear_marks`)
         parents = members_mod.parent_company(self.conn)             # μέλος → εταιρεία (εμφανίζεται κάτω της)
+        roles = members_mod.member_roles(self.conn)
         parepid_afms = set(notices_mod.parepid_candidates(self.conn))
         with_children = set(parents.values())
         vat_option, vat_deadline = notices_mod.vat_quarter_eligible(self.conn)
-        if (vat_option and not self._vat_read_session and settings_store.get(self.conn, "vat_option_mark_keep") != "1"
-                and notices_mod.vat_quarter_read(self.conn)):
-            vat_option = []
+        if vat_option and notices_mod.vat_quarter_read(self.conn):
+            vat_option = sorted(set(vat_option) & notices_mod.marks(self.conn, "vat"))
+        parepid_marked = (parepid_afms & notices_mod.marks(self.conn, "parepid")
+                          if notices_mod.parepid_read(self.conn) else parepid_afms)
         table = self.client_table
         # Τσεκαρισμένοι πελάτες, επιλεγμένη γραμμή και θέση κύλισης επιβιώνουν από το ξαναγέμισμα — ο πίνακας
         # ανανεώνεται πλέον και μόνος του όσο τρέχει η ανάκτηση στοιχείων (αναφορά χρήστη 2026-10-22).
@@ -775,7 +811,8 @@ class MainWindow(QMainWindow):
             if c and c["complete"]:
                 creds_label = {"ok": "Έγκυροι", "invalid": "Πρόβλημα", "error": "Πρόβλημα"}.get(c["check_status"], "Ορισμένοι")
             cells = {
-                _C_AFM: r["afm"], _C_NAME: r["name"] or "—", _C_KIND: r["legal_form"] or "—", _C_STATE: state_label,
+                _C_AFM: r["afm"], _C_NAME: r["name"] or "—", _C_STATE: state_label,
+                _C_KIND: " · ".join(x for x in (r["legal_form"], members_mod.short_role(roles.get(r["afm"], ""))) if x) or "—",
                 _C_KAD: r["kad_main_code"] or "—", _C_BOOKS: r["books_category"] or "—", _C_VAT: vat,
                 _C_LOOKUP: lookup_label, _C_CREDS: creds_label, _C_MATCHES: str(counts.get(r["afm"], 0)),
             }
@@ -806,7 +843,13 @@ class MainWindow(QMainWindow):
                     item.setText(vat + " *")
                     item.setForeground(QColor(CURRENT.accent))
                     item.setToolTip("Μπορεί να επανέλθει στον τριμηνιαίο ΦΠΑ (24 μήνες από την έναρξη, Α.1049/2025) — "
-                                    f"δήλωση επιλογής στο myAADE έως {vat_deadline.strftime('%d/%m/%Y')}")
+                                    f"δήλωση επιλογής στο myAADE έως {vat_deadline.strftime('%d/%m/%Y')} · ο «*» "
+                                    "σβήνει όταν ανοίξετε την καρτέλα του πελάτη")
+                if col == _C_KAD and r["afm"] in parepid_marked:
+                    item.setText(item.text() + " *")
+                    item.setForeground(QColor(CURRENT.accent))
+                    item.setToolTip("ΚΑΔ καταλυμάτων/εστίασης/διασκέδασης — πιθανός υπόχρεος τέλους παρεπιδημούντων / "
+                                    "ακαθαρίστων εσόδων (dae.govapp.gr) · ο «*» σβήνει όταν ανοίξετε την καρτέλα του πελάτη")
                 table.setItem(i, col, item)
             flags = {"creds" if c and c["complete"] else "nocreds"}
             if clients.missing_basics(dict(r)):
@@ -1049,7 +1092,8 @@ class MainWindow(QMainWindow):
         dlg = ChecksDialog(self, scope, incomplete, {a: (rows[a]["name"] if a in rows else a) for a in afms})
         if not dlg.exec():
             return
-        actions = {"lookup": lambda: self._start_lookup(afms), "submissions": self.on_check_submissions,
+        actions = {"lookup": lambda: self._start_lookup(afms),
+                   "submissions": lambda: self.on_check_submissions(want_pdf=dlg.want_pdf),
                    "mydata": self.on_fetch_mydata, "debts": self.on_fetch_debts, "requests": self.on_fetch_requests}
         for key in dlg.chosen:
             actions[key]()
@@ -1058,37 +1102,41 @@ class MainWindow(QMainWindow):
         afms = self._selected_client_afms() or [self.client_table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole) for r in range(self.client_table.rowCount())]
         self._start_lookup(afms)
 
-    def on_check_submissions(self) -> None:
+    def on_check_submissions(self, want_pdf: bool = False) -> None:
         """EasyCheck για τους επιλεγμένους (ή όλους με κωδικούς TAXISnet) — για την τρέχουσα χρήση."""
         with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
         afms = [a for a in (self._selected_client_afms() or sorted(with_creds)) if a in with_creds]
         if not afms:
             toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
             return
-        self.run_submission_checks(afms, [self._fiscal_year])
+        self.run_submission_checks(afms, [self._fiscal_year], want_pdf=want_pdf)
 
     def run_submission_checks(self, afms: list[str], years: list[int], window: Optional[QWidget] = None,
-                              on_done: Optional[Callable[[], None]] = None) -> None:
+                              on_done: Optional[Callable[[], None]] = None, want_pdf: bool = False) -> None:
         """Έλεγχος υποβολών (ΑΑΔΕ) στην ουρά εργασιών: παράλληλα ανά πελάτη, διακοπή μετά τον τρέχοντα, για μία ή
         περισσότερες χρήσεις. Χρησιμοποιείται από Πελάτες, Ημερολόγιο και καρτέλα πελάτη."""
         afms = list(dict.fromkeys(a for a in afms if a))
         total = len(afms)
         names = self._client_names(afms)
         label = ", ".join(str(y) for y in sorted(set(years)))
-        title = f"έλεγχος υποβολών {label} — {total} {'πελάτης' if total == 1 else 'πελάτες'}"
+        title = (f"έλεγχος υποβολών {label}{' με PDF δηλώσεων' if want_pdf else ''} — "
+                 f"{total} {'πελάτης' if total == 1 else 'πελάτες'}")
         state = {"missing": 0, "failed": 0, "done": 0}
+        started = time.monotonic()
 
         def work(report, cancelled):
             def one(conn, afm):
                 result = {"ok": True, "entries": []}
                 for y in years:
-                    r = easycheck.check_client(conn, afm, y)
+                    r = easycheck.check_client(conn, afm, y, want_pdf=want_pdf)
                     result["ok"] = result["ok"] and r.get("ok")
                     result["entries"] += r.get("entries", [])
                     apd = efka.check_apd_entries(conn, afm, y)        # ΑΠΔ e-ΕΦΚΑ + ΤΕΚΑ ανά ΑΜΕ (όχι ΑΑΔΕ)
                     result["entries"] += apd
                     # τέλη σε πύλες εκτός TAXISnet «other»: πλαστικά (Plastic), παρεπιδημούντες (dae.govapp.gr)
                     fees = fee_portals.check_entries(conn, afm, y)
+                    # Intrastat στην ΕΛ.ΣΤΑΤ με τους κωδικούς του ΓΡΑΦΕΙΟΥ (μόνο όσους αφορά: κατώφλια/σημαία)
+                    fees += intrastat_mod.check_entries(conn, afm, y, want_pdf=want_pdf)
                     if fees:
                         easycheck.store_results(conn, afm, y, fees)
                         result["entries"] += fees
@@ -1111,9 +1159,52 @@ class MainWindow(QMainWindow):
                 on_done()
             msg = f"Έλεγχος υποβολών ({state['done']}/{total}): {state['missing']} περίοδοι χωρίς υποβολή"
             msg += f", {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
+            self.offer_handoffs([h for h in handoff.pending(since=started) if h["afm"] in afms], window)
             return msg, "warn" if state["missing"] or state["failed"] else "ok"
 
         self.jobs.submit(title, work, total=total, window=window, on_done=done)
+
+    def ask_submission_pdf(self, parent: QWidget) -> Optional[bool]:
+        """Popup πριν τον έλεγχο υποβολών (ρητό αίτημα 2026-10-27): και PDF των υποβληθεισών δηλώσεων; None = άκυρο."""
+        box = QMessageBox(parent)
+        box.setWindowTitle("Έλεγχος υποβολών")
+        box.setText("Να γίνει λήψη και των PDF των υποβληθεισών δηλώσεων (Φ2, Φ4/Φ5, ΦΜΥ, Intrastat…);")
+        box.setInformativeText("Αποθηκεύονται στον φάκελο δεδομένων (submissions) — μία φορά ανά δήλωση. Χωρίς PDF ο "
+                               "έλεγχος είναι πιο γρήγορος.")
+        with_pdf = box.addButton("Έλεγχος και PDF", QMessageBox.ButtonRole.YesRole)
+        only = box.addButton("Μόνο έλεγχος", QMessageBox.ButtonRole.NoRole)
+        box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(only)
+        box.exec()
+        clicked = box.clickedButton()
+        return True if clicked is with_pdf else (False if clicked is only else None)
+
+    def offer_handoffs(self, items: list[dict], window: Optional[QWidget] = None) -> None:
+        """Έλεγχοι που κόλλησαν ΜΕΤΑ τη σύνδεση: toast με «Συνέχεια στον browser» — ανοίγει Chrome/Edge συνδεδεμένο στο
+        σημείο όπου σταμάτησε η εφαρμογή (handoff.py, ρητό αίτημα 2026-10-27)."""
+        if not items:
+            return
+        names = self._client_names([h["afm"] for h in items])
+        actions = [(f"Συνέχεια στον browser — {names.get(h['afm'], h['afm'])} · {h['label']}",
+                    lambda _c=False, h=h: self.open_handoff(h)) for h in items[:4]]
+        more = f" (και άλλοι {len(items) - 4} — από την καρτέλα κάθε πελάτη)" if len(items) > 4 else ""
+        toast(window or self, f"{len(items)} {'έλεγχος σταμάτησε' if len(items) == 1 else 'έλεγχοι σταμάτησαν'} μετά "
+                              f"τη σύνδεση (π.χ. επιβεβαίωση στοιχείων στον e-ΕΦΚΑ). Συνεχίστε στον browser από το ίδιο "
+                              f"σημείο{more}:", "warn", actions=actions)
+
+    def open_handoff(self, entry: dict) -> None:
+        toast(self, f"Άνοιγμα browser — {entry['label']}…", "info")
+
+        def work(_p):
+            return handoff.open_in_browser(entry)
+
+        def done(res):
+            if res["ok"]:
+                toast(self, "Ο browser άνοιξε στο σημείο του ελέγχου. Αν δείχνει σελίδα σύνδεσης, η συνεδρία έληξε — "
+                            "ξανατρέξτε τον έλεγχο.", "ok")
+            else:
+                toast(self, res["reason"], "danger")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger")))
 
     def on_fetch_debts(self) -> None:
         with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
@@ -1400,6 +1491,7 @@ class MainWindow(QMainWindow):
                                         and self._recent_client_detail_afm == afm):
             return
         self._client_detail_open = True
+        notices_mod.clear_marks(self.conn, afm)            # ο χρήστης είδε τον πελάτη: οι αστερίσκοι του σβήνουν
         try:
             dlg = ClientDetailDialog(self, afm)
             dlg.exec()
@@ -1557,6 +1649,16 @@ class MainWindow(QMainWindow):
         work_head = QHBoxLayout()
         work_head.addWidget(_section_header("Υποχρεώσεις ανά εργασία", "check"))
         work_head.addStretch()
+        # «Υπό προϋποθέσεις» χωριστά (ρητό αίτημα 2026-10-27): προεπιλογή ΜΟΝΟ οι επιβεβαιωμένες — από myDATA, Μητρώο
+        # ΑΑΔΕ, έλεγχο υποβολών ή επιλογές του Προφίλ — όχι οι πιθανές για όλους τους πελάτες
+        self.work_scope = QComboBox()
+        for label, value in (("Επιβεβαιωμένες υποχρεώσεις", "yes"), ("Επιβεβαιωμένες και υπό προϋποθέσεις", "all"),
+                             ("Μόνο υπό προϋποθέσεις", "maybe")):
+            self.work_scope.addItem(label, value)
+        self.work_scope.setToolTip("Επιβεβαιωμένες = προκύπτουν από myDATA, Μητρώο ΑΑΔΕ, έλεγχο υποβολών ή το Προφίλ "
+                                   "του πελάτη · υπό προϋποθέσεις = εξαρτώνται από κάτι που δεν ξέρουμε ακόμη")
+        work_head.addWidget(QLabel("Εμφάνιση"))
+        work_head.addWidget(self.work_scope)
         self.work_month = QComboBox()
         self.work_month.addItem("Όλοι οι μήνες", "")
         for month, name in enumerate(obligations.MONTHS_NOM, 1):
@@ -1572,25 +1674,27 @@ class MainWindow(QMainWindow):
         work_head.addWidget(self.work_year)
         work_root.addLayout(work_head)
 
-        self.work_tabs = QTabWidget()
-        work_root.addWidget(self.work_tabs, 1)
-
-        summary_page = QWidget()
-        summary_root = QVBoxLayout(summary_page)
-        self.work_summary = QLabel("Επιλέξτε υποχρέωση ώστε να δείτε τους υπόχρεους και την κατάσταση εργασιών.")
-        self.work_summary.setWordWrap(True)
-        self.work_summary.setObjectName("muted")
-        summary_root.addWidget(self.work_summary)
+        # Χωρίς καρτέλα «Συνοπτικός Πίνακας» (ρητό αίτημα 2026-10-27) — η σύνοψη μένει μία γραμμή πάνω από τις καρτέλες
         self.work_summary_counts = QLabel("")
         self.work_summary_counts.setObjectName("h2")
-        summary_root.addWidget(self.work_summary_counts)
-        summary_root.addStretch()
-        self.work_tabs.addTab(summary_page, "Συνοπτικός Πίνακας")
+        work_root.addWidget(self.work_summary_counts)
+        self.work_summary = QLabel("")
+        self.work_summary.setWordWrap(True)
+        self.work_summary.setObjectName("muted")
+        work_root.addWidget(self.work_summary)
+        self.work_tabs = QTabWidget()
+        work_root.addWidget(self.work_tabs, 1)
 
         tasks_page = QWidget()
         tasks_root = QVBoxLayout(tasks_page)
         tasks_scroll = QScrollArea()
         tasks_scroll.setWidgetResizable(True)
+        tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Οι κάρτες ξαναστοιχίζονται με το πλάτος του παραθύρου (1–6 στήλες) αντί για σταθερές 4 (ρητό αίτημα 2026-10-27)
+        self._work_scroll = tasks_scroll
+        self._work_cols = 4
+        self._work_cards: list[dict] = []
+        tasks_scroll.viewport().installEventFilter(self)
         tasks_content = QWidget()
         tasks_content_layout = QVBoxLayout(tasks_content)
         self.work_pending_title = QLabel("Εκκρεμείς")
@@ -1669,6 +1773,7 @@ class MainWindow(QMainWindow):
         self._selected_work_group: Optional[tuple[str, str]] = None
         self._work_items: list[dict] = []
         self.work_month.currentIndexChanged.connect(self._reload_work_items)
+        self.work_scope.currentIndexChanged.connect(self._reload_work_items)
         self.work_year.valueChanged.connect(self._reload_work_items)
         self.calendar_tabs.addTab(work_page, "Ανά εργασία")
         self.calendar_tabs.currentChanged.connect(lambda index: self._reload_work_items() if index == 1 else None)
@@ -1738,6 +1843,9 @@ class MainWindow(QMainWindow):
         rows = deadlines.work_items(self.conn, year)
         if month:
             rows = [r for r in rows if date.fromisoformat(r["date"]).month == month]
+        scope = self.work_scope.currentData()
+        if scope != "all":
+            rows = [r for r in rows if r["status"] == scope]
         self._work_items = rows
         groups: dict[tuple[str, str], list[dict]] = {}
         for row in rows:
@@ -1753,8 +1861,8 @@ class MainWindow(QMainWindow):
                           "completed": completed, "pending": pending, "conditional": conditional,
                           "is_complete": bool(required) and pending == 0})
         cards.sort(key=lambda card: (card["date"], card["title"]))
-        self._render_work_cards([card for card in cards if not card["is_complete"]], self.work_pending_grid)
-        self._render_work_cards([card for card in cards if card["is_complete"]], self.work_completed_grid)
+        self._work_cards = cards
+        self._layout_work_cards()
         self.work_pending_title.setText(f"Εκκρεμείς ({sum(card['pending'] for card in cards)})")
         open_count = sum(not card["is_complete"] for card in cards)
         done_count = sum(card["is_complete"] for card in cards)
@@ -1800,18 +1908,37 @@ class MainWindow(QMainWindow):
         self.work_table.blockSignals(False)
         self._update_work_actions()
 
+    def eventFilter(self, obj, event) -> bool:              # noqa: N802 — Qt API
+        if (event.type() == QEvent.Type.Resize and hasattr(self, "_work_scroll")
+                and obj is self._work_scroll.viewport() and self._work_columns() != self._work_cols):
+            self._layout_work_cards()
+        return super().eventFilter(obj, event)
+
+    _WORK_CARD_MIN = 240                                     # ελάχιστο πλάτος κάρτας εργασίας (px)
+
+    def _work_columns(self) -> int:
+        width = self._work_scroll.viewport().width() if hasattr(self, "_work_scroll") else 1000
+        return max(1, min(6, (width - 24) // self._WORK_CARD_MIN))
+
+    def _layout_work_cards(self) -> None:
+        self._work_cols = self._work_columns()
+        self._render_work_cards([c for c in self._work_cards if not c["is_complete"]], self.work_pending_grid)
+        self._render_work_cards([c for c in self._work_cards if c["is_complete"]], self.work_completed_grid)
+
     def _render_work_cards(self, cards: list[dict], grid: QGridLayout) -> None:
+        cols = self._work_cols
         while grid.count():
             item = grid.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()                               # όχι «φάντασμα» ώσπου να σβηστεί
                 widget.deleteLater()
-        for column in range(4):
-            grid.setColumnStretch(column, 1)
+        for column in range(6):
+            grid.setColumnStretch(column, 1 if column < cols else 0)
         if not cards:
             empty = QLabel("Δεν υπάρχουν εργασίες σε αυτή την ενότητα.")
             empty.setObjectName("muted")
-            grid.addWidget(empty, 0, 0, 1, 4)
+            grid.addWidget(empty, 0, 0, 1, cols)
             return
         for index, card in enumerate(cards):
             if card["is_complete"]:
@@ -1822,19 +1949,18 @@ class MainWindow(QMainWindow):
                 colour = CURRENT.warn if card["conditional"] else CURRENT.bad
             if card["conditional"]:
                 state += f" · υπό προϋποθέσεις {card['conditional']}"
-            text = (f"{card['title']}\n{date.fromisoformat(card['date']).strftime('%d/%m/%Y')}\n{state}")
-            button = QPushButton(text)
-            button.setMinimumHeight(78)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            button.setToolTip(f"{card['category']} · κλικ: εμφάνιση υπόχρεων")
-            button.setStyleSheet(f"color:{colour}; font-weight:600;")
-            button.clicked.connect(lambda _checked=False, key=card["key"]: self._select_work_group(key))
-            grid.addWidget(button, index // 4, index % 4)
+            # Κάρτα με ΑΝΑΔΙΠΛΩΣΗ κειμένου: ένα QPushButton επιβάλλει πλάτος = μήκος τίτλου και «σπρώχνει» το παράθυρο
+            # (οριζόντια κύλιση σε στενό παράθυρο — αναφορά χρήστη 2026-10-27)
+            card_w = _WorkCard(f"<b>{html.escape(card['title'])}</b><br>"
+                               f"{date.fromisoformat(card['date']).strftime('%d/%m/%Y')}<br>{html.escape(state)}", colour)
+            card_w.setToolTip(f"{card['category']} · κλικ: εμφάνιση υπόχρεων")
+            card_w.clicked.connect(lambda key=card["key"]: self._select_work_group(key))
+            grid.addWidget(card_w, index // cols, index % cols)
 
     def _select_work_group(self, key: tuple[str, str]) -> None:
         self._selected_work_group = key
         self._reload_work_items()
-        self.work_tabs.setCurrentIndex(2)
+        self.work_tabs.setCurrentIndex(1)
 
     @staticmethod
     def _work_key(row: dict) -> tuple:
@@ -1869,9 +1995,15 @@ class MainWindow(QMainWindow):
         t.blockSignals(False)
         self._update_work_actions()
 
-    @staticmethod
-    def _has_auto_check(data: dict) -> bool:
-        return bool(obligations.rule_checks(data["rule_id"], None, data["ref_month"]))
+    def _auto_checked(self, rule_id: str, ref_month: str) -> bool:
+        """Υπάρχει αυτόματος έλεγχος υποβολής; Intrastat μόνο αν έχουν οριστεί οι κωδικοί ΕΛ.ΣΤΑΤ του γραφείου —
+        αλλιώς μένει το χειροκίνητο «Ολοκληρώθηκε»."""
+        if rule_id == "intrastat" and not intrastat_mod.credentials(self.conn):
+            return False
+        return bool(obligations.rule_checks(rule_id, None, ref_month))
+
+    def _has_auto_check(self, data: dict) -> bool:
+        return self._auto_checked(data["rule_id"], data["ref_month"])
 
     def _toggle_work_done(self) -> None:
         rows = self._checked_work_rows()
@@ -1924,7 +2056,10 @@ class MainWindow(QMainWindow):
             return
         if missing:
             toast(self, f"{missing} εργασίες παραλείφθηκαν — λείπουν οι κωδικοί TAXISnet του πελάτη.", "warn")
-        self.run_submission_checks(afms, sorted(years), window=self, on_done=self._reload_work_items)
+        want_pdf = self.ask_submission_pdf(self)
+        if want_pdf is None:
+            return
+        self.run_submission_checks(afms, sorted(years), window=self, on_done=self._reload_work_items, want_pdf=want_pdf)
 
     def _calendar_legend(self) -> QWidget:
         """Οριζόντιο υπόμνημα χρωμάτων κάτω από το μηνιαίο ημερολόγιο (ρητό αίτημα χρήστη 2026-10-23)."""
@@ -2092,7 +2227,7 @@ class MainWindow(QMainWindow):
     def _update_cal_action_buttons(self, item: Optional[QListWidgetItem]) -> None:
         row = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
         rule_id, ref_month = (row.get("rule_id"), row.get("ref_month")) if row else (None, "")
-        has_check = bool(rule_id and obligations.rule_checks(rule_id, None, ref_month))
+        has_check = bool(rule_id and self._auto_checked(rule_id, ref_month))
         self.cal_check_btn.setVisible(has_check and not (row or {}).get("maybe"))
         self.cal_done_btn.setVisible(bool(rule_id) and not has_check and not (row or {}).get("maybe"))
 
@@ -2106,7 +2241,7 @@ class MainWindow(QMainWindow):
 
     def _check_cal_event(self) -> None:
         rows = [r for r in self._cal_event_rows() if not r.get("maybe")
-            and obligations.rule_checks(r["rule_id"], None, r["ref_month"])]
+            and self._auto_checked(r["rule_id"], r["ref_month"])]
         if not rows:
             toast(self, "Επιλέξτε μια προθεσμία με υπόχρεους πελάτες.", "warn")
             return
@@ -2124,7 +2259,7 @@ class MainWindow(QMainWindow):
         if not r or not r.get("rule_id"):
             toast(self, "Επιλέξτε πρώτα έναν πελάτη μιας προθεσμίας.", "warn")
             return
-        if obligations.rule_checks(r["rule_id"], None, r["ref_month"]):
+        if self._auto_checked(r["rule_id"], r["ref_month"]):
             toast(self, "Για αυτή την προθεσμία υπάρχει αυτόματος έλεγχος υποβολής.", "info")
             return
         done = (r.get("submission") or {}).get("status") != "done"
@@ -2270,6 +2405,9 @@ class MainWindow(QMainWindow):
         for key, label, echo in (("groq_api_key", "Groq API key", True), ("openrouter_api_key", "OpenRouter API key", True),
                                  ("business_portal_key", "Business Portal (ΓΕΜΗ) API key", True),
                                  ("aade_user", "TAXISnet χρήστης γραφείου", False), ("aade_pass", "TAXISnet κωδικός γραφείου", True),
+                                 # ΕΛ.ΣΤΑΤ Intrastat: ένας λογαριασμός του γραφείου — έλεγχος υποβολής ανά πελάτη
+                                 ("intrastat_user", "Intrastat ΕΛ.ΣΤΑΤ — email γραφείου", False),
+                                 ("intrastat_pass", "Intrastat ΕΛ.ΣΤΑΤ — κωδικός γραφείου", True),
                                  # ειδικοί κωδικοί «Αναζήτηση Βασικών Στοιχείων Μητρώου» — ατομική επιχείρηση μελών εταιρειών
                                  ("rg_user", "Ειδικοί κωδικοί Μητρώου — χρήστης", False),
                                  ("rg_pass", "Ειδικοί κωδικοί Μητρώου — κωδικός", True)):
@@ -2378,12 +2516,6 @@ class MainWindow(QMainWindow):
         self.fetch_members.toggled.connect(
             lambda on: settings_store.set_value(self.conn, "fetch_members", "1" if on else "0"))
         sf2.addWidget(self.fetch_members)
-        self.vat_mark_keep = QCheckBox("Μόνιμος αστερίσκος ΦΠΑ")
-        self.vat_mark_keep.setToolTip("Ο αστερίσκος «*» στη στήλη ΦΠΑ για όσους μπορούν να επανέλθουν στον τριμηνιαίο μένει "
-                                      "και μετά το «Αναγνώστηκε» και την επανεκκίνηση (αλλιώς σβήνει με την επανεκκίνηση)")
-        self.vat_mark_keep.toggled.connect(
-            lambda on: (settings_store.set_value(self.conn, "vat_option_mark_keep", "1" if on else "0"), self.reload_clients()))
-        sf2.addWidget(self.vat_mark_keep)
         sf2.addStretch()
         root.addWidget(sched_box)
         self.email_box = EmailSettingsBox(self.conn, self)
@@ -2438,8 +2570,7 @@ class MainWindow(QMainWindow):
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
         for box, key, on_default in ((self.sched_mydata, "daily_mydata", True), (self.sched_requests, "daily_requests", False),
-                                     (self.fetch_members, "fetch_members", False),
-                                     (self.vat_mark_keep, "vat_option_mark_keep", False)):
+                                     (self.fetch_members, "fetch_members", False)):
             box.blockSignals(True)
             box.setChecked(settings_store.get(self.conn, key) == "1" or (on_default and settings_store.get(self.conn, key) != "0"))
             box.blockSignals(False)

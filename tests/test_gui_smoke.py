@@ -968,7 +968,37 @@ def test_progress_toast_shows_percent_and_finishes(window, qapp):
     item = window._toast_host.layout().itemAt(0).widget()
     assert item.bar.maximum() == 4 and item.bar.value() == 1 and "ΑΛΦΑ" in item.label.text()
     bar.finish("Ολοκληρώθηκε", "ok")
-    assert item.bar.isHidden() and item.label.text() == "Ολοκληρώθηκε" and hasattr(item, "_timer")
+    assert item.bar.isHidden() and item.label.text().startswith("Ολοκληρώθηκε") and hasattr(item, "_timer")
+    assert "⏱" in item.label.text()                                    # πόσο κράτησε
+
+
+def test_toast_and_progress_from_closed_dialog_go_to_main_window(window, qapp):
+    """Εργασία που ξεκίνησε σε διάλογο συνεχίζει όταν αυτός κλείσει — τα μηνύματά της στο κύριο παράθυρο, με
+    επικεφαλίδα ποιον αφορά (ρητό αίτημα 2026-10-27)."""
+    from PySide6.QtWidgets import QDialog, QWidget
+    from taxmatch.gui.toast import ProgressToast, toast
+    window.show()
+    window._toast_host = None
+    dlg = QDialog(window)
+    dlg.toast_context = "ΑΛΦΑ ΙΚΕ · 094014201"
+    tab = QWidget(dlg)
+    dlg.show()
+    qapp.processEvents()
+    bar = ProgressToast(tab, "Λήψη myDATA…")
+    toast(tab, "μέσα στον διάλογο", "info")
+    assert dlg._toast_host.isVisible() if hasattr(dlg, "_toast_host") else tab._toast_host is not None
+    dlg.hide()
+    qapp.processEvents()
+    qapp.processEvents()
+    host = window._toast_host
+    assert host is not None
+    items = [host.layout().itemAt(i).widget() for i in range(host.layout().count())]
+    assert any(i.title.text() == "ΑΛΦΑ ΙΚΕ · 094014201" and "Λήψη myDATA" in i.label.text() for i in items)
+    toast(tab, "Ολοκληρώθηκε η λήψη", "ok")                              # ο διάλογος έκλεισε: πάει στο κύριο
+    items = [host.layout().itemAt(i).widget() for i in range(host.layout().count())]
+    assert any(i.label.text() == "Ολοκληρώθηκε η λήψη" and i.title.text().startswith("ΑΛΦΑ ΙΚΕ") for i in items)
+    bar.finish("Τέλος", "ok")
+    dlg.deleteLater()
 
 
 def test_reload_clients_keeps_checked_rows_for_live_refresh(window, conn):
@@ -1077,7 +1107,7 @@ def test_calendar_work_tab_uses_submission_check_for_apd(window, conn):
     window.reload_calendar()
     window.calendar_tabs.setCurrentIndex(1)
     assert [window.work_tabs.tabText(i) for i in range(window.work_tabs.count())] == [
-        "Συνοπτικός Πίνακας", "Εργασίες", "Εργασίες / Υπόχρεοι"]
+        "Εργασίες", "Εργασίες / Υπόχρεοι"]
     window.work_month.setCurrentIndex(0)
     row = next(i for i in range(window.work_table.rowCount())
                if window.work_table.item(i, 3).text() == "Μισθοδοσία"
@@ -1087,7 +1117,7 @@ def test_calendar_work_tab_uses_submission_check_for_apd(window, conn):
     header = window.work_table.horizontalHeader()
     assert all(header.sectionResizeMode(column).name == "Interactive"
                for column in range(window.work_table.columnCount()))
-    window.work_tabs.setCurrentIndex(2)
+    window.work_tabs.setCurrentIndex(1)
     window.work_table.setCurrentCell(row, 0)
     window._update_work_actions()
     selected = window.work_table.item(window.work_table.currentRow(), 0).data(Qt.ItemDataRole.UserRole)
@@ -1333,15 +1363,15 @@ def test_vat_notice_filters_clients_and_read_keeps_asterisk_until_restart(window
         return next(tt.item(r, _C_VAT).text() for r in range(tt.rowCount()) if tt.item(r, _C_AFM).text() == afm)
     assert vat_of(window, AFM).endswith("*")
     window._dismiss_notice("vat_quarter")                                    # noqa: SLF001
-    assert vat_of(window, AFM).endswith("*")                                 # ίδια συνεδρία: μένει
+    assert vat_of(window, AFM).endswith("*")                                 # αναγνωσμένη: ο «*» μένει
     window._clear_client_filters()                                           # noqa: SLF001
     assert sum(not t.isRowHidden(r) for r in range(t.rowCount())) == 2
-    again = MainWindow()                                                     # «επανεκκίνηση»
-    assert not vat_of(again, AFM).endswith("*")
-    from taxmatch import settings_store
-    settings_store.set_value(conn, "vat_option_mark_keep", "1")
-    again.reload_clients()
+    again = MainWindow()                                                     # «επανεκκίνηση»: μένει
     assert vat_of(again, AFM).endswith("*")
+    from taxmatch import notices as notices_mod
+    notices_mod.clear_marks(conn, AFM)                                       # άνοιξε η καρτέλα του πελάτη
+    again.reload_clients()
+    assert not vat_of(again, AFM).endswith("*")
     again.close()
     again.deleteLater()
 
@@ -1482,3 +1512,28 @@ def test_no_stray_top_level_windows_on_startup_or_client_card(qapp, conn):
         win.close()
     finally:
         qapp.removeEventFilter(spy)
+
+
+def test_online_only_dialog_files_pdf_from_download_folder(window, conn, tmp_path, monkeypatch):
+    """«Μόνο online» όπως το timologio: άνοιγμα στον browser → το PDF που αποθηκεύει ο χρήστης στον φάκελο λήψεων
+    αρχειοθετείται μόνο του και σημειώνεται «PDF» στη βάση (ρητό αίτημα 2026-10-27)."""
+    from taxmatch.gui import online_only
+    service.add(conn, AFM, "ΑΛΦΑ")
+    conn.execute("INSERT INTO mydata_docs(afm, mark, direction, issue_date, invoice_type, series, aa, issuer_vat, "
+                 "issuer_name, counter_vat, counter_name, net, vat, total, url, pdf_status, fetched_at) VALUES "
+                 "(?, '400001', 'incoming', '2026-08-10', '1.1', 'Α', '7', '123456783', 'ΠΡΟΜΗΘΕΥΤΗΣ', ?, 'ΑΛΦΑ', "
+                 "10, 2.4, 12.4, 'https://www.eskap.gr/invoice.php?authentication_code=abc', 'viewer', '')", (AFM, AFM))
+    settings_store.set_value(conn, "online_download_dir", str(tmp_path))
+    opened = []
+    monkeypatch.setattr(online_only.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    docs = [dict(r) for r in conn.execute("SELECT * FROM mydata_docs WHERE afm=?", (AFM,))]
+    dlg = online_only.OnlineOnlyDialog(conn, AFM, docs, window)
+    dlg._open_next()                                                       # noqa: SLF001
+    assert opened == ["https://www.eskap.gr/invoice_print.php?authentication_code=abc"]
+    (tmp_path / "invoice.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 200)
+    dlg._scan()                                                            # noqa: SLF001 — 1ο: σταθερότητα μεγέθους
+    dlg._scan()                                                            # noqa: SLF001 — 2ο: αρχειοθέτηση
+    row = conn.execute("SELECT pdf_status, pdf_path FROM mydata_docs WHERE afm=? AND mark='400001'", (AFM,)).fetchone()
+    assert row["pdf_status"] == "ok" and Path(row["pdf_path"]).read_bytes().startswith(b"%PDF")
+    assert not (tmp_path / "invoice.pdf").exists() and dlg.changed           # το διπλότυπο σβήστηκε
+    dlg.deleteLater()

@@ -34,8 +34,15 @@ DECLARATION = {"3": ("ΦΜΥ_ΕΠΙΧ", "Δήλωση παρακράτησης �
                "2": ("ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "Δήλωση παρακράτησης φόρου δικαιωμάτων")}
 
 GOODS_OUT, SERVICES_OUT, GOODS_IN, SERVICES_IN = "1.2", "2.2", "14.1", "14.3"
-#: Κατώφλια Intrastat ανά έτος (αφίξεις, αποστολές) — ΕΛΣΤΑΤ. 2026: 250.000 / 90.000 (από τον χρήστη, 2026-10-22).
-INTRASTAT_THRESHOLDS: dict[int, tuple[float, float]] = {2026: (250_000.0, 90_000.0)}
+#: Κατώφλια Intrastat ανά έτος (αφίξεις, αποστολές) — ανακοινώσεις ΕΛΣΤΑΤ στο eurostat.statistics.gr («Κατώφλια 2025»
+#: 24/01/2025, «Κατώφλια 2026» 30/01/2026). Νέο έτος = νέα ανακοίνωση (Ιανουάριος)· μέχρι τότε ισχύει το τελευταίο γνωστό.
+INTRASTAT_THRESHOLDS: dict[int, tuple[float, float]] = {2025: (200_000.0, 90_000.0), 2026: (250_000.0, 90_000.0)}
+#: Κράτη μέλη ΕΕ (εκτός Ελλάδας) — για τις εξ αποστάσεως πωλήσεις αγαθών σε ιδιώτες (B2C), που ΜΕΤΡΟΥΝ στις αποστολές
+#: Intrastat κατά την ανακοίνωση 2026 της ΕΛΣΤΑΤ.
+EU_COUNTRIES = ("AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU",
+                "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK", "XI")
+#: Παραστατικά πώλησης ΑΓΑΘΩΝ σε ιδιώτη/χωρίς ΑΦΜ ΕΕ: 1.1 τιμολόγιο πώλησης, 11.1 ΑΛΠ.
+B2C_GOODS = ("1.1", "11.1")
 
 
 def thresholds(year: int) -> tuple[float, float]:
@@ -82,11 +89,16 @@ def withholding(conn: sqlite3.Connection, afm: str, ym: str) -> list[dict[str, A
 
 def ic_flows(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, float]:
     """Ενδοκοινοτικές ροές του μήνα (καθαρή αξία): goods_out (1.2), services_out (2.2), goods_in (14.1), services_in (14.3)."""
-    out = {"goods_out": 0.0, "services_out": 0.0, "goods_in": 0.0, "services_in": 0.0}
+    out = {"goods_out": 0.0, "services_out": 0.0, "goods_in": 0.0, "services_in": 0.0, "goods_out_b2c": 0.0}
     key = {GOODS_OUT: "goods_out", SERVICES_OUT: "services_out", GOODS_IN: "goods_in", SERVICES_IN: "services_in"}
     for r in conn.execute("SELECT invoice_type, net FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
                           "substr(issue_date,1,7)=? AND invoice_type IN (?,?,?,?)", (afm, ym, *key)):
         out[key[r["invoice_type"]]] = round(out[key[r["invoice_type"]]] + r["net"], 2)
+    # εξ αποστάσεως πωλήσεις αγαθών σε ιδιώτες άλλου κράτους μέλους (αντισυμβαλλόμενος ΕΕ χωρίς τύπο 1.2)
+    for r in conn.execute(f"SELECT net FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 AND "
+                          f"substr(issue_date,1,7)=? AND invoice_type IN ({','.join('?' * len(B2C_GOODS))}) AND "
+                          f"counter_country IN ({','.join('?' * len(EU_COUNTRIES))})", (afm, ym, *B2C_GOODS, *EU_COUNTRIES)):
+        out["goods_out_b2c"] = round(out["goods_out_b2c"] + r["net"], 2)
     return out
 
 
@@ -94,30 +106,39 @@ def vies(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[str]]
     synced = synced if synced is not None else synced_months(conn, afm).get(afm, set())
     if ym not in synced:
         return None
-    return any(v for v in ic_flows(conn, afm, ym).values())
+    return any(v for k, v in ic_flows(conn, afm, ym).items() if k != "goods_out_b2c")   # B2C δεν είναι VIES
 
 
-def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[str]] = None) -> dict[str, Any]:
-    """{'arrivals': True/False/None, 'dispatches': …, 'any': …, 'reason': …} για τον μήνα αναφοράς `ym`."""
+def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[str]] = None,
+              cache: Optional[dict[str, dict[str, float]]] = None) -> dict[str, Any]:
+    """{'arrivals': True/False/None, 'dispatches': …, 'any': …, 'reason': …} για τον μήνα αναφοράς `ym`. `cache`:
+    μήνας → ic_flows, κοινό ανάμεσα σε κλήσεις (το `month_flags` ρωτά κάθε μήνα και θα ξαναδιάβαζε 24 μήνες κάθε φορά)."""
+    cache = cache if cache is not None else {}
     synced = synced if synced is not None else synced_months(conn, afm).get(afm, set())
     year, month = int(ym[:4]), int(ym[5:7])
     thr_in, thr_out = thresholds(year)
-    prev_in, prev_out = thresholds(year - 1)
     prev_months = [f"{year - 1}-{m:02d}" for m in range(1, 13)]
     cur_months = [f"{year}-{m:02d}" for m in range(1, month + 1)]
 
-    def total(months: list[str], flow: str) -> float:
-        return sum(ic_flows(conn, afm, m)[flow] for m in months if m in synced)
+    def total(months: list[str], flows: tuple[str, ...]) -> float:
+        for m in months:
+            if m in synced and m not in cache:
+                cache[m] = ic_flows(conn, afm, m)
+        return sum(sum(cache[m][f] for f in flows) for m in months if m in synced)
 
     result: dict[str, Any] = {}
     reasons = []
-    for name, flow, thr_now, thr_prev, label in (("arrivals", "goods_in", thr_in, prev_in, "αφίξεις"),
-                                                  ("dispatches", "goods_out", thr_out, prev_out, "αποστολές")):
-        prev_total = total(prev_months, flow)
-        cum = total(cur_months, flow)
-        if prev_total > thr_prev:
+    # ΕΛΣΤΑΤ (ανακοίνωση «Κατώφλια 2026»): κάθε ροή χωριστά· (Α) το ΠΡΟΗΓΟΥΜΕΝΟ έτος συγκρίνεται με το κατώφλι του
+    # ΤΡΕΧΟΝΤΟΣ έτους αναφοράς· (Β) αλλιώς από τον μήνα που το σωρευτικό του τρέχοντος έτους το ξεπερνά, μηνιαία ως το
+    # τέλος του έτους. Στις αποστολές μετρούν και οι εξ αποστάσεως πωλήσεις σε ιδιώτες (B2C).
+    for name, flows, thr_now, label in (("arrivals", ("goods_in",), thr_in, "αφίξεις"),
+                                        ("dispatches", ("goods_out", "goods_out_b2c"), thr_out, "αποστολές")):
+        prev_total = total(prev_months, flows)
+        cum = total(cur_months, flows)
+        result[name + "_total"] = cum
+        if prev_total > thr_now:
             result[name] = True
-            reasons.append(f"{label} {year - 1}: {prev_total:,.0f} € > {thr_prev:,.0f} €")
+            reasons.append(f"{label} {year - 1}: {prev_total:,.0f} € > κατώφλι {year} {thr_now:,.0f} €")
         elif cum > thr_now:
             result[name] = True
             reasons.append(f"{label} {year} σωρευτικά: {cum:,.0f} € > {thr_now:,.0f} €")
@@ -128,6 +149,8 @@ def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[
     vals = [result["arrivals"], result["dispatches"]]
     result["any"] = True if True in vals else (False if vals == [False, False] else None)
     result["reason"] = "; ".join(reasons)
+    result["flows_label"] = " και ".join(lbl for key, lbl in (("arrivals", "αφίξεις"), ("dispatches", "αποστολές"))
+                                         if result[key])
     return result
 
 
@@ -249,16 +272,19 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
     (για το Ημερολόγιο)."""
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for afm, months in synced_months(conn).items():
+        cache: dict[str, dict[str, float]] = {}
         for ym in months:
             fees = special_fees(conn, afm, ym)
             extra = fee_totals(conn, afm, ym)
-            flows = ic_flows(conn, afm, ym)
+            flows = cache.get(ym) or ic_flows(conn, afm, ym)
+            intra = intrastat(conn, afm, ym, months, cache)
             out.setdefault(afm, {})[ym] = {
-                "vies": any(flows.values()),
+                "vies": any(v for k, v in flows.items() if k != "goods_out_b2c"),
                 # Φ4 = παραδόσεις/παροχές (1.2, 2.2) · Φ5 = αποκτήσεις/λήψεις (14.1, 14.3)
                 "vies_out": bool(flows["goods_out"] or flows["services_out"]),
                 "vies_in": bool(flows["goods_in"] or flows["services_in"]),
-                "intrastat": intrastat(conn, afm, ym, months)["any"],
+                "intrastat": intra["any"],
+                "intrastat_reason": intra["reason"], "intrastat_flows": intra["flows_label"],
                 "withholding": bool(withholding(conn, afm, ym)),
                 "climate": fees["climate_docs"] > 0 or extra["stay"] > 0,
                 "digital_fee": fees["digital_fee"] > 0,

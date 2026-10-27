@@ -317,6 +317,7 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int,
         return []
     out = []
     if "ΠΛΑΣΤΙΚΑ" in keys:
+        login: Optional[dict[str, Any]] = None
         try:
             login = aade_login(*creds)
             if not login.get("ok"):
@@ -326,9 +327,13 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int,
             out.append(plastics_entry(login["http"], afm, year, liable=quarters))
         except Exception as exc:                        # noqa: BLE001 — δίκτυο / αλλαγή εφαρμογής
             log.warning("plastic %s/%s: %s", afm, year, exc)
+            if login and login.get("ok"):
+                from . import handoff
+                handoff.remember("Εισφορά πλαστικών (Plastic)", afm, login["http"], PLASTIC)
             out.append({"obligation": "ΠΛΑΣΤΙΚΑ", "label": "Εισφορά πλαστικών προϊόντων", "status": "error",
                         "periods": [], "detail": f"Ο έλεγχος δεν ολοκληρώθηκε ({str(exc)[:120]})."})
     if "ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ" in keys:
+        login = None
         try:
             http = http_factory()
             login = dae_login(http, *creds)
@@ -337,6 +342,9 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int,
             out.append(parepid_entry(http, year))
         except Exception as exc:                        # noqa: BLE001
             log.warning("dae %s/%s: %s", afm, year, exc)
+            if login and login.get("ok"):
+                from . import handoff
+                handoff.remember("Τέλος παρεπιδημούντων (dae.govapp.gr)", afm, http)
             out.append({"obligation": "ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ", "label": "Τέλος παρεπιδημούντων", "status": "error",
                         "periods": [], "detail": f"Ο έλεγχος δεν ολοκληρώθηκε ({str(exc)[:120]})."})
     return out

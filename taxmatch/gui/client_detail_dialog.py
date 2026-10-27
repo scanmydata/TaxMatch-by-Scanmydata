@@ -5,11 +5,13 @@ import html
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QSize, Qt
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QWidget,
 )
 
@@ -32,12 +34,21 @@ from .office_widgets import ClientFeesWidget
 from .theme import CURRENT
 from .toast import toast
 from .table_kit import SortItem, TableKit, interactive
-from .widgets import due_badge, kind_colour
+from .widgets import due_badge, fit_to_screen, kind_colour
 from .workers import run_task
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
 
+
+
+def _scrolled(page: QWidget) -> QScrollArea:
+    """Μεγάλη φόρμα σε κύλιση — αλλιώς το ελάχιστο ύψος της επιβάλλει διάλογο ψηλότερο από την οθόνη."""
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setWidget(page)
+    return area
 
 class ClientDetailDialog(QDialog):
     def __init__(self, main: "MainWindow", afm: str) -> None:
@@ -47,7 +58,7 @@ class ClientDetailDialog(QDialog):
         self.afm = afm
         b = clients.get(self.conn, afm)
         self.setWindowTitle("Καρτέλα πελάτη")
-        self.resize(1180, 760)                               # 7 καρτέλες: σε 720px εμφανίζονταν βέλη κύλισης
+        fit_to_screen(self, 1180, 760)                       # χωρά πάντα στην οθόνη (μικρά laptop / κλίμακα 125–150%)
         self._tasks: list = []
         self._detail_tab_factories: dict[int, tuple[str, Any]] = {}
         self._detail_tab_indices: dict[str, int] = {}
@@ -79,8 +90,8 @@ class ClientDetailDialog(QDialog):
         self.detail_tabs = tabs
         tabs.setIconSize(QSize(16, 16))
         root.addWidget(tabs, 1)
-        tabs.addTab(self._profile_tab(), icon("edit", CURRENT.muted, 16), "Προφίλ")
-        tabs.addTab(self._credentials_tab(), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet && e-ΕΦΚΑ")
+        tabs.addTab(_scrolled(self._profile_tab()), icon("edit", CURRENT.muted, 16), "Προφίλ")
+        tabs.addTab(_scrolled(self._credentials_tab()), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet && e-ΕΦΚΑ")
         tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προθεσμίες && υποβολές")
         news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
         tabs.addTab(self._aml_tab(), icon("aml", CURRENT.muted, 16), "Δέουσα επιμέλεια")
@@ -136,6 +147,19 @@ class ClientDetailDialog(QDialog):
         widget = factory()
         setattr(self, name, widget)
         layout.addWidget(widget)
+
+    def _apply_private_layout(self, b: dict) -> None:
+        """Ιδιώτης (ή μέλος χωρίς ενεργή επιχείρηση): χωρίς τμήμα εργοδότη, χωρίς καρτέλες myDATA και «Μέλη» — δεν
+        αφορούν φυσικό πρόσωπο χωρίς επιχείρηση (ρητό αίτημα 2026-10-27). Μένει ο ΑΜΚΑ (ΚΕΑΟ / εισφορές e-ΕΦΚΑ)."""
+        private = obligations.is_private_person(b)
+        self.is_private = private
+        for row in self._employer_rows:
+            self._cred_form.setRowVisible(row, not private)
+        self.fetch_ame_btn.setVisible(not private)
+        for name in ("mydata", "members_tab"):
+            index = self._detail_tab_indices.get(name)
+            if index is not None:
+                self.detail_tabs.setTabVisible(index, not private)
 
     def refresh_member_shortcut(self) -> None:
         row = self.conn.execute("SELECT legal_form FROM businesses WHERE afm=?", (self.afm,)).fetchone()
@@ -218,6 +242,13 @@ class ClientDetailDialog(QDialog):
         for label, value in (("— άγνωστο —", ""), ("Ναι — απασχολεί προσωπικό (ΑΠΔ, Ε4)", "1"), ("Όχι", "0")):
             self.f_employer.addItem(label, value)
         form.addRow("Εργοδότης", self.f_employer)
+        # ΑΠΔ ΤΕΚΑ: μόνο με ρητή επιλογή, και μόνο όταν υπάρχει μισθοδοσία (ρητό αίτημα χρήστη 2026-10-27)
+        self.f_teka = QCheckBox("Υποβάλλει ΑΠΔ ΤΕΚΑ (επικουρική ασφάλιση εργαζομένων) — υποχρέωση και έλεγχος υποβολής")
+        self.f_teka.setToolTip("Ενεργό μόνο για εργοδότες. Χωρίς την επιλογή δεν δημιουργείται υποχρέωση ΑΠΔ ΤΕΚΑ "
+                               "ούτε γίνεται έλεγχος στο e-ΕΦΚΑ.")
+        form.addRow("", self.f_teka)
+        self.f_employer.currentIndexChanged.connect(
+            lambda _i: self.f_teka.setEnabled(self.f_employer.currentData() == "1"))
         self.f_intrastat = QComboBox()
         for label, value in (("— άγνωστο —", ""), ("Ναι — υποβάλλει Intrastat", "1"), ("Όχι", "0")):
             self.f_intrastat.addItem(label, value)
@@ -248,6 +279,7 @@ class ClientDetailDialog(QDialog):
         for w in (self.f_kads, self.f_notes):
             w.textChanged.connect(self._profile_changed)
         self.f_email_auto.toggled.connect(self._profile_changed)
+        self.f_teka.toggled.connect(self._profile_changed)
         return page
 
     def _profile_state(self) -> tuple:
@@ -255,7 +287,8 @@ class ClientDetailDialog(QDialog):
                 self.f_address.text(), self.f_email.text(), self.f_email_assistant.text(), self.f_mobile.text(),
                 self.f_phone.text(), self.f_status.text(), self.f_books.currentIndex(), self.f_vat.currentIndex(),
                 self.f_vat_period.currentIndex(), self.f_employer.currentIndex(), self.f_intrastat.currentIndex(),
-                self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked())
+                self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked(),
+                self.f_teka.isChecked())
 
     def _profile_changed(self, *_a) -> None:
         if hasattr(self, "save_profile_btn"):
@@ -330,8 +363,10 @@ class ClientDetailDialog(QDialog):
             self.conn.execute("UPDATE businesses SET vat_period_source='' WHERE afm=? AND vat_period_source='manual'",
                               (self.afm,))
         flags = {"1": 1, "0": 0}
-        self.conn.execute("UPDATE businesses SET employer=?, intrastat=? WHERE afm=?",
-                          (flags.get(self.f_employer.currentData()), flags.get(self.f_intrastat.currentData()), self.afm))
+        employer = flags.get(self.f_employer.currentData())
+        self.conn.execute("UPDATE businesses SET employer=?, intrastat=?, teka=? WHERE afm=?",
+                          (employer, flags.get(self.f_intrastat.currentData()),
+                           1 if (self.f_teka.isChecked() and employer == 1) else 0, self.afm))
         kads = []
         for line in self.f_kads.toPlainText().splitlines():
             line = line.strip()
@@ -376,37 +411,46 @@ class ClientDetailDialog(QDialog):
         form.addRow("", row)
 
         # e-ΕΦΚΑ εργοδότη: ΑΜΕ + κωδικοί ΙΚΑ εργοδότη — για τον έλεγχο υποβολής ΑΠΔ (οικονομική καρτέλα εργοδότη).
-        efka_head = QLabel("e-ΕΦΚΑ εργοδότη (έλεγχος ΑΠΔ)")
-        efka_head.setObjectName("h2")
-        form.addRow(efka_head)
         self._cred_form = form
         self.e_amka = QLineEdit()
         self.e_amka.setPlaceholderText("11 ψηφία — για ΚΕΑΟ και τρέχουσες εισφορές e-ΕΦΚΑ (φυσικά πρόσωπα)")
         form.addRow("ΑΜΚΑ", self.e_amka)
+        efka_head = QLabel("e-ΕΦΚΑ εργοδότη (έλεγχος ΑΠΔ)")
+        efka_head.setObjectName("h2")
+        form.addRow(efka_head)
+        # Γραμμές «εργοδότη»: κρύβονται για ιδιώτες (ρητό αίτημα 2026-10-27) — βλ. `_reload`
+        self._employer_rows: list = [efka_head]
         self.e_ame = QLineEdit()
         self.e_ame.setPlaceholderText("10 ψηφία — από Excel, χειροκίνητα ή «Ανάκτηση ΑΜΕ»")
         form.addRow("ΑΜΕ (Αρ. Μητρώου Εργοδότη)", self.e_ame)
+        self._employer_rows.append(self.e_ame)
         self.e_oikodomotexnika = QCheckBox("Αναζήτηση ΑΜΕ και στα Οικοδομοτεχνικά Έργα")
         self.e_oikodomotexnika.setToolTip("Η ανάκτηση θα ελέγχει και «Οικοδομοτεχνικών Έργων», εκτός από «Κοινών Επιχειρήσεων».")
         form.addRow("", self.e_oikodomotexnika)
+        self._employer_rows.append(self.e_oikodomotexnika)
         self.e_oikodom_ame = QLineEdit()
         self.e_oikodom_ame.setPlaceholderText("10 ψηφία — αποθηκεύεται χωριστά από το ΑΜΕ Κοινών Επιχειρήσεων")
         form.addRow("ΑΜΕ Οικοδομοτεχνικών", self.e_oikodom_ame)
+        self._employer_rows.append(self.e_oikodom_ame)
         self.e_user = QLineEdit()
         form.addRow("Χρήστης ΙΚΑ εργοδότη", self.e_user)
+        self._employer_rows.append(self.e_user)
         self.e_pass = QLineEdit()
         self.e_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.e_pass.setPlaceholderText("(αφήστε κενό για να μείνει ως έχει)")
         form.addRow("Κωδικός ΙΚΑ εργοδότη", self.e_pass)
+        self._employer_rows.append(self.e_pass)
         self.e_status = QLabel("")
         self.e_status.setWordWrap(True)
         self.e_status.setObjectName("muted")
         form.addRow("", self.e_status)
+        self._employer_rows.append(self.e_status)
         # Όλα τα ΑΜΕ του εργοδότη (ρητό αίτημα 2026-10-27): ο έλεγχος ΑΠΔ e-ΕΦΚΑ και ΤΕΚΑ γίνεται ΑΝΑ ΑΜΕ — και τα
         # οικοδομοτεχνικά έργα (ένα ΑΜΕ ανά έργο) μπαίνουν με ΔΙΚΟΥΣ τους κωδικούς ΙΚΑ.
         ames_head = QLabel("ΑΜΕ του εργοδότη — έλεγχος ΑΠΔ e-ΕΦΚΑ (ΙΚΑ) και ΤΕΚΑ ανά ΑΜΕ")
         ames_head.setObjectName("h2")
         form.addRow(ames_head)
+        self._employer_rows.append(ames_head)
         self.ames_table = QTableWidget(0, 6)
         self.ames_table.setHorizontalHeaderLabels(["ΑΜΕ", "Είδος", "Επωνυμία / έργο", "Χρήστης ΙΚΑ", "Κωδικός",
                                                    "Τελευταίος έλεγχος ΑΠΔ"])
@@ -419,6 +463,7 @@ class ClientDetailDialog(QDialog):
             self.ames_table.setColumnWidth(col, width)
         self.ames_table.itemSelectionChanged.connect(self._ame_selected)
         form.addRow(self.ames_table)
+        self._employer_rows.append(self.ames_table)
         arow = QHBoxLayout()
         self.a_ame = QLineEdit()
         self.a_ame.setPlaceholderText("ΑΜΕ")
@@ -444,6 +489,7 @@ class ClientDetailDialog(QDialog):
         a_del.clicked.connect(self._remove_ame_row)
         arow.addWidget(a_del)
         form.addRow("", arow)
+        self._employer_rows.append(arow)
         erow = QHBoxLayout()
         esave = QPushButton("Αποθήκευση")
         esave.clicked.connect(self._save_efka)
@@ -453,6 +499,7 @@ class ClientDetailDialog(QDialog):
                              "πελάτη — μόνο ανάγνωση")
         fetch_ame.clicked.connect(self._retrieve_ame)
         erow.addWidget(fetch_ame)
+        self.fetch_ame_btn = fetch_ame
         erow.addStretch()
         form.addRow("", erow)
         return page
@@ -652,6 +699,13 @@ class ClientDetailDialog(QDialog):
                                   "ΦΜΥ, δήλωση εισοδήματος, ΜΥΦ κ.λπ. της χρήσης — μόνο ανάγνωση, καμία υποβολή")
         self.check_btn.clicked.connect(self._run_easycheck)
         head.addWidget(self.check_btn)
+        # έλεγχος που κόλλησε μετά τη σύνδεση → ο χρήστης συνεχίζει στον browser (handoff.py)
+        self.handoff_btn = QPushButton(icon("network", CURRENT.warn, 16), "  Συνέχεια στον browser")
+        self.handoff_btn.setToolTip("Ένας έλεγχος σταμάτησε μετά τη σύνδεση (π.χ. ο e-ΕΦΚΑ ζητά επιβεβαίωση στοιχείων) — "
+                                    "ανοίγει Chrome/Edge συνδεδεμένο στο ίδιο σημείο")
+        self.handoff_btn.clicked.connect(self._handoff_menu)
+        self.handoff_btn.hide()
+        head.addWidget(self.handoff_btn)
         box.addLayout(head)
         # Σύνοψη χρήσης + πότε έγινε τελευταία φορά κάθε εργασία (έλεγχος υποβολών, λήψη myDATA)
         self.year_summary = QLabel("")
@@ -678,7 +732,9 @@ class ClientDetailDialog(QDialog):
         self.obligation_detail.setObjectName("card")
         self.obligation_detail.setWordWrap(True)
         self.obligation_detail.setTextFormat(Qt.TextFormat.RichText)
-        self.obligation_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.obligation_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                                       | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.obligation_detail.setOpenExternalLinks(True)     # «PDF δήλωσης» (λήψη με τον έλεγχο υποβολών)
         self.obligation_detail.setMinimumHeight(70)
         self.obligation_detail.setMaximumHeight(150)
         box.addWidget(self.obligation_detail)
@@ -707,7 +763,9 @@ class ClientDetailDialog(QDialog):
             o = easycheck.OBLIGATIONS.get(c.get("obligation", ""))
             colour = {"submitted": CURRENT.ok, "not_submitted": CURRENT.bad}.get(c["status"], CURRENT.warn)
             a = c.get("amounts") or {}
-            line = (f"ΑΑΔΕ — {esc(o.label if o else c.get('obligation', ''))} · {esc(c.get('period') or '')}: "
+            source = ("ΕΛ.ΣΤΑΤ" if c.get("obligation") == "INTRASTAT" else
+                      "e-ΕΦΚΑ" if str(c.get("obligation", "")).startswith("ΑΠΔ") else "ΑΑΔΕ")
+            line = (f"{source} — {esc(o.label if o else c.get('obligation', ''))} · {esc(c.get('period') or '')}: "
                     f"<b style='color:{colour}'>{esc(easycheck.STATUS_LABEL.get(c['status'], c['status']))}</b>")
             if a.get("submitted_at"):
                 line += f" · υποβολή {esc(a['submitted_at'])}"
@@ -718,6 +776,8 @@ class ClientDetailDialog(QDialog):
                 line += f"<br>&nbsp;&nbsp;Ποσά: {esc(amounts)}"
             if a.get("state"):
                 line += f" · κατάσταση {esc(a['state'])}"
+            if a.get("submission_pdf") and Path(a["submission_pdf"]).exists():
+                line += f" · <a href='{QUrl.fromLocalFile(a['submission_pdf']).toString()}'>PDF δήλωσης</a>"
             if c.get("checked_at"):
                 line += f" <span style='color:{CURRENT.muted}'>(έλεγχος {esc(c['checked_at'][:10])})</span>"
             lines.append(line)
@@ -729,6 +789,7 @@ class ClientDetailDialog(QDialog):
         self.obligation_detail.setText("<br>".join(lines))
 
     def _reload_checks(self) -> None:
+        self._sync_handoff()
         year = self.check_year.currentData() or date.today().year
         all_rows = deadlines.client_year(self.conn, self.afm, year)
         rows = [r for r in all_rows if r["status"] == "yes" or self.show_maybe.isChecked()]
@@ -819,11 +880,31 @@ class ClientDetailDialog(QDialog):
             toast(self, "Χρειάζονται οι κωδικοί TAXISnet του πελάτη.", "warn")
             return
         year = self.check_year.currentData() or date.today().year
-        self.main.run_submission_checks([self.afm], [year], window=self, on_done=self._after_checks)
+        want_pdf = self.main.ask_submission_pdf(self)
+        if want_pdf is None:
+            return
+        self.main.run_submission_checks([self.afm], [year], window=self, on_done=self._after_checks, want_pdf=want_pdf)
 
     def _after_checks(self) -> None:
         self._reload_checks()
         self._reload()
+        self._sync_handoff()
+
+    def _sync_handoff(self) -> None:
+        from .. import handoff
+        self.handoff_btn.setVisible(bool(handoff.pending(self.afm)))
+
+    def _handoff_menu(self) -> None:
+        from PySide6.QtWidgets import QMenu
+        from .. import handoff
+        items = handoff.pending(self.afm)
+        if not items:
+            self.handoff_btn.hide()
+            return
+        menu = QMenu(self.handoff_btn)
+        for h in items:
+            menu.addAction(f"{h['label']} ({h['at']})", lambda h=h: self.main.open_handoff(h))
+        menu.exec(self.handoff_btn.mapToGlobal(self.handoff_btn.rect().bottomLeft()))
 
     def _matches_tab(self) -> QWidget:
         page = QWidget()
@@ -949,6 +1030,7 @@ class ClientDetailDialog(QDialog):
             self.accept()
             return
         self.setWindowTitle("Καρτέλα πελάτη")
+        self.toast_context = f"{b['name'] or 'Χωρίς επωνυμία'} · {self.afm}"     # επικεφαλίδα toasts (toast.context_of)
         self.client_name_label.setText(b["name"] or "Χωρίς επωνυμία")
         self.refresh_member_shortcut()
         self.f_name.setText(b["name"])
@@ -973,9 +1055,11 @@ class ClientDetailDialog(QDialog):
         self.f_phone.setText(full["phone"])
         self.f_email_auto.setChecked(bool(full["email_auto"]))
         self.f_contact_note.setText(self._contact_note(full))
-        flags = self.conn.execute("SELECT employer, intrastat FROM businesses WHERE afm=?", (self.afm,)).fetchone()
+        flags = self.conn.execute("SELECT employer, intrastat, teka FROM businesses WHERE afm=?", (self.afm,)).fetchone()
         for box, value in ((self.f_employer, flags["employer"]), (self.f_intrastat, flags["intrastat"])):
             box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
+        self.f_teka.setChecked(bool(flags["teka"]))
+        self.f_teka.setEnabled(flags["employer"] == 1)
         self.f_status.setText(b["status"])
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
         self._mark_profile_saved()
@@ -1004,6 +1088,7 @@ class ClientDetailDialog(QDialog):
             label.setVisible(not company)
         self.e_user.setText(efka.ika_user(self.conn, self.afm))
         self._fill_ames()
+        self._apply_private_layout(b)
         self.e_status.setText(ef.get("check_message") or ("Ο ΑΜΕ χρειάζεται για τον έλεγχο ΑΠΔ — χωρίς αυτόν γίνεται "
                                                           "προσπάθεια ανάκτησης κατά τον έλεγχο υποβολών."
                                                           if not ef.get("ame") else ""))

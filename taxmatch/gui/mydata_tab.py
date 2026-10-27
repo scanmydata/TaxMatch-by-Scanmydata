@@ -136,8 +136,9 @@ class MydataTab(QWidget):
         self.preview_note = QLabel("")
         self.preview_note.setObjectName("muted")
         actions.addWidget(self.preview_note, 1)
-        provider = QPushButton("Άνοιγμα στον πάροχο")
-        provider.setToolTip("Για παραστατικά «μόνο online» (ο πάροχος δεν δίνει αρχείο PDF)")
+        provider = QPushButton(icon("network", CURRENT.txt, 16), "  Μόνο online…")
+        provider.setToolTip("Παραστατικά που ο πάροχος δείχνει μόνο online: ανοίγουν στον browser σας, τα αποθηκεύετε ως "
+                            "PDF στον φάκελο λήψεων και η εφαρμογή τα αρχειοθετεί μόνη της (όπως το Timologio Downloader)")
         provider.clicked.connect(self._open_provider)
         actions.addWidget(provider)
         open_btn = QPushButton(icon("pdf", CURRENT.txt, 16), "  Άνοιγμα PDF")
@@ -523,9 +524,20 @@ class MydataTab(QWidget):
                 QDesktopServices.openUrl(QUrl(d["url"]))      # ρητό κλικ· capability URL, όχι το κλειδί
 
     def _open_provider(self) -> None:
-        for d in self._selected_docs()[:1]:
-            if d["url"]:
-                QDesktopServices.openUrl(QUrl(d["url"]))      # ρητό κλικ του χρήστη· capability URL, όχι το κλειδί
+        """Καθοδηγούμενη λήψη «μόνο online» (gui/online_only.py): τα επιλεγμένα, αλλιώς όλα τα «μόνο online» της
+        προβολής που δεν έχουν ακόμη PDF."""
+        from .online_only import OnlineOnlyDialog
+        chosen = [d for d in self._selected_docs() if d["url"] and d["pdf_status"] != "ok"]
+        if len(self._selected_docs()) <= 1:
+            chosen = [d for d in self._docs if d["url"] and d["pdf_status"] in ("viewer", "failed")] or chosen
+        if not chosen:
+            toast(self.window_, "Δεν υπάρχουν παραστατικά «μόνο online» χωρίς PDF — πατήστε πρώτα «Λήψη μήνα» ώστε να "
+                                "εντοπιστούν.", "info")
+            return
+        dlg = OnlineOnlyDialog(self.conn, self.afm, chosen, self)
+        dlg.exec()
+        if dlg.changed:
+            self.reload()
 
     def _export_zip(self) -> None:
         ym = self.month.currentData()

@@ -254,14 +254,30 @@ def is_active(status: str) -> bool:
     return strip_accents(status or "").strip().lower().startswith("ενεργ")
 
 
+def unpaid(inst: dict[str, str]) -> float:
+    """Ό,τι μένει από μία δόση. Το «Υπόλοιπο» του ΚΕΑΟ γράφεται ΜΟΝΟ για δόσεις που έχουν λήξει — οι μελλοντικές
+    έχουν υπόλοιπο 0,00 και πληρωμή 0,00 (ζωντανά, νέα ρύθμιση 72 δόσεων 2026-10-27: έβγαινε «οφειλή 0»). Άρα
+    max(ποσό − πληρωμένα, υπόλοιπο)."""
+    return round(max(reports.amount(inst.get("amount") or "") - reports.amount(inst.get("paid") or ""),
+                     reports.amount(inst.get("balance") or ""), 0.0), 2)
+
+
 def _open(inst: dict[str, str]) -> bool:
-    return bool(inst.get("balance")) and any(ch not in "0" for ch in re.sub(r"\D", "", inst["balance"]))
+    return unpaid(inst) > 0.005
+
+
+def _is_due(due: str) -> bool:
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", due or "")
+    if not m:
+        return False
+    from datetime import date
+    return date(int(m.group(3)), int(m.group(2)), int(m.group(1))) < date.today()
 
 
 def regulation_owed(r: dict[str, Any]) -> tuple[float, float, list[dict[str, str]]]:
     """(οφειλή = ό,τι μένει από τις δόσεις + προσαυξήσεις, προσαυξήσεις, απλήρωτες δόσεις)· χωρίς δοσολόγιο: το σύνολο."""
     pending = [i for i in r["instalments"] if _open(i)]
-    remaining = sum(reports.amount(i["balance"] or i["amount"]) for i in pending)
+    remaining = sum(unpaid(i) for i in pending)
     increments = sum(reports.amount(i["increments"]) for i in pending)
     owed = remaining + increments if r["instalments"] else reports.amount(r["total"])
     return round(owed, 2), round(increments, 2), pending
@@ -278,9 +294,16 @@ def carrier_owed(c: dict[str, Any]) -> dict[str, Any]:
             "additional": round(sum(reports.amount(o["additional"]) for o in c["outstanding"]), 2), "fallback": False}
 
 
+#: Πρώτο τμήμα περιγραφής που ΔΕΝ είναι φορέας (ζωντανά: «Ληξιπρόθεσμο - ΟΠΣ-ΙΚΑ - ΙΔΡΥΜΑ ΚΟΙΝΩΝΙΚΩΝ ΑΣΦΑΛΙΣΕΩΝ»)
+_NOT_CARRIER = ("ΛΗΞΙΠΡΟΘΕΣΜ", "ΕΜΠΡΟΘΕΣΜ", "ΟΦΕΙΛ")
+
+
 def carrier_title(description: str) -> tuple[str, str]:
-    """«ΕΦΚΑ (ΠΡΩΗΝ ΙΚΑ) - ΕΡΓΟΔΟΤΗΣ» → (φορέας, κατηγορία) — ό,τι είναι μετά την τελευταία « - » είναι κατηγορία."""
+    """«ΕΦΚΑ (ΠΡΩΗΝ ΙΚΑ) - ΕΡΓΟΔΟΤΗΣ» → (φορέας, κατηγορία) — ό,τι είναι μετά την τελευταία « - » είναι κατηγορία.
+    «Ληξιπρόθεσμο - ΟΠΣ-ΙΚΑ - ΙΔΡΥΜΑ …» → («ΟΠΣ-ΙΚΑ», «ΙΔΡΥΜΑ … · Ληξιπρόθεσμο»)."""
     parts = [p.strip() for p in re.split(r"\s+-\s+", description or "") if p.strip()]
+    if len(parts) > 2 and any(strip_accents(parts[0]).upper().startswith(w) for w in _NOT_CARRIER):
+        return parts[1], " - ".join(parts[2:]) + f" · {parts[0]}"
     return (parts[0], " - ".join(parts[1:])) if len(parts) > 1 else ((description or "").strip(), "")
 
 
@@ -302,12 +325,15 @@ def keao_lines(carriers: list[dict[str, Any]]) -> list[dict[str, Any]]:
             active = is_active(r["status"])
             owed_r, increments, pending = regulation_owed(r) if active else (reports.amount(r["total"]), 0.0, [])
             nxt = pending[0] if pending else None
+            # ληγμένες απλήρωτες δόσεις = ληξιπρόθεσμο της ρύθμισης· οι υπόλοιπες = εμπρόθεσμο
+            late = round(sum(unpaid(i) + reports.amount(i["increments"]) for i in pending if _is_due(i["due"])), 2)
             out.append({"kind": "keao_arrangement" if active else "keao_inactive",
                         "ref": f"keao|{tag}|{(r['info'].split() or [str(n + 1)])[0]}|{n}",
-                        "title": r["type"] or "Ρύθμιση ΚΕΑΟ", "overdue": 0.0, "non_overdue": 0.0,
+                        "title": r["type"] or "Ρύθμιση ΚΕΑΟ", "overdue": late if active else 0.0,
+                        "non_overdue": round(owed_r - late, 2) if active else 0.0,
                         "total": owed_r, "code": c["debtor_id"] if active else "", "pdf_path": "",
                         "next_due": nxt["due"] if nxt else "",
-                        "next_amount": round(reports.amount(nxt["balance"] or nxt["amount"]) + reports.amount(nxt["increments"]), 2)
+                        "next_amount": round(unpaid(nxt) + reports.amount(nxt["increments"]), 2)
                         if nxt else 0.0, "instalments": len(r["instalments"]), "unpaid": len(pending),
                         "details": {"carrier": title, "amo": c["amo"], "regulation": r, "increments": increments,
                                     "status": r["status"], "tag": tag}})
@@ -366,9 +392,10 @@ def keao_reports(carriers: list[dict[str, Any]], client: str, afm: str, office: 
                 continue
             o, inc, pending = regulation_owed(r)
             decision = (r["info"].split() or [str(n + 1)])[0]
-            inst_rows = [[i["no"], i["due"], i["amount"], i["paid"], i["balance"], i["increments"]] for i in r["instalments"]]
+            inst_rows = [[i["no"], i["due"], i["amount"], i["paid"], reports.money(unpaid(i)), i["increments"]]
+                         for i in r["instalments"]]
             sections = [reports.Section("Δοσολόγιο", reports.table_from(
-                ["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"], inst_rows))] if inst_rows else []
+                ["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Μένει", "Προσαυξήσεις"], inst_rows))] if inst_rows else []
             path = reports.fallback_path(folder, f"KEAO_RYTHMISI_{afm}_{reports.safe(tag)}_{reports.safe(decision)}.pdf", used)
             reports.write(reports.Report(
                 "Ρύθμιση οφειλών ΚΕΑΟ", office, identity + [("Ρύθμιση", r["info"]), ("Είδος", r["type"]),

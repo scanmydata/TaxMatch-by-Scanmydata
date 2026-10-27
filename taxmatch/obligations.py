@@ -15,6 +15,8 @@ from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, Callable, Optional
 
+from .textutil import strip_accents
+
 MONTHS_GEN = ["Ιανουαρίου", "Φεβρουαρίου", "Μαρτίου", "Απριλίου", "Μαΐου", "Ιουνίου", "Ιουλίου", "Αυγούστου",
               "Σεπτεμβρίου", "Οκτωβρίου", "Νοεμβρίου", "Δεκεμβρίου"]
 MONTHS_NOM = ["Ιανουάριος", "Φεβρουάριος", "Μάρτιος", "Απρίλιος", "Μάιος", "Ιούνιος", "Ιούλιος", "Αύγουστος",
@@ -155,6 +157,19 @@ def month_end_or_next(y: int, m: int) -> date:
     return next_business_day(month_end(y, m))
 
 
+def _period_income_instalment(y: int, m: int) -> str:
+    """Φόρος εισοδήματος σε 8 δόσεις: 1η έως 31/7, οι επόμενες την τελευταία εργάσιμη Αυγ.–Φεβ. (ΑΑΔΕ, δελτίο τύπου
+    16/3/2026) — φορολογικό έτος = το προηγούμενο της δήλωσης."""
+    n = m - 6 if m >= 7 else m + 6
+    return f"{n}η δόση — φορολογικό έτος {y - 1 if m >= 7 else y - 2}"
+
+
+def _period_enfia(y: int, m: int) -> str:
+    """ΕΝΦΙΑ σε 12 μηνιαίες δόσεις: 1η έως 31/3, τελευταία τον Φεβρουάριο του επόμενου έτους (εκκαθαριστικά 2026)."""
+    n = m - 2 if m >= 3 else m + 10
+    return f"{n}η δόση ΕΝΦΙΑ {y if m >= 3 else y - 1}"
+
+
 RULES: list[Rule] = [
     Rule("vat_monthly", "Δήλωση ΦΠΑ (μηνιαία) — {period}",
          "Περιοδική δήλωση ΦΠΑ και πληρωμή του φόρου έως την τελευταία εργάσιμη ημέρα του επόμενου μήνα.",
@@ -263,6 +278,18 @@ RULES: list[Rule] = [
          "παρατεινόμενη για ορισμένες κατηγορίες). Εφάπαξ πληρωμή/α΄ δόση: τελευταία εργάσιμη Ιουλίου.",
          "https://www.taxheaven.gr/news/69263/to-neo-plaisio-ypobolhs-twn-forologikwn-dhlwsewn-oi-hmeromhnies-ypobolhs-kai-oi-prooesmies-katabolhs-twn-forwn",
          "annual", lambda y, m: date(y, 7, 15), due_months=(7,), applies=_conditional, hide_if_feed_terms=("εισοδηματος",)),
+    # Υποχρεώσεις ΚΑΙ των ιδιωτών (ρητό αίτημα 2026-10-27: «στον ιδιώτη να μπουν οι κατάλληλες υποχρεώσεις»)
+    Rule("income_tax_instalment", "Φόρος εισοδήματος — {period}",
+         "Ο φόρος εισοδήματος (Ε1/Ε3) καταβάλλεται εφάπαξ ή σε 8 δόσεις: η 1η έως 31 Ιουλίου, οι υπόλοιπες την "
+         "τελευταία εργάσιμη κάθε επόμενου μήνα ως τον Φεβρουάριο. Μόνο αν η εκκαθάριση της δήλωσης είναι χρεωστική.",
+         "https://www.aade.gr/", "monthly", lambda y, m: last_business_day(y, m), due_months=(7, 8, 9, 10, 11, 12, 1, 2),
+         applies=_conditional, hide_if_feed_terms=("φορου εισοδηματος",), period=_period_income_instalment),
+    Rule("enfia", "ΕΝΦΙΑ — {period}",
+         "Ο ΕΝΦΙΑ καταβάλλεται εφάπαξ ή σε 12 μηνιαίες δόσεις: η 1η έως 31 Μαρτίου και η τελευταία τον Φεβρουάριο του "
+         "επόμενου έτους (τελευταία εργάσιμη κάθε μήνα). Μόνο για όσους έχουν ακίνητα (εκκαθαριστικό ΕΝΦΙΑ).",
+         "https://www.aade.gr/", "monthly", lambda y, m: last_business_day(y, m),
+         due_months=(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2), applies=_conditional, hide_if_feed_terms=("ενφια",),
+         period=_period_enfia),
 ]
 
 RULES_BY_ID = {r.id: r for r in RULES}
@@ -284,7 +311,9 @@ _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές σ
                  "apd_teka": "μόνο αν απασχολεί εργαζόμενους ασφαλισμένους επικουρικά στο ΤΕΚΑ",
                  "plastic_bag_fee": "μόνο αν τιμολογεί τέλος πλαστικής σακούλας — λείπουν στοιχεία myDATA",
                  "plastics_fee": "μόνο αν τιμολογεί εισφορά πλαστικών προϊόντων — λείπουν στοιχεία myDATA",
-                 "parepid_fee": "μόνο αν τιμολογεί τέλος παρεπιδημούντων/ακαθαρίστων — λείπουν στοιχεία myDATA"}
+                 "parepid_fee": "μόνο αν τιμολογεί τέλος παρεπιδημούντων/ακαθαρίστων — λείπουν στοιχεία myDATA",
+                 "income_tax_instalment": "μόνο αν η εκκαθάριση του Ε1/Ε3 είναι χρεωστική και πληρώνεται σε δόσεις",
+                 "enfia": "μόνο αν έχει ακίνητα (εκκαθαριστικό ΕΝΦΙΑ) και πληρώνει σε δόσεις"}
 #: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
 _MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding", "climate_fee": "climate",
                 "digital_fee": "digital_fee", "plastic_bag_fee": "plastic_bag", "plastics_fee": "plastics",
@@ -316,6 +345,7 @@ RULE_CHECKS: dict[str, tuple[str, ...]] = {
     "plastic_bag_fee": ("ΠΕΡΙΒΑΛΛΟΝ",),    # TAXISnet otherAppH7 (easycheck)
     "plastics_fee": ("ΠΛΑΣΤΙΚΑ",),         # εφαρμογή «Plastic» — βλ. fee_portals.py
     "parepid_fee": ("ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ",),   # dae.govapp.gr — βλ. fee_portals.py
+    "intrastat": ("INTRASTAT",),           # ΕΛ.ΣΤΑΤ «Αρχείο Δηλώσεων» (κωδικοί γραφείου) — βλ. intrastat.py
 }
 #: Έλεγχοι που μπορεί να έρθουν ανά ΤΡΙΜΗΝΟ ενώ ο κανόνας είναι μηνιαίος (dae.govapp.gr: όπως η περίοδος ΦΠΑ).
 _QUARTER_FALLBACK = {"parepid_fee"}
@@ -443,6 +473,15 @@ def parepid_note(business: Optional[dict[str, Any]]) -> str:
     return parepid.note([k["code"] if isinstance(k, dict) else k for k in kads])
 
 
+def is_private_person(b: Optional[dict[str, Any]]) -> bool:
+    """Ιδιώτης: φυσικό πρόσωπο χωρίς (ενεργή) επιχείρηση — «ΙΔΙΩΤΗΣ» του Μητρώου, ή ατομική με διακοπή. Δεν έχει
+    myDATA, μέλη ή ΑΠΔ (ρητό αίτημα 2026-10-27: η καρτέλα του δεν δείχνει αυτά)."""
+    if not b or is_legal_entity(b.get("legal_form") or ""):
+        return False
+    return (b.get("activity_state") in ("none", "ceased")
+            or "ΙΔΙΩΤ" in strip_accents(b.get("legal_form") or "").upper())
+
+
 def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
     """('yes' | 'maybe' | 'no', αιτιολογία) για ΕΝΑΝ πελάτη, από ό,τι ήδη ξέρουμε (Μητρώο ΑΑΔΕ): κατάσταση δραστηριότητας,
     υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων — και εργοδότης/Intrastat από την εισαγωγή Excel. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
@@ -495,6 +534,10 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             if rule_id == "parepid_fee" and not value and parepid_note(business):
                 # εστίαση/καταλύματα συχνά ΔΕΝ γράφουν το τέλος στο myDATA — ο ΚΑΔ κρατά την πιθανή υποχρέωση
                 return "maybe", parepid_note(business)
+            if rule_id == "intrastat" and value:
+                info = (business.get("mydata") or {}).get(ref_month) or {}
+                yes = f"Intrastat {info.get('intrastat_flows') or ''} — {info.get('intrastat_reason') or yes}".replace(
+                    "Intrastat  — ", "Intrastat — ")
             if rule_id == "vies" and value:
                 forms, known = vies_forms(business, ref_month)
                 if known:
@@ -512,6 +555,8 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     if rule_id == "apd_teka":
         if business.get("employer") == 0:
             return "no", "χωρίς μισθοδοσία"
+        if not business.get("teka"):                  # μόνο με ρητή επιλογή στο Προφίλ του πελάτη
+            return "no", "δεν έχει επιλεγεί «ΑΠΔ ΤΕΚΑ» στο Προφίλ του πελάτη"
         yr = ((business.get("checks") or {}).get("years") or {}).get(
             ("ΑΠΔ_ΤΕΚΑ", int(ref_month[:4]) if ref_month else date.today().year))
         if yr in ("submitted", "not_submitted", "pending"):

@@ -166,3 +166,41 @@ def zip_month(conn: sqlite3.Connection, afm: str, ym: str, marks: Optional[list[
             if p.exists():
                 z.write(p, f"{'Λήψεις' if r['direction'] == 'incoming' else 'Εκδοθέντα'}/{p.name}")
     return buf.getvalue()
+
+
+# ------------------------------------------------------------------ «μόνο online» μέσω του browser του χρήστη
+def is_complete_pdf(path: Path, min_bytes: int = 100) -> bool:
+    """Ολοκληρωμένο PDF (όχι μισογραμμένο από τον browser): μέγεθος και υπογραφή %PDF (όπως το timologio)."""
+    try:
+        if path.stat().st_size < min_bytes:
+            return False
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"%PDF"
+    except OSError:
+        return False
+
+
+def openable_url(url: str) -> str:
+    """eskap.gr: η «καθαρή» εκτυπώσιμη σελίδα (`invoice_print.php?authentication_code=…`) αντί για τη σελίδα με τα μενού
+    — port του timologio `eskap_print_url` (χωρίς δίκτυο όταν ο κωδικός είναι ήδη στο URL)."""
+    from urllib.parse import parse_qs
+    p = urlparse(url)
+    if not _host(p.netloc, "eskap.gr"):
+        return url
+    code = (parse_qs(p.query).get("authentication_code") or [""])[0]
+    return f"{p.scheme}://{p.netloc}/invoice_print.php?authentication_code={code}" if code else url
+
+
+def save_online_pdf(conn: sqlite3.Connection, afm: str, doc: dict, data: bytes) -> Path:
+    """Αρχειοθέτηση PDF που αποθήκευσε ο χρήστης από τον browser: ίδιο όνομα/φάκελος με τη «Λήψη μήνα» και σήμανση
+    «PDF» στη βάση (ρητό αίτημα 2026-10-27, όπως το timologio `save_online_only_pdf`)."""
+    if not data.startswith(b"%PDF"):
+        raise NotAPdf("Το αρχείο δεν είναι PDF")
+    folder = month_dir(afm, doc["issue_date"][:7])
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / file_name({**doc, "afm": afm})
+    if target.exists() and target.read_bytes() != data:
+        target = target.with_name(target.stem + f"_{doc['mark']}.pdf")
+    target.write_bytes(data)
+    conn.execute("UPDATE mydata_docs SET pdf_status='ok', pdf_path=? WHERE afm=? AND mark=?", (str(target), afm, doc["mark"]))
+    return target

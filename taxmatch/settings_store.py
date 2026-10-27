@@ -35,6 +35,9 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("business_portal_key", "Business Portal (ΓΕΜΗ) API key", secret=True, env="BUSINESS_PORTAL_KEY"),
     SettingDef("aade_user", "TAXISnet χρήστης (γραφείου)", secret=True, env="AADE_USER"),
     SettingDef("aade_pass", "TAXISnet κωδικός (γραφείου)", secret=True, env="AADE_PASS"),
+    # ΕΛ.ΣΤΑΤ Intrastat: ΕΝΑΣ λογαριασμός του λογιστικού γραφείου για όλες τις επιχειρήσεις που διαχειρίζεται
+    SettingDef("intrastat_user", "Intrastat ΕΛ.ΣΤΑΤ — email γραφείου", secret=True),
+    SettingDef("intrastat_pass", "Intrastat ΕΛ.ΣΤΑΤ — κωδικός γραφείου", secret=True),
     # Κατάσταση (όχι ρυθμίσεις χρήστη): αποτέλεσμα της τελευταίας σύνδεσης/ανάλυσης, για τις ειδοποιήσεις της εφαρμογής
     SettingDef("aade_office_status", "Κατάσταση κωδικών γραφείου (ok|invalid|'')"),
     SettingDef("aade_office_message", "Μήνυμα σύνδεσης γραφείου"),
@@ -83,6 +86,9 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("notice_vat_quarter_read", "Αναγνωσμένη ειδοποίηση επιστροφής στο τρίμηνο"),
     SettingDef("vat_option_mark_keep", "Μόνιμος αστερίσκος ΦΠΑ για επιστροφή στο τρίμηνο", default="0"),
     SettingDef("notice_parepid_read", "Αναγνωσμένη ειδοποίηση τέλους παρεπιδημούντων"),
+    SettingDef("notice_marks_vat", "Πελάτες με αστερίσκο ΦΠΑ (επιστροφή στο τρίμηνο) ώσπου να ανοιχτεί η καρτέλα τους"),
+    SettingDef("notice_marks_parepid", "Πελάτες με αστερίσκο ΚΑΔ (παρεπιδημούντες) ώσπου να ανοιχτεί η καρτέλα τους"),
+    SettingDef("online_download_dir", "Φάκελος όπου ο browser αποθηκεύει τα PDF «μόνο online» (κενό = Λήψεις)"),
 ]}
 
 

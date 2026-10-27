@@ -123,7 +123,7 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
 
 # ------------------------------------------------------------------ ποιους πελάτες αφορά ένα γεγονός
 _BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, vat_period_source, books_category, "
-                 "activity_state, cease_date, employer, intrastat, "
+                 "activity_state, cease_date, employer, intrastat, teka, "
                  "(SELECT group_concat(k.code, ',') FROM business_kad k WHERE k.afm=businesses.afm) AS kad_codes "
                  "FROM businesses")
 #: Ίδια προθεσμία αν κανόνας και γεγονός του taxheaven απέχουν έως τόσες ημέρες (Σαββατοκύριακα, παρατάσεις λίγων ημερών).

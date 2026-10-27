@@ -3,9 +3,12 @@
 αλλά με Qt signals: πρόοδος/αποτέλεσμα/σφάλμα φτάνουν στο UI thread αυτόματα μέσω queued connections."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
+
+log = logging.getLogger(__name__)
 
 
 class _Runnable(QObject):
@@ -56,19 +59,27 @@ class Task(QObject):
         worker.finished.connect(self._relay_done)
         worker.failed.connect(self._relay_error)
 
+    # Η εργασία συνεχίζει κι όταν κλείσει ο διάλογος που την ξεκίνησε (ρητό αίτημα 2026-10-27)· αν στο μεταξύ έχουν
+    # καταστραφεί widgets του, το callback δεν ρίχνει την εφαρμογή — τα toasts του πάνε στο κύριο παράθυρο (toast.py).
+    @staticmethod
+    def _safe(fn: Optional[Callable[..., None]], arg: Any) -> None:
+        if not fn:
+            return
+        try:
+            fn(arg)
+        except RuntimeError as exc:                    # «Internal C++ object … already deleted»
+            log.info("callback εργασίας μετά το κλείσιμο παραθύρου: %s", exc)
+
     def _relay_progress(self, msg: str) -> None:
-        if self._on_progress:
-            self._on_progress(msg)
+        self._safe(self._on_progress, msg)
 
     def _relay_done(self, result: Any) -> None:
         self._cleanup()
-        if self._on_done:
-            self._on_done(result)
+        self._safe(self._on_done, result)
 
     def _relay_error(self, msg: str) -> None:
         self._cleanup()
-        if self._on_error:
-            self._on_error(msg)
+        self._safe(self._on_error, msg)
 
     def _cleanup(self) -> None:
         self.thread.quit()
