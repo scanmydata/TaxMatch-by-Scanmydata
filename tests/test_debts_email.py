@@ -128,13 +128,14 @@ def test_debit_declaration_gets_more_details_and_pdf(conn, tmp_path):
 def test_contact_from_ldap_info():
     xml = ("<r><mail>OLD@x.gr</mail><mail2>Info@Alfa.gr</mail2><mobilenumber>+30 6912345678</mobilenumber>"
            "<phonenumber>2101234567</phonenumber></r>")
-    assert lookup_aade.parse_contact(xml) == {"email": "info@alfa.gr", "mobile": "6912345678", "phone": "2101234567",
-                                              "origin": "mail2", "email_assistant": "old@x.gr", "assistant_origin": "mail"}
+    assert lookup_aade.parse_contact(xml) == {"email": "old@x.gr", "mobile": "6912345678", "phone": "2101234567",
+                                              "origin": "mail", "email_assistant": "info@alfa.gr",
+                                              "assistant_origin": "mail2"}
     assert lookup_aade.parse_contact("<r><mail>όχι-email</mail><mobilenumber>2101234567</mobilenumber></r>") == {
         "email": "", "mobile": "", "phone": "", "origin": "", "email_assistant": "", "assistant_origin": ""}
-    # Χωρίς προσωπικό (mail2): το email εγγραφής TAXISnet ΔΕΝ γίνεται κύριο — πάει στο «email βοηθού» (αναφορά 2026-10-23)
+    # Χωρίς email βοηθού, το mail παραμένει βασικό.
     only_mail = lookup_aade.parse_contact("<r><mail>Info@Office.gr</mail></r>")
-    assert only_mail["email"] == "" and only_mail["email_assistant"] == "info@office.gr"
+    assert only_mail["email"] == "info@office.gr" and only_mail["email_assistant"] == ""
 
 
 def test_rent_documents_do_not_create_digital_fee_obligation(conn):

@@ -60,8 +60,8 @@ OBLIGATIONS: dict[str, Obligation] = {o.key: o for o in (
     Obligation("ΜΥΦ", "Συγκεντρωτικές καταστάσεις (ΜΥΦ)", "kvs", "kvsD13"),
     Obligation("E1", "Δήλωση φορολογίας εισοδήματος (Ε1)", kind="income", code_prefix="E1-", requires_date=True),
     Obligation("E3", "Κατάσταση οικονομικών στοιχείων (Ε3)", kind="income", code_prefix="E3-"),
-    Obligation("ΠΕΡΙΒΑΛΛΟΝ", "Περιβαλλοντικό τέλος", "other", "otherAppH7"),
-    Obligation("ΔΙΑΜΟΝΗ", "Φόρος / τέλος διαμονής", "other", "otherAppH6"),
+    Obligation("ΠΕΡΙΒΑΛΛΟΝ", "Περιβαλλοντικό τέλος πλαστικής σακούλας (H7)", "other", "otherAppH7"),
+    Obligation("ΔΙΑΜΟΝΗ", "Τέλος ανθεκτικότητας / διαμονής (H6)", "other", "otherAppH6"),
     Obligation("ΣΥΜΦΩΝΗΤΙΚΑ", "Κατάσταση συμφωνητικών", "deduction", "deductAgreement", -1, 1, 2),
     Obligation("ΕΡΓΟΛΑΒΩΝ", "Φόρος εργολάβων", "deduction", "deductContractor", -1, 1, 2),
     Obligation("ΦΜΥ", "Παρακρατούμενοι ΦΜΥ μισθωτών", "deduction", "deductFMYTemporary", -1, 1, 2, _FMY, "( ΦΜΥ )"),
@@ -189,7 +189,8 @@ _STATE_CALL = re.compile(r'doDisplayDeclarationState\(document\.displayDeclarati
 #: Υποχρεώσεις για τις οποίες διαβάζονται και τα ΠΟΣΑ της δήλωσης (εκκαθάριση + ταυτότητα οφειλής). Φ2: πιστό port του
 #: runner `lib/aade-vat-http.js` (επαληθευμένο εκεί). Οι υπόλοιπες ακολουθούν την ίδια δομή σελίδων της ΑΑΔΕ στη δική
 #: τους κατηγορία — ΔΕΝ έχει επαληθευτεί· αν η σελίδα δεν έχει τα πεδία, απλώς δεν εμφανίζονται ποσά.
-AMOUNT_KEYS = {"Φ2", "ΦΜΥ", "ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ", "ΦΜΥ_ΜΕΡΙΣΜΑΤΑ", "ΔΙΑΜΟΝΗ"}
+AMOUNT_KEYS = {"Φ2", "ΦΜΥ", "ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ", "ΦΜΥ_ΜΕΡΙΣΜΑΤΑ", "ΔΙΑΜΟΝΗ",
+               "ΠΕΡΙΒΑΛΛΟΝ"}
 _MONTH_ORD = re.compile(r"(\d{1,2})\s*ο[ςυ]?\s*Μήνας")
 _QUARTER_ORD = re.compile(r"(\d)\s*ο\s*Τρίμηνο")
 
@@ -452,6 +453,57 @@ def withheld_keys(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
     return out
 
 
+def fee_keys(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
+    """Δηλώσεις τελών TAXISnet («other») που οφείλει ο πελάτης κατά το myDATA του έτους (ρητό αίτημα 2026-10-27):
+    ΔΙΑΜΟΝΗ (otherAppH6) = στοιχεία 8.2 ή λοιποί φόροι διαμονής· ΠΕΡΙΒΑΛΛΟΝ (otherAppH7) = τέλος πλαστικής σακούλας.
+    Και όσα έχουν ήδη ελεγχθεί μια φορά (να μη «χάνονται» αν λείπει μήνας myDATA)."""
+    from .mydata.analysis import CLIMATE_TYPE, FEE_GROUPS
+    out: set[str] = set()
+    if conn.execute("SELECT 1 FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 AND invoice_type=? "
+                    "AND substr(issue_date,1,4)=? LIMIT 1", (afm, CLIMATE_TYPE, str(year))).fetchone():
+        out.add("ΔΙΑΜΟΝΗ")
+    for r in conn.execute("SELECT taxes_json FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 "
+                          "AND substr(issue_date,1,4)=? AND taxes_json NOT IN ('', '{}')", (afm, str(year))):
+        taxes = json.loads(r["taxes_json"] or "{}")
+        for key, group in (("ΔΙΑΜΟΝΗ", "stay"), ("ΠΕΡΙΒΑΛΛΟΝ", "plastic_bag")):
+            kind, cats = FEE_GROUPS[group]
+            if any(c in (taxes.get(kind) or {}) for c in cats):
+                out.add(key)
+    for r in conn.execute("SELECT DISTINCT obligation FROM obligation_checks WHERE afm=? AND obligation IN "
+                          "('ΔΙΑΜΟΝΗ','ΠΕΡΙΒΑΛΛΟΝ') AND status<>'not_obligated'", (afm,)):
+        out.add(r["obligation"])
+    return out
+
+
+#: Δηλώσεις τελών όπου το TAXISnet γράφει «Δεν έχει υποβληθεί» σε ΚΑΘΕ περίοδο για ΟΛΟΥΣ (ζωντανά 2026-10-27, δύο
+#: εταιρείες χωρίς καμία σχέση με τα τέλη): η υποχρέωση = μήνες με το τέλος στο myDATA. Κλειδί → (ομάδα, τρίμηνο;).
+_FEE_LIABILITY = {"ΔΙΑΜΟΝΗ": ("stay", False), "ΠΕΡΙΒΑΛΛΟΝ": ("plastic_bag", True)}
+
+
+def _only_liable_fee_periods(conn: sqlite3.Connection, afm: str, year: int, entry: dict[str, Any]) -> dict[str, Any]:
+    """Κρατά τις υποβληθείσες περιόδους και ΜΟΝΟ όσες μη υποβληθείσες έχουν το τέλος στο myDATA."""
+    rule = _FEE_LIABILITY.get(entry.get("obligation", ""))
+    if not rule or not entry.get("periods"):
+        return entry
+    from .mydata.analysis import fee_months
+    group, quarterly = rule
+    months = fee_months(conn, afm, year, group)
+
+    def liable(p: dict[str, Any]) -> bool:
+        ym = (p.get("period_end") or "")[:7]
+        if not ym:
+            return True
+        if quarterly:
+            m = int(ym[5:7])
+            return any(f"{ym[:4]}-{mm:02d}" in months for mm in range(m - 2, m + 1))
+        return ym in months
+    periods = [p for p in entry["periods"] if p["status"] == "submitted" or liable(p)]
+    statuses = {p["status"] for p in periods}
+    status = ("not_submitted" if "not_submitted" in statuses else "pending" if "pending" in statuses
+              else "submitted" if periods else "not_obligated")
+    return {**entry, "periods": periods, "status": status}
+
+
 def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None, keys: Optional[list[str]] = None,
                  login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
     """Login με τους κωδικούς ΤΟΥ ΠΕΛΑΤΗ, έλεγχος, αποθήκευση στο `obligation_checks`. Επιστρέφει {ok, reason, entries}."""
@@ -460,7 +512,7 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
     if not creds:
         return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη.", "entries": []}
     b = conn.execute("SELECT * FROM businesses WHERE afm=?", (afm,)).fetchone()
-    keys = keys or default_keys(dict(b) if b else {}, withheld_keys(conn, afm, year))
+    keys = keys or default_keys(dict(b) if b else {}, withheld_keys(conn, afm, year) | fee_keys(conn, afm, year))
     login = login_fn(*creds)
     if not login.get("ok"):
         return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet."),
@@ -477,6 +529,7 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
             log.warning("easycheck %s/%s: %s", afm, key, exc)
             entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
                             "detail": str(exc)[:200]})
+    entries = [_only_liable_fee_periods(conn, afm, year, e) for e in entries]
     store_results(conn, afm, year, entries)
     vat_type = next((vat_period_from_checks(e) for e in entries if e["obligation"] == "Φ2"), "")
     if vat_type:                                       # οι πραγματικές περίοδοι Φ2 υπερισχύουν της κατηγορίας βιβλίων

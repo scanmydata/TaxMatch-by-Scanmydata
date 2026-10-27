@@ -51,6 +51,29 @@ def test_upgrade_from_v1_database_keeps_data(tmp_path):
     assert "title_key" in [r[1] for r in c.execute("PRAGMA table_info(articles)")]
 
 
+def test_upgrade_to_member_history_swaps_legacy_aade_email_fields(tmp_path):
+    path = tmp_path / "v17.db"
+    raw = sqlite3.connect(path)
+    v17 = 17                                       # η v18 (ιστορικό μελών/email) είναι αυτή που ελέγχεται
+    for migration in db.MIGRATIONS[:v17]:
+        for stmt in db._split(migration):
+            raw.execute(stmt)
+    raw.execute("INSERT INTO businesses(afm,name,created_at,updated_at,email,email_assistant,email_origin,contact_source) "
+                "VALUES ('094259216','ΑΛΦΑ','x','x','old-main@example.test','old-helper@example.test','mail2','aade')")
+    raw.execute("INSERT INTO company_members(company_afm,member_afm,name,updated_at) "
+                "VALUES ('094259216','123456783','ΠΑΠΑΣ','x')")
+    raw.execute(f"PRAGMA user_version={v17}")
+    raw.commit()
+    raw.close()
+
+    upgraded = db.connect(path)
+    row = upgraded.execute("SELECT email,email_assistant,email_assistant_origin FROM businesses WHERE afm='094259216'").fetchone()
+    member = upgraded.execute("SELECT tax_year,member_afm FROM company_member_history WHERE company_afm='094259216'").fetchone()
+    assert tuple(row) == ("old-helper@example.test", "old-main@example.test", "mail2")
+    assert member["tax_year"] == date.today().year and member["member_afm"] == "123456783"
+    upgraded.close()
+
+
 # ---------------------------------------------------------------- VIES
 def vies_session(payload, status=200):
     return FakeSession().route("vies", FakeResponse(json_data=payload, status=status))

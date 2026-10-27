@@ -86,6 +86,25 @@ def withheld_lines(inv: ET.Element) -> dict[str, float]:
     return out
 
 
+def tax_lines(inv: ET.Element) -> dict[str, dict[str, float]]:
+    """Τέλη και λοιποί φόροι ανά κατηγορία myDATA: {'fees': {κατ.: ποσό}, 'other': {κατ.: ποσό}} — από τις γραμμές
+    (`feesPercentCategory`/`feesAmount`, `otherTaxesPercentCategory`/`otherTaxesAmount`), αλλιώς από τα `taxes`
+    (taxType 2 = τέλη, 3 = λοιποί φόροι). Πίνακες 8.5/8.7 του επίσημου myDATA API v2.0.0 (βλ. analysis.FEE_GROUPS)."""
+    out: dict[str, dict[str, float]] = {"fees": {}, "other": {}}
+    for det in inv.iter(NS + "invoiceDetails"):
+        for key, cat_tag, amt_tag in (("fees", "feesPercentCategory", "feesAmount"),
+                                      ("other", "otherTaxesPercentCategory", "otherTaxesAmount")):
+            cat, amt = _t(det, cat_tag), _f(_t(det, amt_tag))
+            if cat:
+                out[key][cat] = round(out[key].get(cat, 0.0) + amt, 2)
+    for tax in inv.iter(NS + "taxes"):
+        key = {"2": "fees", "3": "other"}.get(_t(tax, "taxType"))
+        cat = _t(tax, "taxCategory")
+        if key and cat and cat not in out[key]:
+            out[key][cat] = round(_f(_t(tax, "taxAmount")), 2)
+    return {k: v for k, v in out.items() if v}
+
+
 #: Κατηγορίες ΦΠΑ myDATA (vatCategory) ΧΩΡΙΣ φόρο: 7 = 0%, 8 = εγγραφές χωρίς ΦΠΑ (π.χ. μισθοδοσία/αποσβέσεις).
 _NO_VAT_CATEGORIES = {"7", "8", ""}
 
@@ -139,6 +158,7 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
         # Ψηφιακό τέλος συναλλαγής = το πρώην «χαρτόσημο» του myDATA (μετονομασία στο API v1.0.11)
         "stamp": round(_f(_t(summary, "totalStampDutyAmount")), 2), "vat_class": carries_vat(inv, direction),
         "rent": is_rent(inv, _t(header, "invoiceType")),
+        "taxes": tax_lines(inv),
     }
 
 

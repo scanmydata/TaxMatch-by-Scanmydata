@@ -550,6 +550,58 @@ MIGRATIONS: list[str] = [
     UPDATE businesses SET email_assistant=email, email='', email_origin=''
         WHERE contact_source='aade' AND email_origin IN ('mail', 'mailemep') AND email<>''
     """,
+    # v17: επιπλέον ΑΜΕ οικοδομοτεχνικών έργων και επιλογή αναζήτησής του ανά εταιρεία.
+    """
+    ALTER TABLE efka_credentials ADD COLUMN ame_oikodomotexnikon TEXT NOT NULL DEFAULT '';
+    ALTER TABLE efka_credentials ADD COLUMN search_oikodomotexnika INTEGER NOT NULL DEFAULT 0
+    """,
+    # v18: ιστορικό μελών ανά φορολογική χρήση και διόρθωση της αντιστοίχισης email του Μητρώου ΑΑΔΕ.
+    """
+    ALTER TABLE businesses ADD COLUMN email_assistant_origin TEXT NOT NULL DEFAULT '';
+    UPDATE businesses SET email=email_assistant, email_assistant=email,
+        email_origin='', email_assistant_origin=email_origin
+        WHERE contact_source='aade';
+    CREATE TABLE company_member_history (
+        company_afm TEXT NOT NULL,
+        tax_year    INTEGER NOT NULL,
+        member_afm  TEXT NOT NULL,
+        name        TEXT NOT NULL DEFAULT '',
+        role        TEXT NOT NULL DEFAULT '',
+        share       TEXT NOT NULL DEFAULT '',
+        since       TEXT NOT NULL DEFAULT '',
+        source      TEXT NOT NULL DEFAULT '',
+        snapshot_at TEXT NOT NULL,
+        PRIMARY KEY (company_afm, tax_year, member_afm)
+    );
+    INSERT INTO company_member_history(company_afm, tax_year, member_afm, name, role, share, since, source, snapshot_at)
+        SELECT company_afm, CAST(strftime('%Y','now') AS INTEGER), member_afm, name, role, share, since, source, updated_at
+        FROM company_members
+    """,
+    # v19 (2026-10-27): τέλη/λοιποί φόροι ανά κατηγορία myDATA (σακούλα, πλαστικά, παρεπιδημούντες, διαμονή) και
+    # ΑΜΕ ανά εργοδότη — πολλά ΑΜΕ (ιδίως οικοδομοτεχνικά), το καθένα με ΔΙΚΟΥΣ του κωδικούς ΙΚΑ, για έλεγχο ΑΠΔ ΑΝΑ ΑΜΕ.
+    """
+    ALTER TABLE mydata_docs ADD COLUMN taxes_json TEXT NOT NULL DEFAULT '{}';
+    CREATE TABLE efka_ames (
+        afm        TEXT NOT NULL,
+        ame        TEXT NOT NULL,
+        kind       TEXT NOT NULL DEFAULT 'koinon',
+        name       TEXT NOT NULL DEFAULT '',
+        apd_code   TEXT NOT NULL DEFAULT '',
+        ika_user   TEXT NOT NULL DEFAULT '',
+        ika_pass   TEXT NOT NULL DEFAULT '',
+        active     INTEGER NOT NULL DEFAULT 1,
+        source     TEXT NOT NULL DEFAULT '',
+        check_status  TEXT NOT NULL DEFAULT '',
+        check_message TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (afm, ame)
+    );
+    INSERT OR IGNORE INTO efka_ames(afm, ame, kind, source, updated_at)
+        SELECT afm, ame, 'koinon', ame_source, updated_at FROM efka_credentials WHERE ame<>'';
+    INSERT OR IGNORE INTO efka_ames(afm, ame, kind, source, updated_at)
+        SELECT afm, ame_oikodomotexnikon, 'oikodom', 'efka', updated_at FROM efka_credentials
+        WHERE ame_oikodomotexnikon<>''
+    """,
 ]
 
 

@@ -120,6 +120,17 @@ def test_aade_gives_kads_state_books_and_gemi_is_not_called(conn):
     assert credentials.status_map(conn)[AFM]["check_status"] == "ok"
 
 
+def test_aade_contact_keeps_main_and_assistant_emails_distinct(conn):
+    service.add(conn, AFM)
+    credentials.set_(conn, AFM, "user", "pass")
+    contact = {"email": "basic@example.test", "origin": "mail", "email_assistant": "helper@example.test",
+               "assistant_origin": "mail2"}
+    service.lookup_and_store(conn, AFM, None, lambda *a: aade_ok(contact=contact))
+    row = conn.execute("SELECT email, email_origin, email_assistant, email_assistant_origin FROM businesses WHERE afm=?",
+                       (AFM,)).fetchone()
+    assert tuple(row) == ("basic@example.test", "mail", "helper@example.test", "mail2")
+
+
 def test_ceased_client_is_complete_without_kads_and_old_kads_are_cleared(conn):
     service.add(conn, AFM, "ΧΧΧ", kads=["47.11.10.01"])
     credentials.set_(conn, AFM, "u", "p")

@@ -536,7 +536,7 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
      φόρμα «Εκτύπωση» από τη σελίδα, κρατά αυτήν ΜΕ ποσά). Χρεωστικές δηλώσεις: `easycheck.declaration_amounts` φέρνει
      πλέον δόση/προθεσμία/ΔΟΥ/είδος φόρου και PDF (`pdf`, `pdf_checked`). GUI: Πελάτες → «Λήψη οφειλών»
      (`MainWindow.run_debt_sync`, ουρά εργασιών) και καρτέλα πελάτη → «Οφειλές & email» (`gui/debts_tab.py`).
-   - **Επικοινωνία:** `lookup_aade.parse_contact` (`getLdapInfo/{afm}`: `mail2`→`mailemep`→`mail`, κινητό ΜΟΝΟ 69xxxxxxxx,
+  - **Επικοινωνία:** `lookup_aade.parse_contact` (`getLdapInfo/{afm}`: βασικό email `mail`, βοηθητικό `mail2`→`mailemep`, κινητό ΜΟΝΟ 69xxxxxxxx,
      `phonenumber`) — ΜΟΝΟ όταν ο λογαριασμός είναι του ίδιου ΑΦΜ. `businesses.email/mobile/phone/contact_source`
      ('manual' = δεν τα πατά η ανάκτηση), `email_auto` (εξαίρεση από αυτόματα email).
    - **Email** (`mailer.py`, `email_log`): SMTP γραφείου (`smtp_*`, κωδικός secret), σκέτο κείμενο + HTML, ποτέ κωδικοί.
@@ -550,21 +550,23 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
      **τρέχουσες εισφορές e-ΕΦΚΑ** (`keao.efka_current` = `efka-notices.js`). Σύνδεση e-ΕΦΚΑ: `efka.services_login` —
      ΑΜΚΑ (φυσικά, μη μισθωτός: ΚΕΑΟ + ΕΦΚΑ) ή ΑΜΕ (εργοδότης: μόνο ΚΕΑΟ) — `debts.efka_plan`. ΑΜΚΑ: `efka.set_amka`
      (enc:1:), Excel «ΑΜΚΑ», καρτέλα «Κωδικοί».
-   - **«Μόνο δεδομένα» vs «έντυπα»** (όπως `DebtsRefresh` του Tax Center): `check_client(want_pdf=False)` = γρήγορη
-     ενημέρωση (καθημερινός, «Ενημέρωση οφειλών»)· `want_pdf=True` = Ταυτότητες ΑΑΔΕ + **δοσολόγιο ως 2η σελίδα**
+   - **Ενημέρωση οφειλών (2026-10-26):** η καρτέλα πελάτη καλεί πλέον `check_client(want_pdf=True)` από το ένα κουμπί
+     «Ενημέρωση οφειλών»· φέρνει στοιχεία + διαθέσιμα PDF σε μία εργασία. Τα PDF περιλαμβάνουν Ταυτότητες ΑΑΔΕ + **δοσολόγιο ως 2η σελίδα**
      (`reports.append_pages`, pypdf — port `DebtSchedule.kt`), καρτέλα ΚΕΑΟ ανά φορέα + δοσολόγιο ανά ενεργή ρύθμιση,
      τελευταίο ειδοποιητήριο ΕΦΚΑ. Τα PDF φτιάχνονται με `reports.py` (QTextDocument→PDF· `ensure_qt` δημιουργεί
      QApplication και στον headless daily — με την κανονική πλατφόρμα, ΟΧΙ offscreen που βγάζει «τετράγωνα»· τα tests
      βάζουν offscreen στο conftest). Επόμενη δόση = η ΠΑΛΑΙΟΤΕΡΗ απλήρωτη (`reports.unpaid_schedule`: στήλες από το
-     περιεχόμενο, όχι τα ονόματα). Αυτόματο email οφειλών: data-only → αν άλλαξε το `debts.fingerprint` → έντυπα → email.
+    περιεχόμενο, όχι τα ονόματα). Ο πίνακας χρησιμοποιεί `TableKit` και resizable στήλες· διπλό κλικ ανοίγει compact
+    `DebtCard` με σύνοψη/δοσολόγιο επάνω και λοιπά στοιχεία σε αναπτυσσόμενη ενότητα. Αυτόματο email οφειλών: data-only
+    → αν άλλαξε το `debts.fingerprint` → έντυπα → email.
    - **Αιτήματα ΑΑΔΕ** (`requests_aade.py`, `aade_requests`/`request_sync`, καρτέλα «Αιτήματα ΑΑΔΕ»): filterMessages /
      fetch / getMessageComm / downloadFile (eticketaade, σώματα JSON με `_HyperHttp.post_raw`)· αλλαγές όπως
      `AadeRequests.diff` (πρώτη λήψη = τίποτα νέο)· αθέατες → ειδοποίηση (`notices`)· ρύθμιση `daily_requests`.
-   - **Μέλη εταιρειών** (`members.py`, `company_members`, καρτέλα «Μέλη»): Μητρώο ΑΑΔΕ `getMelh` + `getSxeseisEpixeirhshs`
+  - **Μέλη εταιρειών** (`members.py`, `company_members` + `company_member_history`, καρτέλα «Μέλη»): τρέχουσα σύνθεση και στιγμιότυπα ανά φορολογική χρήση, ώστε οι αλλαγές να μην τροποποιούν προηγούμενα έτη. Μητρώο ΑΑΔΕ `getMelh` + `getSxeseisEpixeirhshs`
      (ΜΟΝΟ ενεργά) — αυτόματα με την ανάκτηση αν `fetch_members=1`, ή με κουμπί· Excel «ΑΦΜ εταιρείας» / «Μέλη» (ΔΕΝ έχει
      επαληθευτεί σε πραγματικό αρχείο). Οφειλές/έντυπα μέλους ΜΟΝΟ με τους δικούς του κωδικούς ⇒ «Προσθήκη ως πελάτη»
      (ρητά). Έντυπα μελών = `aml.retrieval.retrieve_for_client` (Μητρώο, Ε1/Ν). Το Tax Center ΔΕΝ έχει μέλη (μόνο σύζυγο).
-   - **Επικοινωνία:** `getLdapInfo` με cache-buster· `businesses.email_origin` (mail2/mailemep/mail) + `contact_at`·
+  - **Επικοινωνία:** `getLdapInfo` με cache-buster· κύριο email `mail`, βοηθητικό `mail2` ή `mailemep` (`email_assistant_origin`) + `contact_at`·
      `mailemep` = email ΕΚΠΡΟΣΩΠΟΥ/ΛΟΓΙΣΤΗ ⇒ προειδοποίηση στο Προφίλ και ΚΑΜΙΑ αυτόματη αποστολή εκεί.
    - **ΖΩΝΤΑΝΑ ΕΠΑΛΗΘΕΥΜΕΝΑ (2026-10-22, δύο εταιρείες του χρήστη — ΙΚΕ με μηνιαίο ΦΠΑ και ΕΕ με τριμηνιαίο — σε ΑΝΤΙΓΡΑΦΟ
      της βάσης, μόνο ανάγνωση):** στοιχεία επικοινωνίας (`getLdapInfo`, `mail`), μέλη (`getMelh`/σχέσεις, με ποσοστά),
@@ -586,10 +588,9 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
    - **Φ4 / Φ5:** Φ4 = παραδόσεις/παροχές (1.2/2.2), Φ5 = αποκτήσεις/λήψεις (14.1/14.3). `obligations.vies_forms` από τα
      `vies_out`/`vies_in` του `mydata.analysis.month_flags`· με γνωστό myDATA θέλει ΟΛΑ τα σχετικά έντυπα, χωρίς myDATA
      αρκεί ένα. Το easycheck ελέγχει πλέον και Φ5. (Πριν: εταιρεία με ΜΟΝΟ απόκτηση έβγαινε «Φ4 ΔΕΝ υποβλήθηκε».)
-   - **Email:** κύριο = `mail2` (προσωπικό, δηλωμένο από τον υπόχρεο)· `mail` (εγγραφή TAXISnet — στα πραγματικά δεδομένα
-     7 στους 8 πελάτες, ο χρήστης το αναγνώρισε ως «email βοηθού») / `mailemep` → `businesses.email_assistant`. Η v16
-     μετέφερε τα υπάρχοντα. Αυτόματα email ΜΟΝΟ στο κύριο· η χειροκίνητη αποστολή προτείνει το βοηθού αν λείπει το κύριο.
-     Επαληθεύτηκε ζωντανά: για τις δύο εταιρείες του χρήστη το `getLdapInfo` έχει ΜΟΝΟ `mail` (καθόλου `mail2`).
+   - **Email (διόρθωση χρήστη 2026-10-26, db v18):** κύριο = `mail`, βοηθητικό = `mail2` ή `mailemep`· η v18 αντιστρέφει τις παλιές αποθηκευμένες τιμές ΑΑΔΕ. Αυτόματα email ΜΟΝΟ στο κύριο· η χειροκίνητη αποστολή προτείνει το βοηθητικό αν λείπει το κύριο. Η σημασιολογία ορίστηκε από τον χρήστη.
+   - **Μέλη ανά χρήση (2026-10-26, db v18):** η παλιά βάση αρχικοποιεί το τρέχον έτος από τα υπάρχοντα `company_members`· τα snapshots προηγούμενων ετών καταγράφονται από την αναβάθμιση και μετά.
+   - **Αρχική / Ημερολόγιο (2026-10-26):** άρθρα σε tabs «Φορολογικά»/«Γενικά νέα» βάσει `topic`· tab «Ανά εργασία» = checklist υποχρεώσεων ανά πελάτη/χρήση/μήνα, με μισθοδοσία χωριστά από ΑΑΔΕ και ολοκλήρωση στο `obligation_done`.
    - **Διακριτικός τίτλος** = `commercialtitle` του `getMhtrwoEpixeirhshs` (ζωντανά) → `businesses.trade_name`· αναζήτηση
      πελατών και με αυτόν. (Το ίδιο endpoint έχει και `endokoinotikessynallages` — δεν χρησιμοποιείται ακόμη.)
    - **Μέλη ως πελάτες:** `members.sync_member_clients` με κάθε ανάκτηση εταιρείας (`fetch_members` πλέον default 1) —
@@ -613,3 +614,27 @@ packaging/                    entry.py (PyInstaller entry — μπαίνει σ�
      «πολιτικα»), ισχυροί (ένας αρκεί) / αδύναμοι (δύο) / αρνητικοί στον τίτλο (κύκλωμα, κατάσχεση…). Ζωντανά: capital.gr
      99 → 8 άρθρα προς LLM (πριν ~23). Νέες πηγές (ζωντανά επαληθευμένες): e-nomothesia (ΦΕΚ), mononews/newmoney
      ετικέτα ΑΑΔΕ, ΟΕΕ (off). Απορρίφθηκαν: dikaiologitika (feed του 2013), ΑΑΔΕ (χωρίς RSS).
+22. **Τέλη, ΑΠΔ ανά ΑΜΕ, ΓΕΜΗ, χρήση (2026-10-27, ρητά αιτήματα — db v19).**
+   - **ΓΕΜΗ «Διαγραφή»** (`lookup_business_portal.business_state`, `lastStatusChange`) → `activity_state='ceased'` +
+     `cease_date` όταν δεν υπάρχει Μητρώο ΑΑΔΕ (μέλος χωρίς κωδικούς). Ζωντανά: μέλος με διακοπή 19/02/2025 ✓.
+   - **myDATA τέλη** (`parse.tax_lines` → `mydata_docs.taxes_json`, `analysis.FEE_GROUPS`, επίσημο API v2.0.0): τέλη 8 =
+     σακούλα (H7), 16 = πλαστικά, 18–22 = παρεπιδημούντες/ακαθάριστα· λοιποί φόροι 6–10, 20–30 = διαμονή (H6). Κανόνες
+     `plastic_bag_fee`, `plastics_fee` (τρίμηνο), `parepid_fee`, `apd_teka`. Παλιά παραστατικά δεν έχουν taxes_json —
+     χρειάζεται νέα «Λήψη myDATA».
+   - **ΟΙ ΠΥΛΕΣ ΔΕΝ ΞΕΡΟΥΝ ΤΟΝ ΥΠΟΧΡΕΟ** (ζωντανά): TAXISnet H6/H7 δείχνει «Δεν έχει υποβληθεί» σε ΚΑΘΕ περίοδο για
+     όλους· Plastic `getIsActiveEpitid` = true για κάθε ενεργή επιχείρηση. Υποχρέωση = μόνο από myDATA
+     (`easycheck._only_liable_fee_periods`, `plastics_entry(liable=…)`). dae.govapp.gr: `GetPendingPeriodikes` = πραγματική
+     εκκρεμότητα. `fee_portals.py` (port runner aade-plastic-check / dae-parepid-check) — logins ζωντανά ✓, DAE ✓ (εταιρεία του χρήστη:
+     μηνιαίες δηλώσεις Ιαν–Σεπ).
+   - **ΑΠΔ ανά ΑΜΕ, ΕΦΚΑ και ΤΕΚΑ χωριστά** (`efka.check_apd_entries`, πίνακας `efka_ames` με κωδικούς ανά ΑΜΕ enc:1:,
+     obligation «ΑΠΔ#ΑΜΕ»/«ΑΠΔ_ΤΕΚΑ#ΑΜΕ», ένωση στο `deadlines._merge_per_ame`). Σελίδες
+     `services.e-efka.gov.gr/ssp.efka.apd[.teka]/secure/submissions.xhtml` μετά από «Είσοδο Εργοδότη» TAXISnet + ΑΜΕ —
+     ΖΩΝΤΑΝΑ ✓ (δύο εταιρείες). Η παλιά `apps…/eAPDsso` ανακατευθύνει πλέον στη νέα· δεν υπάρχει είσοδος εργοδότη με
+     κωδικούς ΙΚΑ στη σελίδα (μόνο TAXISnet) — οι «κωδικοί ανά ΑΜΕ» δοκιμάζονται ως GSIS. ΤΕΚΑ χωρίς καμία ΑΠΔ = δεν αφορά.
+   - **Παρεπιδημούντες από ΚΑΔ** (`parepid.py`, λίστα του χρήστη): «υπό προϋποθέσεις», ειδοποίηση + φίλτρο Πελατών.
+   - **Χρήση** (`fiscal.py`, ΧΡΗΣΗ πάνω αριστερά, όπως timologio)· Πελάτες: φίλτρο «Εμφάνιση», «Καθαρισμός φίλτρων»,
+     «Ανανέωση» (αναζήτηση = η ΜΙΑ πάνω-δεξιά). **Αδέσποτα παράθυρα** στην εκκίνηση/καρτέλα: QWidget χωρίς γονέα +
+     setVisible(True) στο TableKit — διορθώθηκε, test `test_no_stray_top_level_windows…`.
+   - **Ημερολόγιο → «Ανά εργασία» → «Εργασίες / Υπόχρεοι»** όπως ο πίνακας Πελατών: checkbox στη στήλη 0 (`_W_CHK`,
+     κρατά το row dict), Επιλογή/Αποεπιλογή όλων, «Ολοκληρώθηκε»/«Έλεγχος υποβολής» στις τσεκαρισμένες (αλλιώς στην
+     τρέχουσα γραμμή)· η επιλογή κρατιέται στο ξαναγέμισμα. Νέο κλειδί πλατών `calendar_work_items2` (άλλαξαν οι στήλες).

@@ -79,6 +79,7 @@ class MydataTab(QWidget):
         this_year = date.today().year
         for y in range(this_year, this_year - 6, -1):
             self.year.addItem(str(y), y)
+        self.year.setCurrentIndex(max(self.year.findData(getattr(main, "fiscal_year", this_year)), 0))
         self.year.currentIndexChanged.connect(lambda _i: self._fill_months())
         bar.addWidget(self.year)
         bar.addWidget(QLabel("Μήνας:"))

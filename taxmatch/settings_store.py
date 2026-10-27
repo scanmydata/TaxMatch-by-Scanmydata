@@ -82,6 +82,7 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     # πελάτες· ο αστερίσκος της στήλης ΦΠΑ μένει ώς την επόμενη εκκίνηση, ή μόνιμα με το `vat_option_mark_keep`.
     SettingDef("notice_vat_quarter_read", "Αναγνωσμένη ειδοποίηση επιστροφής στο τρίμηνο"),
     SettingDef("vat_option_mark_keep", "Μόνιμος αστερίσκος ΦΠΑ για επιστροφή στο τρίμηνο", default="0"),
+    SettingDef("notice_parepid_read", "Αναγνωσμένη ειδοποίηση τέλους παρεπιδημούντων"),
 ]}
 
 

@@ -123,7 +123,8 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
 
 # ------------------------------------------------------------------ ποιους πελάτες αφορά ένα γεγονός
 _BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, vat_period_source, books_category, "
-                 "activity_state, cease_date, employer, intrastat "
+                 "activity_state, cease_date, employer, intrastat, "
+                 "(SELECT group_concat(k.code, ',') FROM business_kad k WHERE k.afm=businesses.afm) AS kad_codes "
                  "FROM businesses")
 #: Ίδια προθεσμία αν κανόνας και γεγονός του taxheaven απέχουν έως τόσες ημέρες (Σαββατοκύριακα, παρατάσεις λίγων ημερών).
 _SAME_DEADLINE_DAYS = 6
@@ -164,6 +165,8 @@ def _checks_for(conn: sqlite3.Connection, afm: Optional[str] = None) -> dict[str
             c["periods"][(r["obligation"], r["period_end"][:7])] = {
                 "status": r["status"], "amounts": json.loads(r["amounts_json"] or "{}"), "obligation": r["obligation"],
                 "period": r["period"], "detail": r["detail"], "checked_at": r["checked_at"]}
+        if "#" in r["obligation"]:
+            _merge_per_ame(c, r)
     for r in conn.execute("SELECT afm, rule_id, ref_month, done_at FROM obligation_done" + where, args):
         entry = out.setdefault(r["afm"], {"checks": {"years": {}, "periods": {}}, "done": set()})
         entry["done"].add((r["rule_id"], r["ref_month"]))
@@ -171,6 +174,36 @@ def _checks_for(conn: sqlite3.Connection, afm: Optional[str] = None) -> dict[str
     if afm:
         return out.get(afm, {"checks": {"years": {}, "periods": {}}, "done": set()})
     return out
+
+
+_STATUS_RANK = {"not_submitted": 3, "pending": 2, "submitted": 1, "not_obligated": 0}
+
+
+def _merge_per_ame(c: dict[str, Any], r: sqlite3.Row) -> None:
+    """ΑΠΔ ανά ΑΜΕ («ΑΠΔ#<ΑΜΕ>», «ΑΠΔ_ΤΕΚΑ#<ΑΜΕ>») → και στο βασικό κλειδί του κανόνα: η περίοδος «υποβλήθηκε» μόνο αν
+    υποβλήθηκε για ΚΑΘΕ ΑΜΕ (αλλιώς η χειρότερη κατάσταση), ποσά αθροίζονται, λεπτομέρειες ανά ΑΜΕ."""
+    base, ame = r["obligation"].split("#", 1)
+    ykey = (base, r["year"])
+    old = c["years"].get(ykey)
+    if old is None or _STATUS_RANK.get(r["status"], 0) > _STATUS_RANK.get(old, 0):
+        c["years"][ykey] = r["status"]
+    if not r["period_end"]:
+        return
+    pkey = (base, r["period_end"][:7])
+    amounts = json.loads(r["amounts_json"] or "{}")
+    detail = f"ΑΜΕ {ame}: {r['detail']}" if r["detail"] else f"ΑΜΕ {ame}"
+    cur = c["periods"].get(pkey)
+    if cur is None:
+        c["periods"][pkey] = {"status": r["status"], "amounts": dict(amounts), "obligation": base, "period": r["period"],
+                              "detail": detail, "checked_at": r["checked_at"], "ames": [ame]}
+        return
+    if _STATUS_RANK.get(r["status"], 0) > _STATUS_RANK.get(cur["status"], 0):
+        cur["status"] = r["status"]
+    for k, v in amounts.items():
+        if isinstance(v, (int, float)):
+            cur["amounts"][k] = round(float(cur["amounts"].get(k) or 0) + v, 2)
+    cur["detail"] = (cur["detail"] + " · " + detail).strip(" ·")
+    cur.setdefault("ames", []).append(ame)
 
 
 def mark_done(conn: sqlite3.Connection, afm: str, rule_id: str, ref_month: str, done: bool = True, note: str = "") -> None:
@@ -334,5 +367,29 @@ def client_year(conn: sqlite3.Connection, afm: str, year: int) -> list[dict[str,
                     "status": status, "reason": reason, "url": oc.source_url, "description": oc.description,
                     "submission": obligations.submission(oc.rule_id, business, oc.ref_month)})
     out.sort(key=lambda r: (r["date"], r["title"]))
+    return out
+
+
+def work_items(conn: sqlite3.Connection, year: int, afm: Optional[str] = None) -> list[dict[str, Any]]:
+    """Υποχρεώσεις της χρήσης για την καρτέλα «Ανά εργασία»: ένας πελάτης × κανόνας × μήνας."""
+    start, end = date(year, 1, 1), date(year + 1, 8, 31)
+    payroll = {"apd", "ergani_e4", "fmy_wages"}
+    out = []
+    for business in _businesses(conn):
+        if afm and business["afm"] != afm:
+            continue
+        for oc in obligations.occurrences(start, end, business):
+            if obligations.check_year(oc.rule_id, oc.ref_month) != year:
+                continue
+            status, reason = obligations.liability(oc.rule_id, business, oc.ref_month)
+            if status == "no":
+                continue
+            out.append({"afm": business["afm"], "name": business["name"] or business["afm"],
+                        "rule_id": oc.rule_id, "title": oc.title, "date": oc.date.isoformat(),
+                        "ref_month": oc.ref_month, "category": "Μισθοδοσία" if oc.rule_id in payroll else "ΑΑΔΕ",
+                        "status": status, "reason": reason,
+                        "submission": obligations.submission(oc.rule_id, business, oc.ref_month),
+                        "description": oc.description})
+    out.sort(key=lambda r: (r["date"], r["category"], r["title"], r["name"]))
     return out
 

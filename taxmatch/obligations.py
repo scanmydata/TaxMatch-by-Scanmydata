@@ -196,11 +196,18 @@ RULES: list[Rule] = [
          "https://mitos.gov.gr/index.php/%CE%94%CE%94:%CE%94%CE%AE%CE%BB%CF%89%CF%83%CE%B7_%CE%A6%CE%A0%CE%91", "monthly",
          month_end, applies=_conditional_vat, hide_if_feed_terms=("ioss",),
          period=_period_month),
-    Rule("apd", "ΑΠΔ e-ΕΦΚΑ & πληρωμή εισφορών — {period}",
+    Rule("apd", "ΑΠΔ e-ΕΦΚΑ (ΙΚΑ) & πληρωμή εισφορών — {period}",
          "Υποβολή Αναλυτικής Περιοδικής Δήλωσης και καταβολή εισφορών έως το τέλος του επόμενου μήνα. Μόνο για εργοδότες. "
          "Παρατάσεις υποβολής ανακοινώνονται συχνά από τον e-ΕΦΚΑ (η πληρωμή συνήθως μένει ίδια).",
          "https://www.e-efka.gov.gr/el/deltia-typoy", "monthly", month_end_or_next,
          applies=_conditional, hide_if_feed_terms=("απδ",), period=_period_month),
+    # ΑΠΔ ΤΕΚΑ: ΞΕΧΩΡΙΣΤΗ υποβολή (TaxSystem: RetrievalKindPdfs.APD_Teka → «eAPDssoTEKA» / ssp.efka.apd.teka) για
+    # όσους εργαζόμενους ασφαλίζονται επικουρικά στο ΤΕΚΑ (νέοι από 1/1/2022) — ρητό αίτημα χρήστη 2026-10-27.
+    Rule("apd_teka", "ΑΠΔ ΤΕΚΑ & πληρωμή εισφορών — {period}",
+         "Αναλυτική Περιοδική Δήλωση του Ταμείου Επικουρικής Κεφαλαιοποιητικής Ασφάλισης (ΤΕΚΑ) — χωριστή από την ΑΠΔ "
+         "e-ΕΦΚΑ — έως το τέλος του επόμενου μήνα. Μόνο για εργοδότες με εργαζόμενους ασφαλισμένους επικουρικά στο ΤΕΚΑ.",
+         "https://www.teka.gov.gr/", "monthly", month_end_or_next,
+         applies=_conditional, hide_if_feed_terms=("τεκα",), period=_period_month),
     Rule("withholding_fees", "Παρακρατούμενος φόρος αμοιβών / εργολάβων — {period}",
          "Δήλωση και απόδοση του φόρου που παρακράτησε ο πελάτης σε αμοιβές επιχειρηματικής δραστηριότητας (20%), "
          "εργολάβους τεχνικών έργων (3%), τόκους/δικαιώματα κ.λπ., έως το τέλος του ΔΕΥΤΕΡΟΥ μήνα από την καταβολή "
@@ -227,6 +234,25 @@ RULES: list[Rule] = [
          "https://www.taxheaven.gr/news/68790/pshfiako-telos-synallagwn-h-dhlwsh-kai-o-tropos-ypobolhs-ths",
          "monthly", month_end_or_next, applies=_conditional, hide_if_feed_terms=("ψηφιακου τελους",),
          period=_period_month),
+    # Τέλη που εντοπίζονται από τις κατηγορίες τελών του myDATA (mydata/analysis.FEE_GROUPS) — ρητό αίτημα 2026-10-27.
+    Rule("plastic_bag_fee", "Περιβαλλοντικό τέλος πλαστικής σακούλας — {period}",
+         "Δήλωση απόδοσης του περιβαλλοντικού τέλους πλαστικής σακούλας μεταφοράς (ν. 2339/2001 αρ. 6α) ανά τρίμηνο, "
+         "έως το τέλος του επόμενου μήνα (TAXISnet → otherAppH7). Μόνο αν τιμολογεί το τέλος (κατηγορία τελών 8 στο myDATA).",
+         "https://www.aade.gr/epiheiriseis/forologikes-ypohreoseis/periballontiko-telos-plastikis-sakoylas",
+         "quarterly", month_end_or_next, due_months=(1, 4, 7, 10), applies=_conditional,
+         hide_if_feed_terms=("σακουλας",), period=_period_quarter),
+    Rule("plastics_fee", "Εισφορά πλαστικών προϊόντων (ν. 4736/2020) — {period}",
+         "Δήλωση της περιβαλλοντικής εισφοράς στα πλαστικά προϊόντα μιας χρήσης (κύπελλα, καπάκια, περιέκτες τροφίμων) ανά "
+         "τρίμηνο, έως το τέλος του επόμενου μήνα (εφαρμογή «Περιβαλλοντική Εισφορά Πλαστικών» της ΑΑΔΕ). Μόνο αν τιμολογεί "
+         "την εισφορά (κατηγορία τελών 16 στο myDATA).",
+         "https://www1.aade.gr/saadeapps3/Plastic/", "quarterly", month_end_or_next, due_months=(1, 4, 7, 10),
+         applies=_conditional, hide_if_feed_terms=("πλαστικων",), period=_period_quarter),
+    Rule("parepid_fee", "Τέλος παρεπιδημούντων / ακαθαρίστων εσόδων — {period}",
+         "Δήλωση απόδοσης του τέλους διαμονής παρεπιδημούντων και του τέλους επί των ακαθαρίστων εσόδων (εστιατόρια, κέντρα "
+         "διασκέδασης κ.λπ.) στην πλατφόρμα dae.govapp.gr (ΑΑΔΕ/ΚΕΔΕ, από 1/4/2025), έως το τέλος του επόμενου μήνα της "
+         "περιόδου (μήνας ή τρίμηνο, όπως ο ΦΠΑ). Μόνο αν τιμολογεί τα τέλη (κατηγορίες τελών 18–22 στο myDATA).",
+         "https://dae.govapp.gr/", "monthly", month_end_or_next, applies=_conditional,
+         hide_if_feed_terms=("παρεπιδημουντων",), period=_period_month),
     Rule("ergani_e4", "ΕΡΓΑΝΗ — Ετήσιος Πίνακας Προσωπικού (Ε4)",
          "Υποβολή του Ε4 από 1 έως 31 Οκτωβρίου κάθε έτους· η προθεσμία παρατείνεται συχνά με υπουργική απόφαση. "
          "Μόνο για εργοδότες.",
@@ -245,7 +271,7 @@ RULES_BY_ID = {r.id: r for r in RULES}
 #: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
 _BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4",
                   "withholding_fees", "fmy_wages", "climate_fee", "digital_fee"}
-_BUSINESS_ONLY |= {"vat_quarter_option"}
+_BUSINESS_ONLY |= {"vat_quarter_option", "apd_teka", "plastic_bag_fee", "plastics_fee", "parepid_fee"}
 _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
                  "vat_quarter_option": "μόνο Β΄ κατηγορίας σε μηνιαίο ΦΠΑ που συμπλήρωσαν 24 μήνες από την έναρξη",
                  "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
@@ -254,15 +280,30 @@ _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές σ
                  "withholding_fees": "μόνο αν παρακράτησε φόρο σε αμοιβές/εργολάβους (λείπουν στοιχεία myDATA)",
                  "fmy_wages": "μόνο αν απασχολεί προσωπικό",
                  "climate_fee": "μόνο αν εκδίδει στοιχεία 8.2 (καταλύματα) — λείπουν στοιχεία myDATA",
-                 "digital_fee": "μόνο αν εισπράττει ψηφιακό τέλος συναλλαγής — λείπουν στοιχεία myDATA"}
+                 "digital_fee": "μόνο αν εισπράττει ψηφιακό τέλος συναλλαγής — λείπουν στοιχεία myDATA",
+                 "apd_teka": "μόνο αν απασχολεί εργαζόμενους ασφαλισμένους επικουρικά στο ΤΕΚΑ",
+                 "plastic_bag_fee": "μόνο αν τιμολογεί τέλος πλαστικής σακούλας — λείπουν στοιχεία myDATA",
+                 "plastics_fee": "μόνο αν τιμολογεί εισφορά πλαστικών προϊόντων — λείπουν στοιχεία myDATA",
+                 "parepid_fee": "μόνο αν τιμολογεί τέλος παρεπιδημούντων/ακαθαρίστων — λείπουν στοιχεία myDATA"}
 #: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
 _MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding", "climate_fee": "climate",
-                "digital_fee": "digital_fee"}
+                "digital_fee": "digital_fee", "plastic_bag_fee": "plastic_bag", "plastics_fee": "plastics",
+                "parepid_fee": "parepid"}
+#: Τέλη τριμήνου: η σημαία myDATA ισχύει αν εμφανίστηκε σε ΟΠΟΙΟΝΔΗΠΟΤΕ μήνα του τριμήνου.
+_QUARTER_FLAGS = {"plastic_bag_fee", "plastics_fee"}
+#: Τέλη που προκύπτουν ΜΟΝΟ από τα έσοδα του myDATA — «ποτέ στο myDATA» ⇒ «όχι» (όχι «υπό προϋποθέσεις» για όλους).
+_MYDATA_ONLY = {"climate_fee", "digital_fee", "plastic_bag_fee", "plastics_fee", "parepid_fee"}
 _MYDATA_REASON = {"vies": ("ενδοκοινοτικές συναλλαγές στο myDATA", "καμία ενδοκοινοτική συναλλαγή στο myDATA"),  # βλ. vies_reason
                   "intrastat": ("υπέρβαση κατωφλίου Intrastat (myDATA)", "κάτω από τα κατώφλια Intrastat (myDATA)"),
                   "withholding_fees": ("παραστατικά με παρακράτηση φόρου στο myDATA", "καμία παρακράτηση στο myDATA"),
                   "climate_fee": ("εξέδωσε στοιχεία 8.2 (τέλος ανθεκτικότητας) στο myDATA", "κανένα 8.2 στο myDATA"),
-                  "digital_fee": ("ψηφιακό τέλος συναλλαγής στα έσοδα (myDATA)", "κανένα ψηφιακό τέλος στα έσοδα")}
+                  "digital_fee": ("ψηφιακό τέλος συναλλαγής στα έσοδα (myDATA)", "κανένα ψηφιακό τέλος στα έσοδα"),
+                  "plastic_bag_fee": ("τέλος πλαστικής σακούλας στα έσοδα (myDATA, κατ. τελών 8)",
+                                      "κανένα τέλος σακούλας στο τρίμηνο (myDATA)"),
+                  "plastics_fee": ("εισφορά πλαστικών προϊόντων στα έσοδα (myDATA, κατ. τελών 16)",
+                                   "καμία εισφορά πλαστικών στο τρίμηνο (myDATA)"),
+                  "parepid_fee": ("τέλος παρεπιδημούντων/ακαθαρίστων στα έσοδα (myDATA, κατ. τελών 18–22)",
+                                  "κανένα τέλος παρεπιδημούντων στο myDATA")}
 
 #: Ποιος έλεγχος υποβολών (easycheck.OBLIGATIONS) απαντά αν υποβλήθηκε η δήλωση κάθε κανόνα. Η χρήση του ελέγχου είναι
 #: το έτος του μήνα αναφοράς (δήλωση εισοδήματος: το προηγούμενο έτος της προθεσμίας).
@@ -270,8 +311,14 @@ RULE_CHECKS: dict[str, tuple[str, ...]] = {
     "vat_monthly": ("Φ2",), "vat_quarterly": ("Φ2",), "vies": ("Φ4", "Φ5"),     # ποιο από τα δύο: vies_forms
     "withholding_fees": ("ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ"),
     "fmy_wages": ("ΦΜΥ",), "climate_fee": ("ΔΙΑΜΟΝΗ",), "income_tax_return": ("E1", "E3", "ΕΙΣΟΔΗΜΑ_ΝΠ"),
-    "apd": ("ΑΠΔ",),                       # e-ΕΦΚΑ (οικονομική καρτέλα εργοδότη) — βλ. efka.py
+    "apd": ("ΑΠΔ",),                       # e-ΕΦΚΑ (ΙΚΑ) ανά ΑΜΕ («ΑΠΔ#<ΑΜΕ>», ενώνονται στο deadlines) — βλ. efka.py
+    "apd_teka": ("ΑΠΔ_ΤΕΚΑ",),             # ΤΕΚΑ ανά ΑΜΕ — βλ. efka.check_apd
+    "plastic_bag_fee": ("ΠΕΡΙΒΑΛΛΟΝ",),    # TAXISnet otherAppH7 (easycheck)
+    "plastics_fee": ("ΠΛΑΣΤΙΚΑ",),         # εφαρμογή «Plastic» — βλ. fee_portals.py
+    "parepid_fee": ("ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ",),   # dae.govapp.gr — βλ. fee_portals.py
 }
+#: Έλεγχοι που μπορεί να έρθουν ανά ΤΡΙΜΗΝΟ ενώ ο κανόνας είναι μηνιαίος (dae.govapp.gr: όπως η περίοδος ΦΠΑ).
+_QUARTER_FALLBACK = {"parepid_fee"}
 #: Κανόνες που ολοκληρώνονται ΜΟΝΟ χειροκίνητα (δεν υπάρχει ακόμη μέθοδος ελέγχου υποβολής).
 MANUAL_ONLY = {"digital_fee"}
 
@@ -386,6 +433,16 @@ def vat_option_note(business: Optional[dict[str, Any]], today: Optional[date] = 
             f"τριμηνιαίος μπορεί να επιλεγεί από {opt['eligible_from'].strftime('%m/%Y')} (δήλωση έως {dl}).")
 
 
+def parepid_note(business: Optional[dict[str, Any]]) -> str:
+    """Πιθανή υποχρέωση τέλους παρεπιδημούντων/ακαθαρίστων από τον ΚΑΔ (`parepid.py`) — '' αν δεν ταιριάζει ΚΑΔ.
+    `business['kad_codes']` (deadlines._BUSINESS_SQL) ή `business['kads']`."""
+    from . import parepid
+    if not business:
+        return ""
+    kads = business.get("kads") or [k for k in (business.get("kad_codes") or "").split(",") if k]
+    return parepid.note([k["code"] if isinstance(k, dict) else k for k in kads])
+
+
 def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
     """('yes' | 'maybe' | 'no', αιτιολογία) για ΕΝΑΝ πελάτη, από ό,τι ήδη ξέρουμε (Μητρώο ΑΑΔΕ): κατάσταση δραστηριότητας,
     υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων — και εργοδότης/Intrastat από την εισαγωγή Excel. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
@@ -427,8 +484,17 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     flag_key = _MYDATA_FLAG.get(rule_id)
     if flag_key and ref_month:
         value = ((business.get("mydata") or {}).get(ref_month) or {}).get(flag_key)
+        if rule_id in _QUARTER_FLAGS:
+            y, m = int(ref_month[:4]), int(ref_month[5:7])
+            first = m - (m - 1) % 3
+            vals = [((business.get("mydata") or {}).get(f"{y}-{mm:02d}") or {}).get(flag_key)
+                    for mm in range(first, first + 3)]
+            value = True if any(vals) else (False if any(v is not None for v in vals) else None)
         if value is not None:
             yes, no = _MYDATA_REASON[rule_id]
+            if rule_id == "parepid_fee" and not value and parepid_note(business):
+                # εστίαση/καταλύματα συχνά ΔΕΝ γράφουν το τέλος στο myDATA — ο ΚΑΔ κρατά την πιθανή υποχρέωση
+                return "maybe", parepid_note(business)
             if rule_id == "vies" and value:
                 forms, known = vies_forms(business, ref_month)
                 if known:
@@ -436,11 +502,20 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             return ("yes", yes) if value else ("no", no)
     # Τέλη που προκύπτουν ΜΟΝΟ από τα έσοδα του myDATA (8.2, ψηφιακό τέλος): αν έχουν κατέβει μήνες του πελάτη και δεν
     # εμφανίστηκαν ποτέ, ο μήνας που λείπει δεν γίνεται «υπό προϋποθέσεις» για 150+ πελάτες — «όχι» με αιτιολογία.
-    if rule_id in ("climate_fee", "digital_fee") and business.get("mydata_ever"):
+    if rule_id == "parepid_fee" and parepid_note(business):
+        return "maybe", parepid_note(business)
+    if rule_id in _MYDATA_ONLY and business.get("mydata_ever"):
         if not business["mydata_ever"].get(flag_key):
             return "no", "δεν έχει εντοπιστεί ποτέ στα έσοδα του myDATA"
     # Σημαίες από την εισαγωγή Excel (db v11): «Μισθοδοσία» = εργοδότης· στοιχεία Intrastat = υποβάλλει Intrastat.
     # NULL = άγνωστο -> μένει «υπό προϋποθέσεις». Ποτέ «όχι» για Intrastat από απουσία στοιχείων.
+    if rule_id == "apd_teka":
+        if business.get("employer") == 0:
+            return "no", "χωρίς μισθοδοσία"
+        yr = ((business.get("checks") or {}).get("years") or {}).get(
+            ("ΑΠΔ_ΤΕΚΑ", int(ref_month[:4]) if ref_month else date.today().year))
+        if yr in ("submitted", "not_submitted", "pending"):
+            return "yes", "υποβάλλει ΑΠΔ ΤΕΚΑ (έλεγχος υποβολών e-ΕΦΚΑ)"
     if rule_id in ("apd", "ergani_e4", "fmy_wages") and business.get("employer") is not None:
         return ("yes", "εργοδότης (μισθοδοσία)") if business["employer"] else ("no", "χωρίς μισθοδοσία")
     if rule_id == "intrastat" and business.get("intrastat"):
@@ -484,6 +559,9 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str)
             hit = periods.get((key, ref_month))                     # περίοδος τριμήνου = μήνας λήξης του
         else:
             hit = periods.get((key, ref_month))
+            if not hit and rule_id in _QUARTER_FALLBACK and ref_month:
+                y, m = int(ref_month[:4]), int(ref_month[5:7])
+                hit = periods.get((key, f"{y}-{m + (3 - m % 3) % 3:02d}"))      # τρίμηνο που περιέχει τον μήνα
         if hit:
             found.append(hit)
     if out["status"] == "done":

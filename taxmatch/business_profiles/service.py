@@ -359,6 +359,7 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
 
     # ---- 2. ΓΕΜΗ: fallback (ΚΑΔ που λείπουν, νομική μορφή νομικών προσώπων, όταν η ΑΑΔΕ δεν απάντησε)
     gemi_fields: dict[str, Any] = {}
+    gemi_state: dict[str, str] = {}
     key = settings_store.get(conn, "business_portal_key")
     needs_gemi = (not aade or aade.get("kind") == "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ"
                   or (aade.get("business_state", "active") == "active" and not kads))
@@ -372,7 +373,9 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
                              ("address", "address"), ("ar_gemi", "ar_gemi")):
                 if c.get(src):
                     gemi_fields[dst] = c[src]
-            if not kads:
+            gemi_state = {"state": c.get("state") or "", "date": c.get("status_date") or "",
+                          "status": c.get("status") or "", "start": c.get("start_date") or ""}
+            if not kads and gemi_state["state"] != "ceased":
                 kads = c.get("kads") or []
             sources.append("ΓΕΜΗ")
         except (portal.NotFound, PermissionError) as exc:
@@ -426,6 +429,15 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         sets += ["activity_state=?", "cease_date=?", "cease_reason=?", "start_date=?"]
         args += [aade.get("business_state") or "", aade.get("cease_date") or "", aade.get("cease_reason") or "",
                  aade.get("business_start") or ""]
+    elif gemi_state.get("state"):
+        # Χωρίς Μητρώο ΑΑΔΕ (π.χ. μέλος εταιρείας χωρίς δικούς του κωδικούς): η κατάσταση του ΓΕΜΗ — «Διαγραφή» =
+        # διακοπή με ημερομηνία την τελευταία αλλαγή κατάστασης (αναφορά χρήστη 2026-10-27).
+        sets += ["activity_state=?", "cease_date=?", "cease_reason=?"]
+        args += [gemi_state["state"], gemi_state.get("date", "") if gemi_state["state"] == "ceased" else "",
+                 f"ΓΕΜΗ: {gemi_state.get('status', '')}" if gemi_state["state"] == "ceased" else ""]
+        if gemi_state.get("start"):
+            sets.append("start_date=CASE WHEN start_date='' THEN ? ELSE start_date END")
+            args.append(gemi_state["start"])
     if vat:
         sets += ["vat_subject=?", "books_category=?", "books_category_raw=?"]
         args += [None if vat["vat_subject"] is None else int(vat["vat_subject"]), vat["books_category"],
@@ -443,9 +455,10 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         sets.append("contact_source=CASE WHEN contact_source='manual' THEN 'manual' ELSE 'aade' END")
         sets.append("email_origin=CASE WHEN contact_source='manual' THEN email_origin ELSE ? END")
         sets.append("email_assistant=CASE WHEN contact_source='manual' THEN email_assistant ELSE ? END")
+        sets.append("email_assistant_origin=CASE WHEN contact_source='manual' THEN email_assistant_origin ELSE ? END")
         sets.append("contact_at=?")
         args += [contact.get("email", ""), contact.get("mobile", ""), contact.get("phone", ""), contact.get("origin", ""),
-                 contact.get("email_assistant", ""), now]
+             contact.get("email_assistant", ""), contact.get("assistant_origin", ""), now]
     if aade and aade.get("trade_name") is not None and "trade_name" in aade:
         sets.append("trade_name=?")
         args.append(aade.get("trade_name") or "")

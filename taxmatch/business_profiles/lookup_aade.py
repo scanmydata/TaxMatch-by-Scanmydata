@@ -300,17 +300,15 @@ _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$")
 
 
 def parse_contact(ldap: str) -> Dict[str, str]:
-    """Στοιχεία επικοινωνίας από το `getLdapInfo/{afm}` του Μητρώου (port του ScanMyData Tax Center `aade-profile.js`):
-    **κύριο email = `mail2`**, αυτό που δήλωσε ο ίδιος ο υπόχρεος (προσωπικό)· **email βοηθού** = `mailemep`
-    (εκπρόσωπος/λογιστής) ή `mail` (email εγγραφής TAXISnet — συχνά του βοηθού/γραφείου). Πριν το `mail`/`mailemep`
-    έμπαινε ως κύριο όταν έλειπε το `mail2` — αναφορά χρήστη 2026-10-23 («φέρνει το email βοηθού»). Κινητό από
+    """Στοιχεία επικοινωνίας από το `getLdapInfo/{afm}` του Μητρώου: **κύριο email = `mail`**· email βοηθού = `mail2`
+    ή `mailemep` (εκπρόσωπος/λογιστής). Κινητό από
     `mobilenumber` → `mobilenumberemep` (ΜΟΝΟ ελληνικό 69xxxxxxxx — λάθος αριθμός θα έστελνε φορολογικά στοιχεία σε
     τρίτο)· σταθερό από `phonenumber`."""
     out = {"email": "", "mobile": "", "phone": "", "origin": "", "email_assistant": "", "assistant_origin": ""}
-    personal = _tag(ldap, "mail2")
+    personal = _tag(ldap, "mail")
     if personal and _EMAIL.match(personal):
-        out["email"], out["origin"] = personal.lower(), "mail2"
-    for name in ("mailemep", "mail"):
+        out["email"], out["origin"] = personal.lower(), "mail"
+    for name in ("mail2", "mailemep"):
         candidate = (_tag(ldap, name) or "").lower()
         if candidate and _EMAIL.match(candidate) and candidate != out["email"]:
             out["email_assistant"], out["assistant_origin"] = candidate, name

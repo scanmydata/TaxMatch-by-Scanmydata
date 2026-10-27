@@ -66,7 +66,10 @@ class TableKit(QObject):
         if cell_menu:
             install_cell_menu(table, self.col_filter)
 
-        self.bar = QWidget()
+        # ΜΕ γονέα (τον γονέα του πίνακα, αν έχει): ένα QWidget χωρίς γονέα που γίνεται setVisible(True) ανοίγει ως
+        # ΞΕΧΩΡΙΣΤΟ παράθυρο για μια στιγμή, ώσπου να μπει στο layout — αναφορά χρήστη 2026-10-27: «ανοίγουν πρώτα 3-4
+        # παράθυρα» στην εκκίνηση και στο διπλό κλικ σε πελάτη. Και ΠΟΤΕ setVisible(True) εδώ· μόνο απόκρυψη.
+        self.bar = QWidget(table.parentWidget())
         row = QHBoxLayout(self.bar)
         row.setContentsMargins(0, 0, 0, 0)
         self.search = QLineEdit()
@@ -79,7 +82,8 @@ class TableKit(QObject):
         self.clear_btn.clicked.connect(self.clear)
         self.clear_btn.setVisible(False)
         row.addWidget(self.clear_btn)
-        self.bar.setVisible(search)
+        if not search:
+            self.bar.hide()
 
     @contextmanager
     def filling(self) -> Iterator[None]:

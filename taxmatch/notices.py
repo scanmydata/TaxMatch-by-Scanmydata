@@ -50,6 +50,27 @@ def mark_vat_quarter_read(conn: sqlite3.Connection) -> None:
     settings_store.set_value(conn, "notice_vat_quarter_read", _vat_quarter_stamp(afms, deadline))
 
 
+def parepid_candidates(conn: sqlite3.Connection) -> list[str]:
+    """Ενεργοί πελάτες με ΚΑΔ καταλυμάτων/εστίασης/διασκέδασης (`parepid.py`) που ΔΕΝ έχουν ήδη επιβεβαιωθεί από το
+    dae.govapp.gr (έλεγχος «ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ») — πιθανοί υπόχρεοι τέλους παρεπιδημούντων/ακαθαρίστων."""
+    from . import parepid
+    kads: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT k.afm, k.code FROM business_kad k JOIN businesses b ON b.afm=k.afm "
+                          "WHERE coalesce(b.activity_state,'')<>'ceased' AND coalesce(b.activity_state,'')<>'none'"):
+        kads.setdefault(r["afm"], []).append(r["code"])
+    checked = {r["afm"] for r in conn.execute("SELECT DISTINCT afm FROM obligation_checks WHERE obligation='ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ'")}
+    return sorted(a for a, codes in kads.items() if a not in checked and parepid.kad_matches(codes))
+
+
+def parepid_read(conn: sqlite3.Connection) -> bool:
+    afms = parepid_candidates(conn)
+    return bool(afms) and settings_store.get(conn, "notice_parepid_read") == ",".join(afms)
+
+
+def mark_parepid_read(conn: sqlite3.Connection) -> None:
+    settings_store.set_value(conn, "notice_parepid_read", ",".join(parepid_candidates(conn)))
+
+
 def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """[{level: danger|warn|info, text, endpoint, args, label, afms?, dismiss?}] — το template φτιάχνει το link από το
     endpoint· `afms` = οι πελάτες της ειδοποίησης (το gui φιλτράρει τη λίστα σε αυτούς)· `dismiss` = κλειδί για
@@ -97,6 +118,15 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "afms": afms,
                     "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}): "
                             f"{_names(conn, afms)} — καρτέλα πελάτη → «Αιτήματα ΑΑΔΕ»."})
+    # ---- πιθανοί υπόχρεοι τέλους παρεπιδημούντων/ακαθαρίστων από τον ΚΑΔ (ίδιο μοτίβο με το τρίμηνο ΦΠΑ)
+    parepid_afms = parepid_candidates(conn)
+    if parepid_afms and settings_store.get(conn, "notice_parepid_read") != ",".join(parepid_afms):
+        n = len(parepid_afms)
+        out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
+                    "afms": parepid_afms, "dismiss": "parepid",
+                    "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με ΚΑΔ καταλυμάτων/εστίασης/διασκέδασης "
+                            f"μπορεί να {'είναι υπόχρεος' if n == 1 else 'είναι υπόχρεοι'} τέλους παρεπιδημούντων / "
+                            f"ακαθαρίστων εσόδων (αν το επιβάλλει ο δήμος — dae.govapp.gr): {_names(conn, parepid_afms)}."})
     if eligible:
         out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
                     "afms": eligible, "dismiss": "vat_quarter",

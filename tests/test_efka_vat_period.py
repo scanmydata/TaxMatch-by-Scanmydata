@@ -260,4 +260,68 @@ def test_vat_quarter_notice_filters_clients_and_can_be_marked_read(conn):
 def test_parse_ames_keeps_apd_code():
     page = ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td><td>ΑΛΦΑ ΙΚΕ</td><td>x</td>'
             '<td>123</td><td>user</td><td>a@b</td></tr></tbody>')
-    assert efka.parse_ames(page) == [{"ame": "0020012345", "name": "ΑΛΦΑ ΙΚΕ", "apd_code": "123"}]
+    assert efka.parse_ames(page) == [{"ame": "0020012345", "name": "ΑΛΦΑ ΙΚΕ", "apd_code": "123", "username": "user"}]
+
+
+def test_retrieve_ame_can_search_and_store_both_categories(conn, monkeypatch):
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    credentials.set_(conn, AFM, "taxis_user", "taxis_pass")
+    episterg = "https://apps.e-efka.gov.gr/ePistErg"
+    common_url = episterg + "/secure/common.xhtml"
+    construction_url = episterg + "/secure/construction.xhtml"
+
+    class FakeHttp:
+        def follow(self, method, url, *args, **kwargs):
+            pages = {
+                common_url: ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td>'
+                             '<td>ΑΛΦΑ ΙΚΕ</td></tr></tbody>'),
+                construction_url: ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0030098765</td>'
+                                   '<td>ΑΛΦΑ ΙΚΕ ΕΡΓΟ</td></tr></tbody>'),
+            }
+            content = ('<a href="/ePistErg/secure/common.xhtml">Κοινών Επιχειρήσεων</a>'
+                       '<a href="/ePistErg/secure/construction.xhtml">Οικοδομοτεχνικών Έργων</a>') if url == episterg else pages[url]
+            return {"url": url, "text": content}
+
+    monkeypatch.setattr(efka, "_eaccess_taxis", lambda *args: {"ok": True})
+    monkeypatch.setattr(efka, "_skip_eprofile", lambda http, page: page)
+    res = efka.retrieve_ame(conn, AFM, http_factory=FakeHttp,
+                            include_oikodomotexnika=True)
+
+    assert res["ok"]
+    assert [(item["kind"], item["ame"]) for item in res["all"]] == [
+        ("Κοινών Επιχειρήσεων", "0020012345"),
+        ("Οικοδομοτεχνικών Έργων", "0030098765"),
+    ]
+    assert efka.get_ame(conn, AFM) == "0020012345"
+    assert efka.get_oikodom_ame(conn, AFM) == "0030098765"
+
+
+def test_retrieve_ame_falls_back_to_taxis_when_ika_does_not_open_pisterg(conn, monkeypatch):
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    credentials.set_(conn, AFM, "taxis_user", "taxis_pass")
+    efka.set_(conn, AFM, user="ika_user", password="ika_pass")
+    episterg = "https://apps.e-efka.gov.gr/ePistErg"
+    common_url = episterg + "/secure/common.xhtml"
+    attempted = []
+
+    class FakeHttp:
+        def follow(self, method, url, *args, **kwargs):
+            if url == episterg:
+                text = '<a href="/ePistErg/secure/common.xhtml">Κοινών Επιχειρήσεων</a>'
+            else:
+                text = ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td>'
+                        '<td>ΑΛΦΑ ΙΚΕ</td></tr></tbody>')
+            return {"url": url, "text": text}
+
+    monkeypatch.setattr(efka, "_eaccess_ika", lambda *_args: {"ok": False, "reason": "InvalidCredentials"})
+
+    def taxis_login(_http, user, password, afm):
+        attempted.append((user, password, afm))
+        return {"ok": True}
+
+    monkeypatch.setattr(efka, "_eaccess_taxis", taxis_login)
+    monkeypatch.setattr(efka, "_skip_eprofile", lambda _http, page: page)
+    result = efka.retrieve_ame(conn, AFM, http_factory=FakeHttp)
+
+    assert result["ok"] and result["ame"] == "0020012345"
+    assert attempted == [("taxis_user", "taxis_pass", AFM)]

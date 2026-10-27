@@ -70,6 +70,21 @@ def test_dashboard_shows_kpis(window, conn):
     assert window._kpi_labels["clients"].text() == "1"
 
 
+def test_dashboard_splits_articles_by_topic(window, conn, monkeypatch):
+    from taxmatch.matching import engine
+    service.add(conn, AFM, "ΑΛΦΑ")
+    articles = [{"title": title, "n_matches": 1, "deadline": None, "topic": topic, "matches": [],
+                 "url": "https://example.test", "source": "test", "published_at": "2026-10-26", "summary": ""}
+                for title, topic in (("ΦΠΑ", "ΦΠΑ"), ("Μισθοδοσία", "ΕΡΓΑΤΙΚΑ"), ("Γενικό", "ΑΛΛΟ"))]
+    monkeypatch.setattr(engine, "digest_articles", lambda *args, **kwargs: articles)
+    window.reload_dashboard()
+
+    assert [window.dash_tax_articles.item(i).text().split("  —")[0]
+            for i in range(window.dash_tax_articles.count())] == ["ΦΠΑ"]
+    assert [window.dash_general_articles.item(i).text().split("  —")[0]
+            for i in range(window.dash_general_articles.count())] == ["Μισθοδοσία", "Γενικό"]
+
+
 def test_clients_table_reflects_database(window, conn):
     service.add(conn, AFM, "ΔΟΚΙΜΗ ΑΕ")
     service.set_kads(conn, AFM, [{"code": "47.11.10.01"}])
@@ -80,6 +95,59 @@ def test_clients_table_reflects_database(window, conn):
     assert window.client_table.item(0, _C_AFM).text() == AFM
     assert window.client_table.item(0, _C_NAME).text() == "ΔΟΚΙΜΗ ΑΕ"
     assert window.client_table.item(0, _C_KAD).text() == "47.11.10.01"
+
+
+def test_client_double_click_does_not_open_reentrant_detail_dialog(window, conn, monkeypatch):
+    from taxmatch.gui import main_window as main_window_module
+    service.add(conn, AFM, "ΑΛΦΑ")
+    calls = []
+
+    def exec_and_reenter(dialog):
+        calls.append(dialog)
+        window.open_client_detail(AFM)
+        return 0
+
+    monkeypatch.setattr(main_window_module.ClientDetailDialog, "exec", exec_and_reenter)
+    window.open_client_detail(AFM)
+    window.open_client_detail(AFM)
+
+    assert len(calls) == 1
+    assert not window._client_detail_open
+
+
+def test_client_card_loads_heavy_tabs_on_selection_and_shows_auto_vat(window, conn, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    from taxmatch.gui import client_detail_dialog as dialog_module
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΑΣΤΙΚΗ ΙΚΕ")
+    conn.execute("UPDATE businesses SET legal_form='ΙΚΕ', books_category='Β', vat_subject=1, "
+                 "activity_state='active' WHERE afm=?", (AFM,))
+    created = []
+
+    def fake_tab(name):
+        def create(*args, **kwargs):
+            created.append(name)
+            return QWidget()
+        return create
+
+    for attr in ("MydataTab", "DebtsTab", "RequestsTab", "MembersTab"):
+        monkeypatch.setattr(dialog_module, attr, fake_tab(attr))
+
+    dlg = ClientDetailDialog(window, AFM)
+    assert dlg.windowTitle() == "Καρτέλα πελάτη"
+    assert dlg.client_name_label.text() == "ΔΟΚΙΜΑΣΤΙΚΗ ΙΚΕ"
+    assert not any(label.text() == "Καρτέλα πελάτη" for label in dlg.findChildren(QLabel))
+    assert created == []
+    assert dlg.f_vat_period.currentData() == ""
+    assert "Τριμηνιαίος ΦΠΑ" in dlg.f_vat_period.currentText()
+    assert conn.execute("SELECT vat_period_source FROM businesses WHERE afm=?", (AFM,)).fetchone()[0] == ""
+    conn.execute("UPDATE businesses SET name='ΝΕΑ ΕΠΩΝΥΜΙΑ' WHERE afm=?", (AFM,))
+    dlg._reload()
+    assert dlg.client_name_label.text() == "ΝΕΑ ΕΠΩΝΥΜΙΑ" and dlg.windowTitle() == "Καρτέλα πελάτη"
+
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["mydata"])
+    assert created == ["MydataTab"]
+    dlg.deleteLater()
 
 
 def test_client_search_filter_hides_non_matching_rows(window, conn):
@@ -986,20 +1054,77 @@ def test_client_detail_shows_submission_checks(window, conn):
              "period_type": "quarter"}]}])
     dlg = ClientDetailDialog(window, AFM)
     t = dlg.year_table
-    rows = {t.item(r, 1).text(): r for r in range(t.rowCount())}
+    rows = {t.item(r, 3).text(): r for r in range(t.rowCount())}
     q1 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Α΄ τρίμηνο" in title)
     q2 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Β΄ τρίμηνο" in title)
-    assert t.item(q1, 3).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 4).text()
-    assert t.item(q2, 3).text() == "ΔΕΝ υποβλήθηκε"
+    assert t.item(q1, 1).text() == f"Μάρτιος {y}" and t.item(q1, 2).text() == "ΑΑΔΕ"
+    assert t.item(q1, 5).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 6).text()
+    assert t.item(q2, 5).text() == "ΔΕΝ υποβλήθηκε"
     t.setCurrentCell(q2, 0)
     dlg._toggle_done()
-    q2 = next(r for r in range(t.rowCount()) if "Β΄ τρίμηνο" in t.item(r, 1).text() and "τριμηνιαία" in t.item(r, 1).text())
-    assert t.item(q2, 3).text().startswith("Ολοκληρώθηκε")
+    q2 = next(r for r in range(t.rowCount()) if "Β΄ τρίμηνο" in t.item(r, 3).text() and "τριμηνιαία" in t.item(r, 3).text())
+    assert t.item(q2, 5).text().startswith("Ολοκληρώθηκε")
     window.reload_clients()
     ct = window.client_table
     row = next(r for r in range(ct.rowCount()) if ct.item(r, 1).text() == AFM)
     assert ct.item(row, _C_CHECKS).text() == "✓1 ✗1"
     dlg.deleteLater()
+
+
+def test_calendar_work_tab_uses_submission_check_for_apd(window, conn):
+    service.add(conn, AFM, "ΑΛΦΑ")
+    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (AFM,))
+    window.reload_calendar()
+    window.calendar_tabs.setCurrentIndex(1)
+    assert [window.work_tabs.tabText(i) for i in range(window.work_tabs.count())] == [
+        "Συνοπτικός Πίνακας", "Εργασίες", "Εργασίες / Υπόχρεοι"]
+    window.work_month.setCurrentIndex(0)
+    row = next(i for i in range(window.work_table.rowCount())
+               if window.work_table.item(i, 3).text() == "Μισθοδοσία"
+               and window.work_table.item(i, 5).text().endswith(AFM)
+               and window.work_table.item(i, 0).data(Qt.ItemDataRole.UserRole)["rule_id"] == "apd")
+    assert window.work_table.item(row, 4).text().startswith("ΑΠΔ")
+    header = window.work_table.horizontalHeader()
+    assert all(header.sectionResizeMode(column).name == "Interactive"
+               for column in range(window.work_table.columnCount()))
+    window.work_tabs.setCurrentIndex(2)
+    window.work_table.setCurrentCell(row, 0)
+    window._update_work_actions()
+    selected = window.work_table.item(window.work_table.currentRow(), 0).data(Qt.ItemDataRole.UserRole)
+    assert selected["rule_id"] == "apd"
+    assert window.work_check_btn.isHidden() is False and window.work_done_btn.isHidden() is True
+    window._toggle_work_done()
+
+    row = next(i for i in range(window.work_table.rowCount())
+               if window.work_table.item(i, 3).text() == "Μισθοδοσία"
+               and window.work_table.item(i, 5).text().endswith(AFM)
+               and window.work_table.item(i, 0).data(Qt.ItemDataRole.UserRole)["rule_id"] == "apd")
+    assert window.work_table.item(row, 6).text() != "Ολοκληρώθηκε"
+    assert conn.execute("SELECT 1 FROM obligation_done WHERE afm=? AND rule_id='apd'", (AFM,)).fetchone() is None
+
+    # όπως ο πίνακας Πελατών: checkbox στη στήλη 0, μαζική επιλογή που κρατιέται στο ξαναγέμισμα
+    assert window.work_table.item(row, 0).flags() & Qt.ItemFlag.ItemIsUserCheckable
+    window._set_all_work_checked(True)
+    assert all(window.work_table.item(i, 0).checkState() == Qt.CheckState.Checked
+               for i in range(window.work_table.rowCount()) if not window.work_table.isRowHidden(i))
+    assert "επιλεγμένες" in window.work_sel_label.text()
+    window._reload_work_items()
+    assert window._checked_work_rows(only_checked=True)
+    window._set_all_work_checked(False)
+    assert not window._checked_work_rows(only_checked=True)
+
+
+def test_calendar_day_actions_choose_check_or_manual_completion(window):
+    from PySide6.QtWidgets import QListWidgetItem
+    automatic = QListWidgetItem()
+    automatic.setData(Qt.ItemDataRole.UserRole + 1, {"rule_id": "apd", "ref_month": "2026-09", "maybe": False})
+    window._update_cal_action_buttons(automatic)
+    assert not window.cal_check_btn.isHidden() and window.cal_done_btn.isHidden()
+
+    manual = QListWidgetItem()
+    manual.setData(Qt.ItemDataRole.UserRole + 1, {"rule_id": "digital_fee", "ref_month": "2026-09", "maybe": False})
+    window._update_cal_action_buttons(manual)
+    assert window.cal_check_btn.isHidden() and not window.cal_done_btn.isHidden()
 
 
 def test_check_submissions_needs_credentials(window, conn):
@@ -1015,6 +1140,7 @@ def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
     service.add(conn, AFM, "ΑΛΦΑ")
     mcreds.set_(conn, AFM, "u", "k")
     dlg = ClientDetailDialog(window, AFM)
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["mydata"])
     ym = dlg.mydata.month.currentData()
     conn.execute("INSERT INTO mydata_docs(afm, mark, direction, invoice_type, issue_date, issuer_vat, issuer_name, net, "
                  "total, withheld, withheld_json, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1035,6 +1161,7 @@ def test_mydata_tab_whole_year_income_expense_and_green_when_submitted(window, c
     from taxmatch import deadlines
     service.add(conn, AFM, "ΑΛΦΑ")
     dlg = ClientDetailDialog(window, AFM)
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["mydata"])
     tab = dlg.mydata
     ym = tab.month.currentData()
     other = f"{ym[:4]}-01" if ym[5:7] != "01" else f"{ym[:4]}-02"
@@ -1110,9 +1237,19 @@ def test_client_debts_tab_lists_debts_and_sends_email_via_dialog(window, conn, m
         {"kind": "debt", "ref": "r1", "title": "ΕΝΦΙΑ 2026", "overdue": 200.0, "non_overdue": 50.0, "total": 250.0,
          "code": "RF12", "pdf_path": "", "details": {"fields": {"Είδος φόρου": "ΕΝΦΙΑ 2026"}}}]})
     dlg = ClientDetailDialog(window, AFM)
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["debts_tab"])
     tab = dlg.debts_tab
     assert tab.table.rowCount() == 1 and tab.table.item(0, 7).text() == "RF12" and "200,00 €" in tab.info.text()
     assert tab.table.item(0, 0).text() == "ΑΑΔΕ"
+    assert tab.table.horizontalHeaderItem(6).text() == "Οφειλόμενη δόση"
+    header = tab.table.horizontalHeader()
+    assert all(header.sectionResizeMode(column).name == "Interactive"
+               for column in range(tab.table.columnCount()))
+    sync_calls = []
+    monkeypatch.setattr(window, "run_debt_sync",
+                        lambda afms, **kwargs: sync_calls.append((afms, kwargs.get("want_pdf"))))
+    tab.fetch_button.click()
+    assert sync_calls == [([AFM], True)]
     assert dlg.f_email.text() == "client@example.test"
     sent = []
     monkeypatch.setattr(mailer, "_smtp_send", lambda c, m: sent.append(m))
@@ -1128,7 +1265,7 @@ def test_client_debts_tab_lists_debts_and_sends_email_via_dialog(window, conn, m
     dlg.deleteLater()
 
 
-def test_client_card_has_requests_and_members_tabs(window, conn):
+def test_client_card_has_requests_and_members_tabs(window, conn, monkeypatch):
     """Αιτήματα ΑΑΔΕ (με αθέατες αλλαγές) και Μέλη εταιρείας (με ποιο μέλος είναι πελάτης) στην καρτέλα πελάτη."""
     from taxmatch import db as dbm, members
     from taxmatch.gui.client_detail_dialog import ClientDetailDialog
@@ -1139,15 +1276,41 @@ def test_client_card_has_requests_and_members_tabs(window, conn):
                                                 0, dbm.utcnow()))
     members.store(conn, AFM, [{"afm": "123456783", "name": "ΠΑΠΑΣ", "role": "ΔΙΑΧΕΙΡΙΣΤΗΣ"}], "aade")
     dlg = ClientDetailDialog(window, AFM)
+    assert not dlg.show_members_btn.isHidden()
+    dlg.show_members_btn.click()
+    assert dlg.detail_tabs.currentIndex() == dlg._detail_tab_indices["members_tab"]
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["requests_tab"])
     assert dlg.requests_tab.table.rowCount() == 1 and dlg.requests_tab.table.item(0, 0).text() == "●"
     dlg.requests_tab.table.selectRow(0)
     assert "Έγινε." in dlg.requests_tab.detail.text()
     assert conn.execute("SELECT seen FROM aade_requests WHERE id='555'").fetchone()["seen"] == 1
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["members_tab"])
     mt = dlg.members_tab
-    assert mt.table.rowCount() == 1 and mt.table.item(0, 6).text() == "όχι" and "Μέλη/εκπρόσωποι" in mt.hint.text()
-    mt.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
-    mt._as_clients()                                                # noqa: SLF001
-    assert service.get(conn, "123456783") is not None and mt.table.item(0, 6).text() == "ναι, χωρίς κωδικούς"
+    assert all(mt.table.horizontalHeader().sectionResizeMode(column).name == "Interactive"
+               for column in range(mt.table.columnCount()))
+    assert mt.table.rowCount() == 1 and mt.table.item(0, 9).text() == "όχι" and "Μέλη/εκπρόσωποι" in mt.hint.text()
+    opened = []
+    monkeypatch.setattr(window, "open_client_detail", lambda member_afm: opened.append(member_afm))
+    mt.table.selectRow(0)
+    mt._open_client()                                               # noqa: SLF001 — διπλό κλικ στο μέλος
+    assert service.get(conn, "123456783") is not None
+    assert mt.table.item(0, 9).text() == "ναι, χωρίς κωδικούς" and opened == ["123456783"]
+    dlg.deleteLater()
+
+
+def test_client_efka_form_remembers_construction_ame_option(window, conn):
+    from taxmatch import efka
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    efka.set_(conn, AFM, ame="0020012345", construction_ame="0030098765", search_oikodomotexnika=True)
+    dlg = ClientDetailDialog(window, AFM)
+    assert dlg.e_oikodomotexnika.isChecked()
+    assert dlg.e_ame.text() == "0020012345" and dlg.e_oikodom_ame.text() == "0030098765"
+
+    dlg.e_oikodomotexnika.setChecked(False)
+    dlg._save_efka()
+    assert not efka.searches_oikodomotexnika(conn, AFM)
+    assert efka.get_oikodom_ame(conn, AFM) == "0030098765"
     dlg.deleteLater()
 
 
@@ -1193,11 +1356,16 @@ def test_debt_card_from_context_menu(window, conn):
          "total": 300.0, "code": "RF99", "pdf_path": "",
          "details": {"installments": {"headers": ["Α/Α", "Λήξη", "Ποσό"], "rows": [["1", "30/11/2026", "100,00"]]}}}]})
     dlg = ClientDetailDialog(window, AFM)
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["debts_tab"])
     tab = dlg.debts_tab
     tab.table.selectRow(0)
     card = DebtCard(tab, tab._selected())                                    # noqa: SLF001
     text = " ".join(lbl.text() for lbl in card.findChildren(type(tab.info)))
     assert "RF99" in text and "30/11/2026" in text and "300,00 €" in text
+    assert card.schedule_scroll is not None and not card.schedule_scroll.isHidden()
+    assert card.more_scroll.isHidden()
+    card.more_toggle.click()
+    assert not card.more_scroll.isHidden()
     card.deleteLater()
     dlg.deleteLater()
 
@@ -1282,3 +1450,35 @@ def test_missing_basics_depend_on_client_kind():
     company = {**sole, "legal_form": "ΙΚΕ", "address": ""}
     assert service.missing_basics(company) == ["έδρα"]
     assert service.missing_basics({"afm": "3", "name": ""}) == ["επωνυμία", "κατάσταση (ιδιώτης / επιχείρηση)"]
+
+
+def test_no_stray_top_level_windows_on_startup_or_client_card(qapp, conn):
+    """Αναφορά χρήστη 2026-10-27: «ανοίγουν πρώτα 3-4 παράθυρα και μετά το ζητούμενο» — η μπάρα αναζήτησης του
+    TableKit ήταν QWidget χωρίς γονέα + setVisible(True) ⇒ ξεχωριστό παράθυρο για μια στιγμή."""
+    from PySide6.QtCore import QEvent, QObject
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.gui.main_window import MainWindow
+    shown = []
+
+    class Spy(QObject):
+        def eventFilter(self, obj, ev):                                  # noqa: N802
+            if ev.type() == QEvent.Type.Show and obj.isWidgetType() and obj.isWindow():
+                shown.append(type(obj).__name__)
+            return False
+    spy = Spy()
+    qapp.installEventFilter(spy)
+    try:
+        service.add(conn, AFM, "ΑΛΦΑ")
+        win = MainWindow()
+        win.show()
+        qapp.processEvents()
+        assert shown == ["MainWindow"], shown
+        shown.clear()
+        dlg = ClientDetailDialog(win, AFM)
+        dlg.show()
+        qapp.processEvents()
+        assert shown == ["ClientDetailDialog"], shown
+        dlg.close()
+        win.close()
+    finally:
+        qapp.removeEventFilter(spy)

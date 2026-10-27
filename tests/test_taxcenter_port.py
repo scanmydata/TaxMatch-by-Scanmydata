@@ -272,3 +272,30 @@ def test_members_become_clients_and_individual_business_is_checked(conn):
     assert b["activity_state"] == "active" and b["trade_name"] == "ΓΙΩΡΓΟΣ ΚΑΦΕ" and b["source"] == "member"
     assert members.parent_company(conn) == {"123456783": AFM}
     assert members.sync_member_clients(conn, AFM, check_business=False) == []          # ήδη πελάτης
+
+
+def test_company_members_are_preserved_by_tax_year(conn):
+    from taxmatch import members
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    members.store(conn, AFM, [{"afm": "123456783", "name": "ΠΑΠΑΣ"}], "aade")
+    members.snapshot(conn, AFM, 2025)
+    members.store(conn, AFM, [{"afm": "987654321", "name": "ΝΕΟ ΜΕΛΟΣ"}], "aade")
+
+    assert [m["member_afm"] for m in members.company_members(conn, AFM, 2025)] == ["123456783"]
+    assert [m["member_afm"] for m in members.company_members(conn, AFM)] == ["987654321"]
+
+
+def test_company_member_details_show_sole_business_and_other_company(conn):
+    from taxmatch import members
+    member_afm, other_company = "123456783", "987654321"
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    service.add(conn, member_afm, "ΠΑΠΑΣ")
+    service.add(conn, other_company, "ΒΗΤΑ ΑΕ")
+    conn.execute("UPDATE businesses SET activity_state='active', legal_form='ΑΤΟΜΙΚΗ ΕΠΙΧΕΙΡΗΣΗ' WHERE afm=?",
+                 (member_afm,))
+    members.store(conn, AFM, [{"afm": member_afm, "name": "ΠΑΠΑΣ"}], "aade")
+    members.store(conn, other_company, [{"afm": member_afm, "name": "ΠΑΠΑΣ", "role": "ΜΕΤΟΧΟΣ"}], "aade")
+
+    (row,) = members.company_members(conn, AFM)
+    assert row["own_business"] == "Ναι — ενεργή"
+    assert row["other_companies"] == f"ΒΗΤΑ ΑΕ ({other_company})"

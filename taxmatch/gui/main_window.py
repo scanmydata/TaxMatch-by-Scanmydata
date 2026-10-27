@@ -20,12 +20,14 @@ from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget, QToolButton,
+    QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, efka, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
+from .. import fee_portals
+from .. import fiscal
 from .. import members as members_mod
 from ..aml import cases as aml_cases, store as aml_store
 from .. import db as dbmod
@@ -60,6 +62,8 @@ from .workers import run_task
 
 log = logging.getLogger(__name__)
 
+_W_CHK, _W_STATUS = 0, 6           # πίνακας «Εργασίες / Υπόχρεοι» του Ημερολογίου
+
 _CLIENT_COLS = [
     ("", 30, "Επιλέξτε για μαζικές ενέργειες"), ("ΑΦΜ", 90, ""), ("Επωνυμία", 0, "Διπλό κλικ για την καρτέλα"),
     ("Είδος", 130, ""), ("Κατάσταση", 90, ""), ("Κύριος ΚΑΔ", 110, ""), ("Βιβλία", 55, ""),
@@ -68,6 +72,12 @@ _CLIENT_COLS = [
     ("Αμοιβή/μήνα", 100, "Μηνιαία επαναλαμβανόμενη αμοιβή, προ ΦΠΑ (καρτέλα πελάτη → Αμοιβές)"),
     ("Υποβολές", 90, "Κατάσταση υποβολών του τρέχοντος έτους από την ΑΑΔΕ (✓ υποβλήθηκαν · ✗ δεν υποβλήθηκαν)"),
 ]
+#: Φίλτρο «Εμφάνιση» της σελίδας Πελατών (όπως το «Ποιους πελάτες να δείχνει» του timologio): (ετικέτα, σημαία)
+_CLIENT_SHOW = [("Όλοι οι πελάτες", ""), ("Με κωδικούς TAXISnet", "creds"), ("Χωρίς κωδικούς TAXISnet", "nocreds"),
+                ("Με ελλιπή στοιχεία", "incomplete"), ("Με υποβολές που λείπουν", "missing"),
+                ("Εταιρείες (νομικά πρόσωπα)", "company"), ("Ατομικές επιχειρήσεις", "sole"),
+                ("Ιδιώτες", "private"), ("Με διακοπή εργασιών", "ceased"), ("Μέλη εταιρειών", "member"),
+                ("Πιθανοί υπόχρεοι τέλους παρεπιδημούντων", "parepid")]
 _C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS, _C_MATCHES, _C_FEE, _C_CHECKS = range(13)
 
 _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτλος", 0, "Διπλό κλικ για προεπισκόπηση"),
@@ -76,6 +86,7 @@ _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτ�
 TOUR_VERSION = 4                                       # 2: νέα σελίδα «Δέουσα επιμέλεια» · 3: βήματα του φακέλου ΔΕ · 4: λίστα πελατών/ημερολόγιο
 
 _WEEKDAY_HEADS = ("Δε", "Τρ", "Τε", "Πε", "Πα", "Σα", "Κυ")
+_GENERAL_NEWS_TOPICS = {"ΕΡΓΑΤΙΚΑ", "ΑΣΦΑΛΙΣΤΙΚΑ", "ΕΠΙΧΟΡΗΓΗΣΕΙΣ", "ΑΛΛΟ"}
 
 
 _CELL_CHIPS = 3  # πόσα events δείχνονται πλήρη μέσα στο κελί πριν το «+N ακόμη» — όπως στο παλιό .cal .ev του web UI
@@ -253,7 +264,17 @@ class MainWindow(QMainWindow):
         # Η ειδοποίηση «επιστροφή στο τρίμηνο» αναγνώστηκε σε ΑΥΤΗ τη συνεδρία → ο αστερίσκος ΦΠΑ μένει ώς την επανεκκίνηση
         self._vat_read_session = False
         self._expanded: set[str] = set()                    # εταιρείες με ανοιχτά τα μέλη τους στη λίστα πελατών
+        # Χρήση εργασίας (fiscal.py — ίδιοι κανόνες με το timologio): χειροκίνητη επιλογή μόνο μέσα στο έτος της
+        self._fiscal_year = fiscal.resolve_year(self._prefs.value("fiscal/year", 0, type=int),
+                                                self._prefs.value("fiscal/chosen_in", 0, type=int))
+        self._client_flags: dict[str, set[str]] = {}         # ΑΦΜ → κατηγορίες του φίλτρου «Εμφάνιση» (reload_clients)
         self._client_parents: dict[str, str] = {}
+        self._client_detail_open = False
+        self._recent_client_detail_afm = ""
+        self._recent_client_detail_timer = QTimer(self)
+        self._recent_client_detail_timer.setSingleShot(True)
+        self._recent_client_detail_timer.setInterval(700)
+        self._recent_client_detail_timer.timeout.connect(lambda: setattr(self, "_recent_client_detail_afm", ""))
         self.jobs = JobQueue(self)                          # μακριές εργασίες σε σειρά, με διακοπή (gui/job_queue.py)
         self._tour: Optional[Tour] = None
         self._title_bar_done = False
@@ -297,6 +318,20 @@ class MainWindow(QMainWindow):
         shell.addWidget(right, 1)
 
         quick_row = QHBoxLayout()
+        # Η χρήση, πάνω αριστερά και πάντα ορατή — όπως το Timologio Downloader (ρητό αίτημα χρήστη 2026-10-27): ό,τι
+        # δείχνουν Πελάτες (στήλη υποβολών), «Έλεγχος υποβολών», «Ανά εργασία» και η καρτέλα πελάτη αφορά αυτήν.
+        fiscal_caption = QLabel("ΧΡΗΣΗ")
+        fiscal_caption.setObjectName("statLabel")
+        quick_row.addWidget(fiscal_caption)
+        self.fiscal_combo = QComboBox()
+        self.fiscal_combo.setObjectName("fiscalYear")
+        self.fiscal_combo.setMinimumWidth(92)
+        self.fiscal_combo.setStyleSheet("font-weight:700;")
+        self.fiscal_combo.setToolTip("Η χρήση (φορολογικό έτος) στην οποία δουλεύετε.\n\nΑλλάζει μόνη της με την αλλαγή "
+                                     "του χρόνου· αλλάξτε την εδώ αν χρειάζεται να δουλέψετε σε προηγούμενη χρήση.")
+        self._fill_fiscal_combo()
+        self.fiscal_combo.currentIndexChanged.connect(self._on_fiscal_combo)
+        quick_row.addWidget(self.fiscal_combo)
         quick_row.addStretch()
         self.quick_search = QLineEdit()
         self.quick_search.setPlaceholderText("Αναζήτηση πελατών (ΑΦΜ, επωνυμία, …)  [Ctrl+K]")
@@ -441,6 +476,10 @@ class MainWindow(QMainWindow):
             self._apply_client_filter()
 
     def _dismiss_notice(self, key: str) -> None:
+        if key == "parepid":
+            notices_mod.mark_parepid_read(self.conn)
+            toast(self, "Η ειδοποίηση κρύφτηκε — οι πελάτες βρίσκονται και με το φίλτρο «Πιθανοί υπόχρεοι τέλους "
+                        "παρεπιδημούντων».", "ok")
         if key == "vat_quarter":
             notices_mod.mark_vat_quarter_read(self.conn)
             self._vat_read_session = True
@@ -491,15 +530,23 @@ class MainWindow(QMainWindow):
         root.addLayout(run_row)
 
         split = QHBoxLayout()
-        self.dash_articles = QListWidget()
-        self.dash_articles.itemClicked.connect(self._open_dash_article)
         left = QVBoxLayout()
-        left.addWidget(_section_header("Πρόσφατα άρθρα που αφορούν πελάτες", "bell"))
-        left.addWidget(self.dash_articles, 1)
+        left.addWidget(_section_header("Πρόσφατα νέα που αφορούν πελάτες", "bell"))
+        self.dash_article_tabs = QTabWidget()
+        self.dash_tax_articles = QListWidget()
+        self.dash_general_articles = QListWidget()
+        self.dash_articles = self.dash_tax_articles
+        for label, articles in (("Φορολογικά", self.dash_tax_articles), ("Γενικά νέα", self.dash_general_articles)):
+            articles.itemClicked.connect(self._open_dash_article)
+            articles.setWordWrap(True)
+            articles.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            articles.setToolTip("Κλικ: προεπισκόπηση και οι πελάτες που αφορά")
+            self.dash_article_tabs.addTab(articles, label)
+        left.addWidget(self.dash_article_tabs, 1)
         split.addLayout(left, 3)
 
         self.dash_deadlines = QListWidget()
-        for lst in (self.dash_articles, self.dash_deadlines):         # μεγάλοι τίτλοι: αναδίπλωση, όχι κομμένο κείμενο
+        for lst in (self.dash_deadlines,):         # μεγάλοι τίτλοι: αναδίπλωση, όχι κομμένο κείμενο
             lst.setWordWrap(True)
             lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             lst.setToolTip("Κλικ: προεπισκόπηση και οι πελάτες που αφορά")
@@ -524,7 +571,8 @@ class MainWindow(QMainWindow):
         self._kpi_labels["urgent"].setText(str(urgent))
         self._update_last_run_label()
 
-        self.dash_articles.clear()
+        self.dash_tax_articles.clear()
+        self.dash_general_articles.clear()
         for g in groups[:25]:
             text = f"{g['title']}  —  {g['n_matches']} πελάτες"
             badge = due_badge(g["deadline"])
@@ -532,7 +580,8 @@ class MainWindow(QMainWindow):
             if badge:
                 item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, g)
-            self.dash_articles.addItem(item)
+            target = self.dash_general_articles if g.get("topic", "ΑΛΛΟ") in _GENERAL_NEWS_TOPICS else self.dash_tax_articles
+            target.addItem(item)
 
         self.dash_deadlines.clear()
         for ev in upcoming[:25]:
@@ -584,11 +633,47 @@ class MainWindow(QMainWindow):
         page = QWidget()
         root = QVBoxLayout(page)
 
-        # Νέος πελάτης / εισαγωγή Excel / εξαγωγή: από το πλαϊνό μενού (η πάνω γραμμή κουμπιών αφαιρέθηκε, ρητό αίτημα
-        # χρήστη 2026-10-22). Δύο σειρές: επιλογή/φίλτρα και ενέργειες — σε μία, τα κουμπιά «στριμώχνονταν».
+        # Δύο γραμμές πάνω από τον πίνακα, όπως ο πίνακας πελατών του Timologio Downloader (ρητό αίτημα 2026-10-27):
+        # (1) φίλτρο «Εμφάνιση» · «Καθαρισμός φίλτρων» (κόκκινο, μόνο όταν υπάρχει φίλτρο) ··· «Ανανέωση» — η
+        #     αναζήτηση είναι η μπάρα πάνω-δεξιά (μία μόνο, ρητό αίτημα v0.4.1)
+        # (2) πλήθος επιλεγμένων ··· επεξήγηση · Επιλογή/Αποεπιλογή όλων · «Έλεγχοι & ενημέρωση…» · Διαγραφή επιλεγμένων
+        # Νέος πελάτης / Excel / εξαγωγή: από το πλαϊνό μενού (όπως πριν).
+        filters = QHBoxLayout()
+        filters.setSpacing(7)
+        self.client_show = QComboBox()
+        for label, key in _CLIENT_SHOW:
+            self.client_show.addItem(label, key)
+        self.client_show.setFixedWidth(210)
+        self.client_show.setToolTip("Ποιους πελάτες να δείχνει ο πίνακας")
+        self.client_show.currentIndexChanged.connect(lambda _i: self._apply_client_filter())
+        filters.addWidget(self.client_show)
+        # Αναζήτηση: η ΜΙΑ μπάρα πάνω-δεξιά (Ctrl+K) — ρητό αίτημα χρήστη v0.4.1, γι' αυτό όχι δεύτερο πεδίο εδώ.
+        self.client_clear_filters_btn = QPushButton(icon("cancel", CURRENT.bad, 16), "  Καθαρισμός φίλτρων")
+        self.client_clear_filters_btn.setObjectName("danger")
+        self.client_clear_filters_btn.setToolTip("Επαναφορά αναζήτησης και φίλτρων (εμφάνισης και στηλών)")
+        self.client_clear_filters_btn.clicked.connect(self._clear_client_filters)
+        self.client_clear_filters_btn.setVisible(False)
+        filters.addWidget(self.client_clear_filters_btn)
+        self.client_notice_label = QLabel("")
+        self.client_notice_label.setStyleSheet(f"color:{CURRENT.accent};")
+        self.client_notice_label.setVisible(False)
+        filters.addWidget(self.client_notice_label)
+        filters.addStretch()
+        refresh_btn = QPushButton(icon("refresh", CURRENT.muted, 16), "  Ανανέωση")
+        refresh_btn.setToolTip("Ξαναδιαβάζει τη λίστα πελατών από τη βάση")
+        refresh_btn.clicked.connect(lambda: self.reload_clients())
+        filters.addWidget(refresh_btn)
+        root.addLayout(filters)
+
         selbar = QHBoxLayout()
+        selbar.setSpacing(7)
         self.client_sel_label = QLabel("Κανένας πελάτης επιλεγμένος")
         selbar.addWidget(self.client_sel_label)
+        selbar.addStretch()
+        hint = QLabel("Κουτάκι = επιλογή · διπλό κλικ = καρτέλα πελάτη · ▸ = μέλη εταιρείας")
+        hint.setObjectName("muted")
+        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        selbar.addWidget(hint, 1)
         sel_all_btn = QPushButton("Επιλογή όλων")
         sel_all_btn.setToolTip("Επιλέγει όλους τους πελάτες που εμφανίζονται τώρα (σύμφωνα με την αναζήτηση/τα φίλτρα)")
         sel_all_btn.clicked.connect(lambda: self._set_all_clients_checked(True))
@@ -597,34 +682,18 @@ class MainWindow(QMainWindow):
         sel_none_btn.setToolTip("Αποεπιλέγει όλους τους πελάτες")
         sel_none_btn.clicked.connect(lambda: self._set_all_clients_checked(False))
         selbar.addWidget(sel_none_btn)
-        # Εμφανίζεται ΜΟΝΟ όσο υπάρχει ενεργό φίλτρο στήλης ή αναζήτηση (δυναμικά, βλ. _apply_client_filter).
-        self.client_clear_filters_btn = QPushButton("Διαγραφή φίλτρων")
-        self.client_clear_filters_btn.setToolTip("Σβήνει την αναζήτηση και όλα τα φίλτρα στηλών")
-        self.client_clear_filters_btn.clicked.connect(self._clear_client_filters)
-        self.client_clear_filters_btn.setVisible(False)
-        selbar.addWidget(self.client_clear_filters_btn)
-        self.client_notice_label = QLabel("")
-        self.client_notice_label.setStyleSheet(f"color:{CURRENT.accent};")
-        self.client_notice_label.setVisible(False)
-        selbar.addWidget(self.client_notice_label)
-        selbar.addStretch()
-        selbar.addWidget(self._reload_button(lambda: self.reload_clients(), "Ξαναδιαβάζει τον πίνακα πελατών"))
-        root.addLayout(selbar)
-
-        actbar = QHBoxLayout()
         # ΕΝΑ κουμπί για όλους τους ελέγχους (ρητό αίτημα χρήστη 2026-10-23): popup με επιλογές — gui/checks_dialog.py
         checks_btn = QPushButton(icon("refresh", CURRENT.txt, 16), "  Έλεγχοι && ενημέρωση…")
         checks_btn.setObjectName("primary")
         checks_btn.setToolTip("Ανανέωση στοιχείων, έλεγχος υποβολών, myDATA, οφειλές, αιτήματα ΑΑΔΕ — για τους επιλεγμένους "
                               "ή, αν δεν έχει επιλεγεί κανείς, για όλους")
         checks_btn.clicked.connect(self.on_run_checks)
-        actbar.addWidget(checks_btn)
-        actbar.addStretch()
-        del_btn = QPushButton("  Διαγραφή επιλεγμένων")
+        selbar.addWidget(checks_btn)
+        del_btn = QPushButton(icon("delete", CURRENT.bad, 16), "  Διαγραφή επιλεγμένων")
         del_btn.setObjectName("danger")
         del_btn.clicked.connect(self.on_delete_selected_clients)
-        actbar.addWidget(del_btn)
-        root.addLayout(actbar)
+        selbar.addWidget(del_btn)
+        root.addLayout(selbar)
 
         self.client_table = QTableWidget(0, len(_CLIENT_COLS))
         self.client_table.setHorizontalHeaderLabels([c[0] for c in _CLIENT_COLS])
@@ -668,10 +737,11 @@ class MainWindow(QMainWindow):
         creds = client_creds.status_map(self.conn)
         counts = {r["afm"]: r["n"] for r in self.conn.execute("SELECT afm, COUNT(*) AS n FROM matches GROUP BY afm")}
         fees = office.monthly_totals(self.conn)
-        checks = easycheck.summary(self.conn, date.today().year)
+        checks = easycheck.summary(self.conn, self._fiscal_year)
         # «*» στη στήλη ΦΠΑ: Β΄ σε μηνιαίο που μπορεί να επανέλθει στο τρίμηνο — ώσπου να αναγνωστεί η ειδοποίηση, μετά ώς
         # την επόμενη εκκίνηση, ή πάντα με τη ρύθμιση `vat_option_mark_keep`
         parents = members_mod.parent_company(self.conn)             # μέλος → εταιρεία (εμφανίζεται κάτω της)
+        parepid_afms = set(notices_mod.parepid_candidates(self.conn))
         with_children = set(parents.values())
         vat_option, vat_deadline = notices_mod.vat_quarter_eligible(self.conn)
         if (vat_option and not self._vat_read_session and settings_store.get(self.conn, "vat_option_mark_keep") != "1"
@@ -738,6 +808,24 @@ class MainWindow(QMainWindow):
                     item.setToolTip("Μπορεί να επανέλθει στον τριμηνιαίο ΦΠΑ (24 μήνες από την έναρξη, Α.1049/2025) — "
                                     f"δήλωση επιλογής στο myAADE έως {vat_deadline.strftime('%d/%m/%Y')}")
                 table.setItem(i, col, item)
+            flags = {"creds" if c and c["complete"] else "nocreds"}
+            if clients.missing_basics(dict(r)):
+                flags.add("incomplete")
+            if r["activity_state"] == "ceased":
+                flags.add("ceased")
+            elif r["activity_state"] == "none":
+                flags.add("private")
+            elif obligations.is_legal_entity(r["legal_form"] or ""):
+                flags.add("company")
+            elif r["activity_state"] == "active":
+                flags.add("sole")
+            if r["afm"] in parents:
+                flags.add("member")
+            if (checks.get(r["afm"]) or {}).get("not_submitted"):
+                flags.add("missing")
+            if r["afm"] in parepid_afms:
+                flags.add("parepid")
+            self._client_flags[r["afm"]] = flags
             fee = fees.get(r["afm"])
             fee_item = _ClientItem(office.money(fee) if fee else "—", (0, fee or 0.0))
             fee_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -780,6 +868,7 @@ class MainWindow(QMainWindow):
         (θα ξανάγραφε το setRowHidden αγνοώντας την αναζήτηση, βλ. σχόλιο στο `_clients_page`)."""
         needle = self.quick_search.text().strip().lower()
         col_filters = self._client_col_filter.filters
+        show = self.client_show.currentData() or ""
         parents = getattr(self, "_client_parents", {})
         for row in range(self.client_table.rowCount()):
             name_item = self.client_table.item(row, _C_NAME)
@@ -791,15 +880,17 @@ class MainWindow(QMainWindow):
                 text_ok = False                               # μέλος «κλειστής» εταιρείας
             col_ok = all(not allowed or self.client_table.item(row, c).text() in allowed
                         for c, allowed in col_filters.items())
-            notice_ok = self._notice_afms is None or self.client_table.item(row, _C_AFM).text() in self._notice_afms
-            self.client_table.setRowHidden(row, not (text_ok and col_ok and notice_ok))
+            row_afm = self.client_table.item(row, _C_AFM).text()
+            notice_ok = self._notice_afms is None or row_afm in self._notice_afms
+            show_ok = not show or show in self._client_flags.get(row_afm, set())
+            self.client_table.setRowHidden(row, not (text_ok and col_ok and notice_ok and show_ok))
         active = (len([c for c, v in col_filters.items() if v]) + (1 if needle else 0)
-                  + (1 if self._notice_afms is not None else 0))
+                  + (1 if self._notice_afms is not None else 0) + (1 if show else 0))
         self.client_notice_label.setVisible(self._notice_afms is not None)
         if self._notice_afms is not None:
             self.client_notice_label.setText(f"Εμφανίζονται οι {len(self._notice_afms)} πελάτες της ειδοποίησης")
         self.client_clear_filters_btn.setVisible(bool(active))
-        self.client_clear_filters_btn.setText(f"Διαγραφή φίλτρων ({active})")
+        self.client_clear_filters_btn.setText(f"  Καθαρισμός φίλτρων ({active})")
         self._sync_client_selection_label()
 
     def _toggle_members(self, item: QTableWidgetItem) -> None:
@@ -819,8 +910,45 @@ class MainWindow(QMainWindow):
             item.setText("▾" + item.text()[1:])
         self._apply_client_filter()
 
+    def _fill_fiscal_combo(self) -> None:
+        years = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT year FROM obligation_checks UNION SELECT DISTINCT CAST(substr(ym,1,4) AS INTEGER) "
+            "FROM mydata_sync")} if hasattr(self, "conn") else set()
+        choices = fiscal.year_choices(y for y in years if y)
+        if self._fiscal_year not in choices:
+            choices = sorted({*choices, self._fiscal_year}, reverse=True)
+        self.fiscal_combo.blockSignals(True)
+        self.fiscal_combo.clear()
+        for y in choices:
+            self.fiscal_combo.addItem(str(y), y)
+        self.fiscal_combo.setCurrentIndex(max(self.fiscal_combo.findData(self._fiscal_year), 0))
+        self.fiscal_combo.blockSignals(False)
+
+    def _on_fiscal_combo(self, index: int) -> None:
+        year = self.fiscal_combo.itemData(index)
+        if year:
+            self.set_fiscal_year(int(year))
+
+    @property
+    def fiscal_year(self) -> int:
+        return self._fiscal_year
+
+    def set_fiscal_year(self, year: int) -> None:
+        """Αλλάζει τη χρήση σε όλη την εφαρμογή (η επιλογή ισχύει μέσα στο ημερολογιακό έτος — fiscal.resolve_year)."""
+        self._prefs.setValue("fiscal/year", year)
+        self._prefs.setValue("fiscal/chosen_in", date.today().year)
+        self._fiscal_year = year
+        if self.fiscal_combo.currentData() != year:
+            self._fill_fiscal_combo()
+        if hasattr(self, "work_year"):
+            self.work_year.setValue(year)
+        self.reload_clients()
+
     def _clear_client_filters(self) -> None:
         self._notice_afms = None
+        self.client_show.blockSignals(True)
+        self.client_show.setCurrentIndex(0)
+        self.client_show.blockSignals(False)
         self.quick_search.clear()                              # το σήμα textChanged ξαναφιλτράρει
         self._client_col_filter.clear()
         self._apply_client_filter()
@@ -937,7 +1065,7 @@ class MainWindow(QMainWindow):
         if not afms:
             toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς TAXISnet.", "warn")
             return
-        self.run_submission_checks(afms, [date.today().year])
+        self.run_submission_checks(afms, [self._fiscal_year])
 
     def run_submission_checks(self, afms: list[str], years: list[int], window: Optional[QWidget] = None,
                               on_done: Optional[Callable[[], None]] = None) -> None:
@@ -957,9 +1085,13 @@ class MainWindow(QMainWindow):
                     r = easycheck.check_client(conn, afm, y)
                     result["ok"] = result["ok"] and r.get("ok")
                     result["entries"] += r.get("entries", [])
-                    apd = efka.check_apd_entry(conn, afm, y)          # ΑΠΔ: e-ΕΦΚΑ, όχι ΑΑΔΕ
-                    if apd:
-                        result["entries"].append(apd)
+                    apd = efka.check_apd_entries(conn, afm, y)        # ΑΠΔ e-ΕΦΚΑ + ΤΕΚΑ ανά ΑΜΕ (όχι ΑΑΔΕ)
+                    result["entries"] += apd
+                    # τέλη σε πύλες εκτός TAXISnet «other»: πλαστικά (Plastic), παρεπιδημούντες (dae.govapp.gr)
+                    fees = fee_portals.check_entries(conn, afm, y)
+                    if fees:
+                        easycheck.store_results(conn, afm, y, fees)
+                        result["entries"] += fees
                 return result
 
             def each(afm, n, result):
@@ -1264,17 +1396,30 @@ class MainWindow(QMainWindow):
         self._tasks.append(run_task(self, work, on_progress=on_progress, on_done=done, on_error=failed))
 
     def open_client_detail(self, afm: str) -> None:
-        dlg = ClientDetailDialog(self, afm)
-        dlg.exec()
-        self.reload_clients()
-        self.reload_dashboard()
+        if self._client_detail_open or (self._recent_client_detail_timer.isActive()
+                                        and self._recent_client_detail_afm == afm):
+            return
+        self._client_detail_open = True
+        try:
+            dlg = ClientDetailDialog(self, afm)
+            dlg.exec()
+        finally:
+            self._client_detail_open = False
+            self._recent_client_detail_afm = afm
+            self._recent_client_detail_timer.start()
+            self.reload_clients()
+            self.reload_dashboard()
 
     # ------------------------------------------------------------------ Ημερολόγιο
     def _calendar_page(self) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
+        self.calendar_tabs = QTabWidget()
+        outer.addWidget(self.calendar_tabs, 1)
+        calendar_page = QWidget()
+        calendar_root = QVBoxLayout(calendar_page)
         self.cal_stack = QStackedWidget()
-        outer.addWidget(self.cal_stack, 1)
+        calendar_root.addWidget(self.cal_stack, 1)
 
         # ---- μηνιαία προβολή: μία γραμμή ανά ημέρα με υποχρεώσεις ----
         month_page = QWidget()
@@ -1377,6 +1522,7 @@ class MainWindow(QMainWindow):
         self.cal_clients_list = QListWidget()
         self.cal_clients_list.setWordWrap(True)
         self.cal_clients_list.itemActivated.connect(self._open_cal_client)
+        self.cal_clients_list.currentItemChanged.connect(lambda current, _previous: self._update_cal_action_buttons(current))
         self.cal_clients_list.setToolTip("Διπλό κλικ: άνοιγμα της καρτέλας του πελάτη")
         sbox.addWidget(self.cal_clients_list, 1)
         # Έλεγχος υποβολής της ΣΥΓΚΕΚΡΙΜΕΝΗΣ προθεσμίας για τους υπόχρεους πελάτες της (ρητό αίτημα χρήστη 2026-10-22)
@@ -1391,6 +1537,8 @@ class MainWindow(QMainWindow):
                                      "δηλώσεις χωρίς αυτόματο έλεγχο (π.χ. ψηφιακό τέλος συναλλαγής)")
         self.cal_done_btn.clicked.connect(self._toggle_cal_done)
         cal_actions.addWidget(self.cal_done_btn)
+        self.cal_check_btn.hide()
+        self.cal_done_btn.hide()
         cal_actions.addStretch()
         sbox.addLayout(cal_actions)
         dsplit.addWidget(side)
@@ -1402,6 +1550,128 @@ class MainWindow(QMainWindow):
         self._cal_month = date.today().replace(day=1)
         self._cal_view_day: Optional[date] = None
         self._cal_events: list[dict] = []
+        self.calendar_tabs.addTab(calendar_page, "Ημερολόγιο")
+
+        work_page = QWidget()
+        work_root = QVBoxLayout(work_page)
+        work_head = QHBoxLayout()
+        work_head.addWidget(_section_header("Υποχρεώσεις ανά εργασία", "check"))
+        work_head.addStretch()
+        self.work_month = QComboBox()
+        self.work_month.addItem("Όλοι οι μήνες", "")
+        for month, name in enumerate(obligations.MONTHS_NOM, 1):
+            self.work_month.addItem(name, month)
+        self.work_month.setCurrentIndex(date.today().month)
+        work_head.addWidget(QLabel("Μήνας"))
+        work_head.addWidget(self.work_month)
+        self.work_year = QSpinBox()
+        self.work_year.setRange(2000, date.today().year + 5)
+        self.work_year.setValue(self._fiscal_year)
+        self.work_year.setFixedWidth(82)
+        work_head.addWidget(QLabel("Έτος"))
+        work_head.addWidget(self.work_year)
+        work_root.addLayout(work_head)
+
+        self.work_tabs = QTabWidget()
+        work_root.addWidget(self.work_tabs, 1)
+
+        summary_page = QWidget()
+        summary_root = QVBoxLayout(summary_page)
+        self.work_summary = QLabel("Επιλέξτε υποχρέωση ώστε να δείτε τους υπόχρεους και την κατάσταση εργασιών.")
+        self.work_summary.setWordWrap(True)
+        self.work_summary.setObjectName("muted")
+        summary_root.addWidget(self.work_summary)
+        self.work_summary_counts = QLabel("")
+        self.work_summary_counts.setObjectName("h2")
+        summary_root.addWidget(self.work_summary_counts)
+        summary_root.addStretch()
+        self.work_tabs.addTab(summary_page, "Συνοπτικός Πίνακας")
+
+        tasks_page = QWidget()
+        tasks_root = QVBoxLayout(tasks_page)
+        tasks_scroll = QScrollArea()
+        tasks_scroll.setWidgetResizable(True)
+        tasks_content = QWidget()
+        tasks_content_layout = QVBoxLayout(tasks_content)
+        self.work_pending_title = QLabel("Εκκρεμείς")
+        self.work_pending_title.setObjectName("h2")
+        tasks_content_layout.addWidget(self.work_pending_title)
+        self.work_pending_grid = QGridLayout()
+        self.work_pending_grid.setSpacing(8)
+        tasks_content_layout.addLayout(self.work_pending_grid)
+        self.work_completed_toggle = QToolButton()
+        self.work_completed_toggle.setText("Ολοκληρωμένες")
+        self.work_completed_toggle.setCheckable(True)
+        self.work_completed_toggle.setChecked(True)
+        self.work_completed_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.work_completed_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.work_completed_toggle.toggled.connect(
+            lambda checked: (self.work_completed_grid_widget.setVisible(checked),
+                             self.work_completed_toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)))
+        tasks_content_layout.addWidget(self.work_completed_toggle)
+        self.work_completed_grid_widget = QWidget()
+        self.work_completed_grid = QGridLayout(self.work_completed_grid_widget)
+        self.work_completed_grid.setContentsMargins(0, 0, 0, 0)
+        self.work_completed_grid.setSpacing(8)
+        tasks_content_layout.addWidget(self.work_completed_grid_widget)
+        tasks_content_layout.addStretch()
+        tasks_scroll.setWidget(tasks_content)
+        tasks_root.addWidget(tasks_scroll)
+        self.work_tabs.addTab(tasks_page, "Εργασίες")
+
+        obligors_page = QWidget()
+        obligors_root = QVBoxLayout(obligors_page)
+        self.work_selected_title = QLabel("Επιλέξτε υποχρέωση ώστε να μεταβείτε αυτόματα στην κατάσταση εργασιών.")
+        self.work_selected_title.setObjectName("h2")
+        obligors_root.addWidget(self.work_selected_title)
+        # Ίδιος με τον πίνακα Πελατών (ρητό αίτημα 2026-10-27): checkbox για μαζικές ενέργειες, ταξινόμηση, χωνί σε
+        # κάθε στήλη, στήλες Interactive με «Εργασία» να παίρνει ό,τι περισσεύει, πλάτη που θυμούνται.
+        self.work_table = QTableWidget(0, 7)
+        self.work_table.verticalHeader().setVisible(False)
+        self.work_table.setAlternatingRowColors(True)
+        self.work_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.work_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.work_kit = TableKit(self.work_table, [("", 30), ("Προθεσμία", 90), ("Μήνας", 125), ("Κατηγορία", 110),
+                                                  ("Εργασία", 0), ("Πελάτης", 190), ("Κατάσταση", 145)],
+                                 "calendar_work_items2", prefs=self._prefs, filterable=range(1, 7),
+                                 placeholder="Αναζήτηση εργασίας, πελάτη ή μήνα…")
+        self.work_table.horizontalHeaderItem(0).setToolTip("Επιλέξτε για μαζικές ενέργειες")
+        obligors_root.addWidget(self.work_kit.bar)
+        work_sel = QHBoxLayout()
+        self.work_sel_label = QLabel("Καμία εργασία επιλεγμένη")
+        self.work_sel_label.setObjectName("muted")
+        work_sel.addWidget(self.work_sel_label)
+        work_sel.addStretch()
+        work_all = QPushButton("Επιλογή όλων")
+        work_all.setToolTip("Επιλέγει όσες εργασίες φαίνονται (σέβεται αναζήτηση και φίλτρα)")
+        work_all.clicked.connect(lambda: self._set_all_work_checked(True))
+        work_sel.addWidget(work_all)
+        work_none = QPushButton("Αποεπιλογή όλων")
+        work_none.clicked.connect(lambda: self._set_all_work_checked(False))
+        work_sel.addWidget(work_none)
+        obligors_root.addLayout(work_sel)
+        obligors_root.addWidget(self.work_table, 1)
+        self.work_table.itemChanged.connect(lambda _i: self._update_work_actions())
+        work_actions = QHBoxLayout()
+        self.work_done_btn = QPushButton("Ολοκληρώθηκε")
+        self.work_done_btn.clicked.connect(self._toggle_work_done)
+        self.work_done_btn.hide()
+        work_actions.addWidget(self.work_done_btn)
+        self.work_check_btn = QPushButton(icon("check", CURRENT.txt, 16), "  Έλεγχος υποβολής")
+        self.work_check_btn.clicked.connect(self._check_work_submission)
+        self.work_check_btn.hide()
+        work_actions.addWidget(self.work_check_btn)
+        work_actions.addStretch()
+        obligors_root.addLayout(work_actions)
+        self.work_table.doubleClicked.connect(lambda *_: self._toggle_work_done())
+        self.work_table.itemSelectionChanged.connect(self._update_work_actions)
+        self.work_tabs.addTab(obligors_page, "Εργασίες / Υπόχρεοι")
+        self._selected_work_group: Optional[tuple[str, str]] = None
+        self._work_items: list[dict] = []
+        self.work_month.currentIndexChanged.connect(self._reload_work_items)
+        self.work_year.valueChanged.connect(self._reload_work_items)
+        self.calendar_tabs.addTab(work_page, "Ανά εργασία")
+        self.calendar_tabs.currentChanged.connect(lambda index: self._reload_work_items() if index == 1 else None)
         return page
 
     def _shift_month(self, delta: int) -> None:
@@ -1457,6 +1727,204 @@ class MainWindow(QMainWindow):
             self._render_cal_day()
         else:
             self._render_cal_month()
+        if self.calendar_tabs.currentIndex() == 1:
+            self._reload_work_items()
+
+    def _reload_work_items(self, *_args) -> None:
+        if not hasattr(self, "work_table"):
+            return
+        year = self.work_year.value()
+        month = self.work_month.currentData()
+        rows = deadlines.work_items(self.conn, year)
+        if month:
+            rows = [r for r in rows if date.fromisoformat(r["date"]).month == month]
+        self._work_items = rows
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for row in rows:
+            groups.setdefault((row["rule_id"], row["date"]), []).append(row)
+        cards = []
+        for key, people in groups.items():
+            required = [person for person in people if person["status"] == "yes"]
+            completed = sum(person["submission"]["status"] in ("submitted", "done") for person in required)
+            pending = len(required) - completed
+            conditional = sum(person["status"] == "maybe" for person in people)
+            cards.append({"key": key, "title": people[0]["title"], "date": key[1],
+                          "category": people[0]["category"], "people": people, "required": len(required),
+                          "completed": completed, "pending": pending, "conditional": conditional,
+                          "is_complete": bool(required) and pending == 0})
+        cards.sort(key=lambda card: (card["date"], card["title"]))
+        self._render_work_cards([card for card in cards if not card["is_complete"]], self.work_pending_grid)
+        self._render_work_cards([card for card in cards if card["is_complete"]], self.work_completed_grid)
+        self.work_pending_title.setText(f"Εκκρεμείς ({sum(card['pending'] for card in cards)})")
+        open_count = sum(not card["is_complete"] for card in cards)
+        done_count = sum(card["is_complete"] for card in cards)
+        payroll_count = sum(card["category"] == "Μισθοδοσία" for card in cards)
+        self.work_summary_counts.setText(f"{open_count} εκκρεμείς εργασίες · {done_count} ολοκληρωμένες · "
+                                         f"{payroll_count} εργασίες μισθοδοσίας · {len(cards) - payroll_count} εργασίες ΑΑΔΕ")
+        self.work_summary.setText(f"{len(rows)} υποχρεώσεις για {obligations.MONTHS_NOM[month - 1] if month else 'όλους τους μήνες'} "
+                                  f"{year}. Επιλέξτε εργασία στην καρτέλα «Εργασίες» για τους υπόχρεους.")
+        selected_people = next((card["people"] for card in cards if card["key"] == self._selected_work_group), None)
+        detail_rows = selected_people if selected_people is not None else rows
+        self.work_selected_title.setText(
+            next((card["title"] + " · " + date.fromisoformat(card["date"]).strftime("%d/%m/%Y")
+                  for card in cards if card["key"] == self._selected_work_group),
+                 "Όλες οι εργασίες και οι υπόχρεοι" if self._selected_work_group is None else
+                 "Η επιλεγμένη εργασία δεν υπάρχει στα φίλτρα — επιλέξτε άλλη."))
+        labels = {"submitted": "Υποβλήθηκε", "not_submitted": "Δεν υποβλήθηκε", "pending": "Εκκρεμεί",
+                  "done": "Ολοκληρώθηκε", "": "Δεν ελέγχθηκε"}
+        colours = {"submitted": CURRENT.ok, "done": CURRENT.ok, "not_submitted": CURRENT.bad,
+                   "pending": CURRENT.warn, "": CURRENT.muted}
+        checked = {self._work_key(d) for d in self._checked_work_rows(only_checked=True)}   # κρατιέται στο ξαναγέμισμα
+        self.work_table.blockSignals(True)
+        self.work_kit.begin()
+        self.work_table.setRowCount(len(detail_rows))
+        for index, row in enumerate(detail_rows):
+            ref_month = row["ref_month"]
+            parts = ref_month.split("-")
+            month = (f"{obligations.MONTHS_NOM[int(parts[1]) - 1]} {parts[0]}"
+                     if len(parts) == 2 and parts[1].isdigit() and 1 <= int(parts[1]) <= 12 else ref_month)
+            status = row["submission"]["status"]
+            cells = ["", date.fromisoformat(row["date"]).strftime("%d/%m/%Y"), month, row["category"], row["title"],
+                     f"{row['name']} · {row['afm']}", labels.get(status, status)]
+            for column, text in enumerate(cells):
+                item = SortItem(text)
+                item.setToolTip(row["reason"] or row["description"])
+                if column == _W_CHK:
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+                    item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                    item.setCheckState(Qt.CheckState.Checked if self._work_key(row) in checked else Qt.CheckState.Unchecked)
+                if column == _W_STATUS:
+                    item.setForeground(QColor(colours.get(status, CURRENT.muted)))
+                self.work_table.setItem(index, column, item)
+        self.work_kit.end()
+        self.work_table.blockSignals(False)
+        self._update_work_actions()
+
+    def _render_work_cards(self, cards: list[dict], grid: QGridLayout) -> None:
+        while grid.count():
+            item = grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for column in range(4):
+            grid.setColumnStretch(column, 1)
+        if not cards:
+            empty = QLabel("Δεν υπάρχουν εργασίες σε αυτή την ενότητα.")
+            empty.setObjectName("muted")
+            grid.addWidget(empty, 0, 0, 1, 4)
+            return
+        for index, card in enumerate(cards):
+            if card["is_complete"]:
+                state = f"Ολοκληρώθηκαν {card['completed']}/{card['required']}"
+                colour = CURRENT.ok
+            else:
+                state = f"Εκκρεμείς {card['pending']}/{card['required']}"
+                colour = CURRENT.warn if card["conditional"] else CURRENT.bad
+            if card["conditional"]:
+                state += f" · υπό προϋποθέσεις {card['conditional']}"
+            text = (f"{card['title']}\n{date.fromisoformat(card['date']).strftime('%d/%m/%Y')}\n{state}")
+            button = QPushButton(text)
+            button.setMinimumHeight(78)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setToolTip(f"{card['category']} · κλικ: εμφάνιση υπόχρεων")
+            button.setStyleSheet(f"color:{colour}; font-weight:600;")
+            button.clicked.connect(lambda _checked=False, key=card["key"]: self._select_work_group(key))
+            grid.addWidget(button, index // 4, index % 4)
+
+    def _select_work_group(self, key: tuple[str, str]) -> None:
+        self._selected_work_group = key
+        self._reload_work_items()
+        self.work_tabs.setCurrentIndex(2)
+
+    @staticmethod
+    def _work_key(row: dict) -> tuple:
+        return (row["afm"], row["rule_id"], row["ref_month"], row["date"])
+
+    def _checked_work_rows(self, only_checked: bool = False) -> list[dict]:
+        """Οι τσεκαρισμένες ΟΡΑΤΕΣ εργασίες (όπως `_selected_client_afms`)· αν δεν υπάρχει καμία, η τρέχουσα γραμμή."""
+        t = self.work_table
+        out = []
+        for r in range(t.rowCount()):
+            item = t.item(r, _W_CHK)
+            if item and not t.isRowHidden(r) and item.checkState() == Qt.CheckState.Checked:
+                out.append(item.data(Qt.ItemDataRole.UserRole))
+        if out or only_checked:
+            return out
+        row = t.currentRow()
+        item = t.item(row, _W_CHK) if row >= 0 else None
+        data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return [data] if data else []
+
+    def _set_all_work_checked(self, checked: bool) -> None:
+        """Επιλογή: μόνο οι ορατές· αποεπιλογή: όλες (ίδιο με τους Πελάτες)."""
+        t = self.work_table
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        t.blockSignals(True)
+        for r in range(t.rowCount()):
+            if checked and t.isRowHidden(r):
+                continue
+            item = t.item(r, _W_CHK)
+            if item:
+                item.setCheckState(state)
+        t.blockSignals(False)
+        self._update_work_actions()
+
+    @staticmethod
+    def _has_auto_check(data: dict) -> bool:
+        return bool(obligations.rule_checks(data["rule_id"], None, data["ref_month"]))
+
+    def _toggle_work_done(self) -> None:
+        rows = self._checked_work_rows()
+        if not rows:
+            toast(self, "Επιλέξτε πρώτα μια υποχρέωση.", "warn")
+            return
+        manual = [d for d in rows if not self._has_auto_check(d)]
+        if not manual:
+            toast(self, "Για αυτή την εργασία υπάρχει αυτόματος έλεγχος υποβολής.", "info")
+            return
+        done = any(d["submission"]["status"] != "done" for d in manual)   # όλες ήδη ολοκληρωμένες ⇒ αναίρεση
+        for d in manual:
+            deadlines.mark_done(self.conn, d["afm"], d["rule_id"], d["ref_month"], done)
+        what = manual[0]["title"] if len(manual) == 1 else f"{len(manual)} εργασίες"
+        skipped = len(rows) - len(manual)
+        toast(self, ("Σημειώθηκε ως ολοκληρωμένη: " if done else "Αναιρέθηκε: ") + what
+              + (f" · {skipped} με αυτόματο έλεγχο παραλείφθηκαν" if skipped else ""), "ok")
+        self._reload_work_items()
+        self._render_calendar_from_db()
+
+    def _update_work_actions(self) -> None:
+        rows = self._checked_work_rows()
+        checked = self._checked_work_rows(only_checked=True)
+        self.work_check_btn.setVisible(any(self._has_auto_check(d) for d in rows))
+        self.work_done_btn.setVisible(any(not self._has_auto_check(d) for d in rows))
+        total = self.work_table.rowCount()
+        shown = sum(1 for r in range(total) if not self.work_table.isRowHidden(r))
+        text = f"{len(checked)} επιλεγμένες" if checked else "Καμία εργασία επιλεγμένη"
+        if shown != total:
+            text += f"  ·  εμφανίζονται {shown} από {total}"
+        self.work_sel_label.setText(text)
+
+    def _check_work_submission(self) -> None:
+        rows = [d for d in self._checked_work_rows() if self._has_auto_check(d)]
+        if not rows:
+            toast(self, "Επιλέξτε εργασία με διαθέσιμο αυτόματο έλεγχο.", "warn")
+            return
+        afms, years, missing = [], set(), 0
+        for d in rows:
+            has_taxis = bool(client_creds.get(self.conn, d["afm"]))
+            has_ika = bool(efka.ika_credentials(self.conn, d["afm"]))
+            if not has_taxis and not (d["rule_id"] == "apd" and has_ika):
+                missing += 1
+                continue
+            if d["afm"] not in afms:
+                afms.append(d["afm"])
+            years.add(obligations.check_year(d["rule_id"], d["ref_month"]))
+        if not afms:
+            toast(self, "Χρειάζονται οι κωδικοί TAXISnet του πελάτη για τον έλεγχο υποβολής.", "warn")
+            return
+        if missing:
+            toast(self, f"{missing} εργασίες παραλείφθηκαν — λείπουν οι κωδικοί TAXISnet του πελάτη.", "warn")
+        self.run_submission_checks(afms, sorted(years), window=self, on_done=self._reload_work_items)
 
     def _calendar_legend(self) -> QWidget:
         """Οριζόντιο υπόμνημα χρωμάτων κάτω από το μηνιαίο ημερολόγιο (ρητό αίτημα χρήστη 2026-10-23)."""
@@ -1557,6 +2025,8 @@ class MainWindow(QMainWindow):
         """Δεξί πλαίσιο της ημερήσιας προβολής: ποιους πελάτες αφορά η επιλεγμένη υποχρέωση/νέο."""
         lst = self.cal_clients_list
         lst.clear()
+        self.cal_check_btn.hide()
+        self.cal_done_btn.hide()
         ev = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         self.cal_clients_title.setText("Πελάτες που αφορά")
         self.cal_clients_hint.setText("")
@@ -1619,6 +2089,13 @@ class MainWindow(QMainWindow):
             it.setData(Qt.ItemDataRole.UserRole + 1, r)
             lst.addItem(it)
 
+    def _update_cal_action_buttons(self, item: Optional[QListWidgetItem]) -> None:
+        row = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
+        rule_id, ref_month = (row.get("rule_id"), row.get("ref_month")) if row else (None, "")
+        has_check = bool(rule_id and obligations.rule_checks(rule_id, None, ref_month))
+        self.cal_check_btn.setVisible(has_check and not (row or {}).get("maybe"))
+        self.cal_done_btn.setVisible(bool(rule_id) and not has_check and not (row or {}).get("maybe"))
+
     def _cal_event_rows(self) -> list[dict]:
         out = []
         for i in range(self.cal_clients_list.count()):
@@ -1628,7 +2105,8 @@ class MainWindow(QMainWindow):
         return out
 
     def _check_cal_event(self) -> None:
-        rows = [r for r in self._cal_event_rows() if not r.get("maybe")]
+        rows = [r for r in self._cal_event_rows() if not r.get("maybe")
+            and obligations.rule_checks(r["rule_id"], None, r["ref_month"])]
         if not rows:
             toast(self, "Επιλέξτε μια προθεσμία με υπόχρεους πελάτες.", "warn")
             return
@@ -1645,6 +2123,9 @@ class MainWindow(QMainWindow):
         r = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
         if not r or not r.get("rule_id"):
             toast(self, "Επιλέξτε πρώτα έναν πελάτη μιας προθεσμίας.", "warn")
+            return
+        if obligations.rule_checks(r["rule_id"], None, r["ref_month"]):
+            toast(self, "Για αυτή την προθεσμία υπάρχει αυτόματος έλεγχος υποβολής.", "info")
             return
         done = (r.get("submission") or {}).get("status") != "done"
         deadlines.mark_done(self.conn, r["afm"], r["rule_id"], r["ref_month"], done)

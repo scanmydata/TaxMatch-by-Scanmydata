@@ -21,6 +21,7 @@ import requests
 
 from ..http import make_session
 from ..textutil import strip_accents
+from ..textutil import strip_accents
 
 log = logging.getLogger(__name__)
 
@@ -169,8 +170,28 @@ def _address(c: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+#: Καταστάσεις ΓΕΜΗ που σημαίνουν ότι η επιχείρηση ΔΕΝ λειτουργεί πια (ελέγχονται χωρίς τόνους, κεφαλαία).
+_CEASED = ("ΔΙΑΓΡΑΦ", "ΔΙΑΚΟΠ", "ΛΥΘΕΙΣ", "ΛΥΣΗ", "ΠΤΩΧΕΥ", "ΕΚΚΑΘΑΡΙΣΜΕΝ", "ΑΝΕΝΕΡΓ")
+
+
+def business_state(status: str) -> str:
+    """Κατάσταση ΓΕΜΗ → 'active' | 'ceased' | '' (άγνωστο). «Διαγραφή» = η (ατομική) επιχείρηση έπαψε — πραγματική
+    περίπτωση 2026-10-27: μέλος εταιρείας με διακοπή 19/02/2025 εμφανιζόταν ως ενεργή ατομική, γιατί η εφαρμογή κρατούσε
+    από το ΓΕΜΗ μόνο νομική μορφή/ΚΑΔ (χωρίς κωδικούς TAXISnet δεν υπήρχε απάντηση Μητρώου ΑΑΔΕ)."""
+    s = strip_accents(status or "").upper()
+    if any(x in s for x in _CEASED):
+        return "ceased"
+    return "active" if "ΕΝΕΡΓ" in s else ""
+
+
+def _gr_date(iso: str) -> str:
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", iso or "")
+    return f"{m.group(3)}/{m.group(2)}/{m.group(1)}" if m else (iso or "")
+
+
 def parse_company(data: Any) -> dict:
-    """Ωμή απάντηση API -> {ar_gemi, name, legal_form, status, address, kads}. Ανεκτικό σε διαφορετικά σχήματα."""
+    """Ωμή απάντηση API -> {ar_gemi, name, legal_form, status, status_date, state, start_date, address, kads}.
+    Ανεκτικό σε διαφορετικά σχήματα. `state`/`status_date` (dd/mm/yyyy): βλ. `business_state`."""
     if not isinstance(data, dict):
         return {}
     company = data.get("company") if isinstance(data.get("company"), dict) else data
@@ -182,9 +203,11 @@ def parse_company(data: Any) -> dict:
         "legal_form": _first(company, ["legalType", "legalTypeLabel", "legalForm", "legalFormLabel", "coLegalType",
                                        "companyLegalForm"]),
         "status": _first(company, ["status", "statusDescr", "coStatus", "companyStatus"]),
+        "status_date": _gr_date(_first(company, ["lastStatusChange", "statusDate", "statusChangeDate"])),
+        "start_date": _gr_date(_first(company, ["incorporationDate", "registrationDate", "startDate"])),
         "address": _address(company),
         "kads": extract_kads(company),
-    }
+    } | {"state": business_state(_first(company, ["status", "statusDescr", "coStatus", "companyStatus"]))}
 
 
 # ------------------------------------------------------------------ HTTP

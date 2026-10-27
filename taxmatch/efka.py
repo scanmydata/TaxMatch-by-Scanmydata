@@ -54,7 +54,7 @@ REASONS_EL = {
     "LandPage": "Ο e-ΕΦΚΑ απέρριψε τον ρόλο εργοδότη — ελέγξτε ότι ο ΑΜΕ ανήκει σε αυτόν τον ΑΦΜ.",
     "NoTransactions": "Δεν φόρτωσε η οικονομική καρτέλα εργοδότη (άλλαξε η σελίδα;).",
     "AmeNotFound": "Δεν βρέθηκε ΑΜΕ (ο πελάτης δεν είναι εγγεγραμμένος εργοδότης;).",
-    "NoPistErg": "Δεν άνοιξε η «Πιστοποίηση Εργοδοτών» του e-ΕΦΚΑ.",
+    "NoPistErg": "Δεν ολοκληρώθηκε η είσοδος στην «Πιστοποίηση Εργοδοτών» του e-ΕΦΚΑ. Ελέγξτε τους κωδικούς και την πρόσβαση εργοδότη.",
     "AfmMismatch": "Οι κωδικοί TAXISnet ανήκουν σε άλλο ΑΦΜ από τον πελάτη.",
 }
 
@@ -71,6 +71,16 @@ def normalize_ame(value: Any) -> str:
 def get_ame(conn: sqlite3.Connection, afm: str) -> str:
     row = conn.execute("SELECT ame FROM efka_credentials WHERE afm=?", (afm,)).fetchone()
     return row["ame"] if row else ""
+
+
+def get_oikodom_ame(conn: sqlite3.Connection, afm: str) -> str:
+    row = conn.execute("SELECT ame_oikodomotexnikon FROM efka_credentials WHERE afm=?", (afm,)).fetchone()
+    return row["ame_oikodomotexnikon"] if row else ""
+
+
+def searches_oikodomotexnika(conn: sqlite3.Connection, afm: str) -> bool:
+    row = conn.execute("SELECT search_oikodomotexnika FROM efka_credentials WHERE afm=?", (afm,)).fetchone()
+    return bool(row["search_oikodomotexnika"]) if row else False
 
 
 def ika_credentials(conn: sqlite3.Connection, afm: str) -> Optional[tuple[str, str]]:
@@ -102,19 +112,27 @@ def ika_user(conn: sqlite3.Connection, afm: str) -> str:
 
 
 def set_(conn: sqlite3.Connection, afm: str, ame: Optional[str] = None, user: Optional[str] = None,
-         password: Optional[str] = None, source: str = "manual") -> bool:
-    """Αποθηκεύει ΑΜΕ ή/και κωδικούς ΙΚΑ εργοδότη (κενά/None = μένουν ως έχουν). False αν δεν δόθηκε τίποτα."""
+         password: Optional[str] = None, source: str = "manual", construction_ame: Optional[str] = None,
+         search_oikodomotexnika: Optional[bool] = None) -> bool:
+    """Αποθηκεύει ΑΜΕ/κωδικούς και την επιλογή οικοδομοτεχνικών (κενά/None = μένουν ως έχουν)."""
     ame = normalize_ame(ame) if ame else ""
+    construction_ame = normalize_ame(construction_ame) if construction_ame else ""
     user, password = (user or "").strip(), password or ""
-    if not ame and not user and not password:
+    if not ame and not construction_ame and not user and not password and search_oikodomotexnika is None:
         return False
     row = conn.execute("SELECT * FROM efka_credentials WHERE afm=?", (afm,)).fetchone()
-    cur = dict(row) if row else {"ame": "", "ame_source": "", "ika_user": "", "ika_pass": ""}
+    cur = dict(row) if row else {"ame": "", "ame_source": "", "ame_oikodomotexnikon": "",
+                                 "search_oikodomotexnika": 0, "ika_user": "", "ika_pass": ""}
     conn.execute(
-        "INSERT INTO efka_credentials(afm, ame, ame_source, ika_user, ika_pass, updated_at) VALUES (?,?,?,?,?,?) "
-        "ON CONFLICT(afm) DO UPDATE SET ame=excluded.ame, ame_source=excluded.ame_source, ika_user=excluded.ika_user, "
+        "INSERT INTO efka_credentials(afm, ame, ame_source, ame_oikodomotexnikon, search_oikodomotexnika, "
+        "ika_user, ika_pass, updated_at) VALUES (?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(afm) DO UPDATE SET ame=excluded.ame, ame_source=excluded.ame_source, "
+        "ame_oikodomotexnikon=excluded.ame_oikodomotexnikon, "
+        "search_oikodomotexnika=excluded.search_oikodomotexnika, ika_user=excluded.ika_user, "
         "ika_pass=excluded.ika_pass, updated_at=excluded.updated_at",
         (afm, ame or cur["ame"], source if ame else cur["ame_source"],
+         construction_ame or cur["ame_oikodomotexnikon"],
+         int(search_oikodomotexnika) if search_oikodomotexnika is not None else cur["search_oikodomotexnika"],
          crypto.enc(user) if user else cur["ika_user"], crypto.enc(password) if password else cur["ika_pass"],
          db.utcnow()))
     return True
@@ -149,8 +167,10 @@ def record_check(conn: sqlite3.Connection, afm: str, status: str, message: str) 
 
 
 def status_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    """{afm: {ame, has_ika, check_status}} — ΧΩΡΙΣ αποκρυπτογράφηση."""
+    """{afm: {ame, construction_ame, search_oikodomotexnika, has_ika, check_status}} — ΧΩΡΙΣ αποκρυπτογράφηση."""
     return {r["afm"]: {"ame": r["ame"], "has_ika": bool(r["ika_user"] and r["ika_pass"]),
+                       "construction_ame": r["ame_oikodomotexnikon"],
+                       "search_oikodomotexnika": bool(r["search_oikodomotexnika"]),
                        "check_status": r["check_status"], "check_message": r["check_message"]}
             for r in conn.execute("SELECT * FROM efka_credentials")}
 
@@ -510,7 +530,8 @@ def parse_ames(page: str) -> list[dict[str, str]]:
         if cells and re.fullmatch(r"\d+", cells[0]):
             # στήλες όπως ο runner (efka-ame.js): ΑΜΕ · Επωνυμία · … · Κωδ. ΑΠΔ (4η)
             out.append({"ame": normalize_ame(cells[0]), "name": cells[1] if len(cells) > 1 else "",
-                        "apd_code": cells[3] if len(cells) > 3 else ""})
+                        "apd_code": cells[3] if len(cells) > 3 else "",
+                        "username": cells[4] if len(cells) > 4 else ""})
     return out
 
 
@@ -537,42 +558,336 @@ AME_KINDS = ("Κοινών Επιχειρήσεων", "Οικοδομοτεχν�
 
 
 def retrieve_ame(conn: sqlite3.Connection, afm: str,
-                 http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> dict[str, Any]:
+                 http_factory: Callable[[], _HyperHttp] = _HyperHttp,
+                 include_oikodomotexnika: Optional[bool] = None) -> dict[str, Any]:
     """ΑΜΕ από την «Πιστοποίηση Εργοδοτών» με κωδικούς ΙΚΑ εργοδότη (αν υπάρχουν) ή TAXISnet του πελάτη· αποθηκεύεται.
     {ok, ame, reason, all}. Ίδια βήματα με τον runner `configs/efka-ame.js` (εκεί με browser), εδώ με καθαρό HTTP —
     ΕΠΑΛΗΘΕΥΤΗΚΕ ζωντανά 2026-10-22 με TAXISnet (καρτέλα eAccess `gsisTabView_activeIndex=1`). Η είσοδος με κωδικούς
     ΙΚΑ εργοδότη (`j_security_check`) δεν έχει δοκιμαστεί ζωντανά."""
-    http = http_factory()
     try:
+        include_oikodomotexnika = (searches_oikodomotexnika(conn, afm) if include_oikodomotexnika is None
+                                   else include_oikodomotexnika)
         ika = ika_credentials(conn, afm)
         taxis = taxis_credentials.get(conn, afm)
+        attempts: list[tuple[str, tuple[str, str]]] = []
         if ika:
-            res = _eaccess_ika(http, *ika)
-        elif taxis:
-            res = _eaccess_taxis(http, taxis[0], taxis[1], afm)
-        else:
+            attempts.append(("ika", ika))
+        if taxis and taxis != ika:
+            attempts.append(("taxis", taxis))
+        if not attempts:
             return {"ok": False, "ame": "", "reason": REASONS_EL["NoCredentials"]}
-        if not res.get("ok"):
-            return {"ok": False, "ame": "", "reason": REASONS_EL.get(res.get("reason") or "", "Αποτυχία σύνδεσης e-ΕΦΚΑ.")}
-        page = _skip_eprofile(http, http.follow("GET", APPS + "/ePistErg"))
-        if "ePistErg" not in page["url"]:
-            return {"ok": False, "ame": "", "reason": REASONS_EL["NoPistErg"]}
+        last_reason = "NoPistErg"
+        for method, (user, password) in attempts:
+            http = http_factory()
+            res = (_eaccess_ika(http, user, password) if method == "ika"
+                   else _eaccess_taxis(http, user, password, afm))
+            if not res.get("ok"):
+                last_reason = res.get("reason") or last_reason
+                continue
+            page = _skip_eprofile(http, http.follow("GET", APPS + "/ePistErg"))
+            if "ePistErg" in page["url"]:
+                break
+            last_reason = "NoPistErg"
+        else:
+            return {"ok": False, "ame": "", "reason": REASONS_EL.get(last_reason, "Αποτυχία σύνδεσης e-ΕΦΚΑ.")}
         found = []
-        # «Κοινών Επιχειρήσεων» πρώτα· αν δεν έχει ΑΜΕ, «Οικοδομοτεχνικών Έργων» (runner: docKind=oikodomotexnikon)
+        construction = "Οικοδομοτεχνικών Έργων"
         for kind in AME_KINDS:
+            if kind == construction and found and not include_oikodomotexnika:
+                break
             link = next((a.group(1) for a in re.finditer(r'<a\b[^>]*href="([^"]*)"[^>]*>(.*?)</a>', page["text"],
                                                          re.S | re.I) if kind in strip_tags(a.group(2))), "")
             if not link and kind != AME_KINDS[0]:
                 continue
             ames_page = http.follow("GET", urljoin(page["url"], _html.unescape(link)) if link
                                     else APPS + "/ePistErg/secure/AMEs.xhtml")
-            found = [{**a, "kind": kind} for a in parse_ames(ames_page["text"])]
-            if found:
+            found.extend({**a, "kind": kind} for a in parse_ames(ames_page["text"]))
+            if found and not include_oikodomotexnika:
                 break
     except Exception as exc:                      # noqa: BLE001 — δίκτυο / αλλαγή σελίδας: ποτέ crash
         log.warning("efka ame %s: %s", afm, exc)
         return {"ok": False, "ame": "", "reason": f"Η ανάκτηση ΑΜΕ δεν ολοκληρώθηκε ({str(exc)[:80]})."}
     if not found:
         return {"ok": False, "ame": "", "reason": REASONS_EL["AmeNotFound"]}
-    set_(conn, afm, ame=found[0]["ame"], source="efka")
-    return {"ok": True, "ame": found[0]["ame"], "reason": "", "all": found}
+    # ΟΛΑ τα ΑΜΕ στο efka_ames (κάθε οικοδομοτεχνικό έργο έχει το δικό του — έλεγχος ΑΠΔ ανά ΑΜΕ). Το όνομα χρήστη
+    # της λίστας μπαίνει μόνο αν δεν έχει ήδη οριστεί· ο κωδικός ΠΟΤΕ (δεν εμφανίζεται — τον δίνει ο χρήστης).
+    known_users = {a["ame"]: a["ika_user"] for a in list_ames(conn, afm)}
+    for item in found:
+        upsert_ame(conn, afm, item["ame"], kind="oikodom" if item["kind"] == construction else "koinon",
+                   name=item.get("name") or None, apd_code=item.get("apd_code") or None, source="efka",
+                   user=item.get("username") if item.get("username") and not known_users.get(item["ame"]) else None)
+    common_ame = next((item["ame"] for item in found if item["kind"] == AME_KINDS[0]), "")
+    construction_ame = next((item["ame"] for item in found if item["kind"] == construction), "")
+    primary_ame = common_ame or found[0]["ame"]
+    set_(conn, afm, ame=primary_ame, source="efka")
+    if include_oikodomotexnika:
+        conn.execute("UPDATE efka_credentials SET ame_oikodomotexnikon=?, updated_at=? WHERE afm=?",
+                     (construction_ame, db.utcnow(), afm))
+    return {"ok": True, "ame": primary_ame, "reason": "", "all": found}
+
+
+# ------------------------------------------------------------------ πολλά ΑΜΕ ανά εργοδότη + ΑΠΔ e-ΕΦΚΑ / ΤΕΚΑ (2026-10-27)
+# Ρητό αίτημα χρήστη: (α) ο έλεγχος ΑΠΔ ΑΝΑ ΑΜΕ — ένας εργοδότης μπορεί να έχει πολλά (ιδίως οικοδομοτεχνικά έργα, ένα
+# ανά έργο), και η είσοδος σε κάθε ΑΜΕ γίνεται με ΔΙΑΦΟΡΕΤΙΚΟΥΣ κωδικούς ΙΚΑ· (β) ΧΩΡΙΣΤΑ η ΑΠΔ e-ΕΦΚΑ (ΙΚΑ) και η ΑΠΔ
+# ΤΕΚΑ. Πηγή: TaxSystem Hyper.Server.Tax `GetAPD(APD | APD_Teka)` — σελίδα «submissions.xhtml» της ΑΠΔ:
+#   νέα πύλη (TAXISnet/κωδικοί εργοδότη + ρόλος external-employer με ΑΜΕ): services.e-efka.gov.gr/ssp.efka.apd/secure/
+#   και …/ssp.efka.apd.teka/secure/ · παλιά (eAccess, κωδικοί ΙΚΑ του ΑΜΕ): apps.e-efka.gov.gr/eAPDsso[TEKA]/faces/
+#   secureAdmin/submissions.xhtml. Πίνακας `submissionTable_data`: td0 αρ. υποβολής · td1 είδος · td2 «Μ/ΕΕΕΕ - Μ/ΕΕΕΕ» ·
+#   td3 κατάσταση (μετρά ΜΟΝΟ «ΥΠΟΒΟΛΗ», όπως το TaxSystem) · `resultTpte` = ταυτότητα πληρωμής. Σελιδοποίηση: PrimeFaces
+#   partial-ajax (`submissionTable_first`/`_rows`). **ΔΕΝ έχει δοκιμαστεί ζωντανά από το TaxMatch η σελίδα υποβολών.**
+APD_FUNDS = {
+    "ΑΠΔ": ("ΑΠΔ e-ΕΦΚΑ (ΙΚΑ)", SVC + "ssp.efka.apd/secure/submissions.xhtml",
+            APPS + "/eAPDsso/faces/secureAdmin/submissions.xhtml"),
+    "ΑΠΔ_ΤΕΚΑ": ("ΑΠΔ ΤΕΚΑ", SVC + "ssp.efka.apd.teka/secure/submissions.xhtml",
+                 APPS + "/eAPDssoTEKA/faces/secureAdmin/submissions.xhtml"),
+}
+AME_KIND_LABEL = {"koinon": "Κοινών Επιχειρήσεων", "oikodom": "Οικοδομοτεχνικών Έργων"}
+
+
+def list_ames(conn: sqlite3.Connection, afm: str, active_only: bool = False) -> list[dict[str, Any]]:
+    """Τα ΑΜΕ του εργοδότη (`efka_ames`) — ΧΩΡΙΣ κωδικούς· `ika_user` αποκρυπτογραφημένος για την οθόνη, `has_pass`."""
+    rows = conn.execute("SELECT * FROM efka_ames WHERE afm=?" + (" AND active=1" if active_only else "")
+                        + " ORDER BY kind, ame", (afm,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["ika_user"] = crypto.dec(r["ika_user"]) if r["ika_user"] else ""
+        d["has_pass"] = bool(r["ika_pass"])
+        d.pop("ika_pass", None)
+        out.append(d)
+    if not out:                                       # παλιά δεδομένα (πριν τη v19): το ΑΜΕ του efka_credentials
+        main = get_ame(conn, afm)
+        if main:
+            out.append({"afm": afm, "ame": main, "kind": "koinon", "name": "", "apd_code": "",
+                        "ika_user": ika_user(conn, afm), "has_pass": bool(ika_credentials(conn, afm)), "active": 1,
+                        "source": "efka_credentials", "check_status": "", "check_message": ""})
+    return out
+
+
+def upsert_ame(conn: sqlite3.Connection, afm: str, ame: str, kind: Optional[str] = None, name: Optional[str] = None,
+               user: Optional[str] = None, password: Optional[str] = None, apd_code: Optional[str] = None,
+               source: str = "manual", active: Optional[bool] = None) -> bool:
+    """Προσθήκη/ενημέρωση ΑΜΕ (κενά/None = μένουν ως έχουν). Κωδικοί ΙΚΑ του ΑΜΕ κρυπτογραφημένοι (enc:1:)."""
+    ame = normalize_ame(ame)
+    if not ame:
+        return False
+    row = conn.execute("SELECT * FROM efka_ames WHERE afm=? AND ame=?", (afm, ame)).fetchone()
+    cur = dict(row) if row else {"kind": "koinon", "name": "", "apd_code": "", "ika_user": "", "ika_pass": "",
+                                 "active": 1, "source": source}
+    conn.execute(
+        "INSERT INTO efka_ames(afm, ame, kind, name, apd_code, ika_user, ika_pass, active, source, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(afm, ame) DO UPDATE SET kind=excluded.kind, name=excluded.name, "
+        "apd_code=excluded.apd_code, ika_user=excluded.ika_user, ika_pass=excluded.ika_pass, active=excluded.active, "
+        "source=excluded.source, updated_at=excluded.updated_at",
+        (afm, ame, kind or cur["kind"], name if name is not None else cur["name"],
+         apd_code if apd_code is not None else cur["apd_code"],
+         crypto.enc(user.strip()) if user and user.strip() else cur["ika_user"],
+         crypto.enc(password) if password else cur["ika_pass"],
+         int(active) if active is not None else cur["active"], cur.get("source") or source, db.utcnow()))
+    return True
+
+
+def remove_ame(conn: sqlite3.Connection, afm: str, ame: str) -> None:
+    conn.execute("DELETE FROM efka_ames WHERE afm=? AND ame=?", (afm, normalize_ame(ame)))
+
+
+def ame_credentials(conn: sqlite3.Connection, afm: str, ame: str) -> Optional[tuple[str, str]]:
+    """Κωδικοί ΙΚΑ ΑΥΤΟΥ του ΑΜΕ· για το κύριο ΑΜΕ και οι κωδικοί ΙΚΑ εργοδότη του efka_credentials."""
+    r = conn.execute("SELECT ika_user, ika_pass FROM efka_ames WHERE afm=? AND ame=?", (afm, normalize_ame(ame))).fetchone()
+    if r and r["ika_user"] and r["ika_pass"]:
+        return crypto.dec(r["ika_user"]), crypto.dec(r["ika_pass"])
+    if normalize_ame(ame) == get_ame(conn, afm):
+        return ika_credentials(conn, afm)
+    return None
+
+
+def _upper(s: str) -> str:
+    from .textutil import strip_accents
+    return strip_accents(s or "").upper()
+
+
+def parse_submissions(page: str) -> dict[str, Any]:
+    """Σελίδα (ή partial-response) υποβολών ΑΠΔ → {rows: [{id, kind, period, yms, status}], payment_id, pages}."""
+    m = re.search(r'<update id="submissionTable"><!\[CDATA\[(.*?)\]\]></update>', page, re.S)
+    if m:
+        body = m.group(1)
+    else:
+        at = page.find('id="submissionTable_data"')
+        body = page[at:] if at >= 0 else ""
+    rows = []
+    for tr in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", body, re.S | re.I):
+        cells = [strip_tags(c) for c in re.findall(r"<td\b[^>]*>(.*?)</td>", tr.group(1), re.S | re.I)]
+        if len(cells) < 4 or not re.search(r"\d{1,2}/\d{4}", cells[2]):
+            continue
+        yms: list[str] = []
+        for mo, yr in re.findall(r"(\d{1,2})/(\d{4})", cells[2]):
+            ym = f"{yr}-{int(mo):02d}"
+            if ym not in yms:
+                yms.append(ym)
+        # το κελί του αριθμού περιέχει και το script του PrimeFaces («82624495 $(function(){…») — μόνο ο αριθμός
+        rows.append({"id": (cells[0].split() or [""])[0], "kind": cells[1], "period": cells[2], "yms": yms,
+                     "status": cells[3]})
+    to = re.search(r'id="resultTpte"[^>]*>(.*?)</', page, re.S)
+    pages = re.search(r"Σελίδα\s*\d+\s*από\s*(\d+)", strip_tags(page))
+    return {"rows": rows, "payment_id": strip_tags(to.group(1)) if to else "",
+            "pages": int(pages.group(1)) if pages else 1}
+
+
+def apd_submissions(http: _HyperHttp, url: str, year: int, max_pages: int = 30) -> Optional[dict[str, Any]]:
+    """Όλες οι υποβολές ΑΠΔ (με σελιδοποίηση) ώσπου να περάσουμε σε παλαιότερο έτος. None = δεν φόρτωσε ο πίνακας."""
+    page = http.follow("GET", url)
+    text = page["text"]
+    if 'id="submissionTable' not in text:
+        return None
+    first = parse_submissions(text)
+    rows, vs = list(first["rows"]), view_state(text)
+    prefix = "jakarta" if "jakarta.faces.ViewState" in text else "javax"
+    size = len(first["rows"]) or 10
+    for i in range(1, min(first["pages"], max_pages)):
+        if rows and all(ym < f"{year}-01" for r in rows[-size:] for ym in (r["yms"] or ["9999"])):
+            break                                     # η σελίδα είναι ήδη σε παλαιότερο έτος (TaxSystem: MinYearCnt)
+        resp = http.follow("POST", page["url"], {
+            f"{prefix}.faces.partial.ajax": "true", f"{prefix}.faces.source": "submissionTable",
+            f"{prefix}.faces.partial.execute": "submissionTable", f"{prefix}.faces.partial.render": "submissionTable",
+            "submissionTable": "submissionTable", "submissionTable_pagination": "true",
+            "submissionTable_first": str(i * size), "submissionTable_rows": str(size),
+            "submissionTable_encodeFeature": "true", "submissionShow": "submissionShow", "submissionTable_selection": "",
+            f"{prefix}.faces.ViewState": vs})
+        more = parse_submissions(resp["text"])
+        if not more["rows"]:
+            break
+        rows += more["rows"]
+        vs = view_state(resp["text"]) or vs
+    return {"rows": rows, "payment_id": first["payment_id"]}
+
+
+def submissions_entry(key: str, ame: str, rows: list[dict[str, Any]], year: int, payment_id: str = "",
+                      today: Optional[date] = None) -> dict[str, Any]:
+    """Εγγραφή `obligation_checks` «<ΑΠΔ|ΑΠΔ_ΤΕΚΑ>#<ΑΜΕ>»: μήνας με υποβολή «ΥΠΟΒΟΛΗ» = υποβλήθηκε· ληγμένος μήνας χωρίς
+    = δεν υποβλήθηκε. Για ΤΕΚΑ χωρίς ΚΑΜΙΑ ΑΠΔ ποτέ = «δεν αφορά» (χωρίς εργαζόμενους στο ΤΕΚΑ)."""
+    from .obligations import MONTHS_NOM, month_end, month_end_or_next
+    today = today or date.today()
+    label = f"{APD_FUNDS[key][0]} · ΑΜΕ {ame}"
+    if key == "ΑΠΔ_ΤΕΚΑ" and not rows:
+        return {"obligation": f"{key}#{ame}", "label": label, "periods": [], "status": "not_obligated",
+                "detail": "Καμία ΑΠΔ ΤΕΚΑ στον e-ΕΦΚΑ — χωρίς εργαζόμενους ασφαλισμένους στο ΤΕΚΑ"}
+    by_month: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if "ΥΠΟΒΟΛΗ" not in _upper(r["status"]):
+            continue
+        for ym in r["yms"]:
+            by_month.setdefault(ym, []).append(r)
+    periods = []
+    for m in range(1, 13):
+        ym = f"{year}-{m:02d}"
+        due = month_end_or_next(*((year + 1, 1) if m == 12 else (year, m + 1)))
+        found = by_month.get(ym)
+        base = {"period": f"{MONTHS_NOM[m - 1]} {year}", "period_end": month_end(year, m).isoformat(),
+                "period_type": "month"}
+        if found:
+            periods.append({**base, "status": "submitted", "amounts": {"payment_id": payment_id} if payment_id else {},
+                            "detail": "Υποβολή " + ", ".join(f"{x['id']} ({x['kind']})" for x in found)})
+        elif due < today:
+            detail = "Καμία υποβολή ΑΠΔ για τον μήνα"
+            if key == "ΑΠΔ_ΤΕΚΑ" and by_month and ym > max(by_month):
+                # ζωντανά 2026-10-27: ΑΠΔ ΤΕΚΑ ως τον Μάιο και μετά τίποτα — συνήθως αποχώρησε ο εργαζόμενος του ΤΕΚΑ
+                detail = (f"Καμία ΑΠΔ ΤΕΚΑ μετά το {max(by_month)[5:]}/{max(by_month)[:4]} — αν δεν απασχολεί πια "
+                          "εργαζόμενους ασφαλισμένους στο ΤΕΚΑ, δεν οφείλεται (σημειώστε την ως ολοκληρωμένη)")
+            periods.append({**base, "status": "not_submitted", "detail": detail})
+    statuses = {p["status"] for p in periods}
+    return {"obligation": f"{key}#{ame}", "label": label, "periods": periods,
+            "status": "not_submitted" if "not_submitted" in statuses else ("submitted" if periods else "no_data")}
+
+
+def _login_for_ame(conn: sqlite3.Connection, afm: str, ame: str,
+                   http_factory: Callable[[], _HyperHttp]) -> dict[str, Any]:
+    """Σύνδεση για ΕΝΑ ΑΜΕ στη νέα πύλη (services.e-efka.gov.gr, «Είσοδος Εργοδότη» → GSIS → ρόλος external-employer
+    με ΑΥΤΟ το ΑΜΕ): πρώτα οι κωδικοί του ΑΜΕ (αν δόθηκαν), μετά οι TAXISnet του πελάτη. Η παλιά πύλη ΑΠΔ
+    (apps.e-efka.gov.gr/eAPDsso, με eAccess) ΑΝΑΚΑΤΕΥΘΥΝΕΙ πλέον στη νέα — ζωντανά 2026-10-27 — άρα δεν χρησιμοποιείται·
+    η σελίδα εισόδου δεν έχει άλλη επιλογή εργοδότη από το TAXISnet. {ok, http, portal: 'new', reason}."""
+    attempts: list[tuple[str, tuple[str, str]]] = []
+    own = ame_credentials(conn, afm, ame)
+    if own:
+        attempts.append(("new", own))
+    taxis = taxis_credentials.get(conn, afm)
+    if taxis and ("new", taxis) not in attempts:
+        attempts.append(("new", taxis))
+    if not attempts:
+        return {"ok": False, "reason": REASONS_EL["NoCredentials"]}
+    last = "Αποτυχία σύνδεσης στον e-ΕΦΚΑ."
+    for portal, (user, password) in attempts:
+        try:
+            if portal == "new":
+                res = services_login(user, password, afm, ame=ame, http_factory=http_factory)
+                if res.get("ok"):
+                    return {"ok": True, "http": res["http"], "portal": "new"}
+            else:
+                http = http_factory()
+                res = _eaccess_ika(http, user, password)
+                if res.get("ok"):
+                    return {"ok": True, "http": http, "portal": "old"}
+            last = REASONS_EL.get(res.get("reason") or "", last)
+        except Exception as exc:                       # noqa: BLE001 — δίκτυο/σελίδα: επόμενη προσπάθεια
+            last = f"Η σύνδεση δεν ολοκληρώθηκε ({str(exc)[:80]})."
+    return {"ok": False, "reason": last}
+
+
+def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Optional[date] = None,
+                      http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> list[dict[str, Any]]:
+    """ΑΠΔ e-ΕΦΚΑ ΚΑΙ ΑΠΔ ΤΕΚΑ για ΚΑΘΕ ενεργό ΑΜΕ του εργοδότη → `obligation_checks` ως «ΑΠΔ#<ΑΜΕ>» /
+    «ΑΠΔ_ΤΕΚΑ#<ΑΜΕ>» (το Ημερολόγιο τα ενώνει ανά κανόνα: deadlines._merge_per_ame). Χωρίς ΑΜΕ: ανάκτηση από την
+    «Πιστοποίηση Εργοδοτών»· αν δεν φορτώσει η σελίδα υποβολών ΑΠΔ, η παλιά μέθοδος (οικονομική καρτέλα εργοδότη)."""
+    from .easycheck import store_results
+    if not should_check_apd(conn, afm):
+        return []
+    today = today or date.today()
+    ames = list_ames(conn, afm, active_only=True)
+    if not ames and employer_credentials(conn, afm):
+        found = retrieve_ame(conn, afm)
+        ames = list_ames(conn, afm, active_only=True) if found.get("ok") else []
+    if not ames:
+        return [{"obligation": "ΑΠΔ", "label": "ΑΠΔ e-ΕΦΚΑ", "status": "error", "periods": [],
+                 "detail": REASONS_EL["NoAme"]}]
+    entries: list[dict[str, Any]] = []
+    for a in ames:
+        ame = a["ame"]
+        try:
+            login = _login_for_ame(conn, afm, ame, http_factory)
+        except Exception as exc:                       # noqa: BLE001
+            login = {"ok": False, "reason": f"Η σύνδεση δεν ολοκληρώθηκε ({str(exc)[:80]})."}
+        if not login["ok"]:
+            conn.execute("UPDATE efka_ames SET check_status='error', check_message=? WHERE afm=? AND ame=?",
+                         (login["reason"], afm, ame))
+            entries.append({"obligation": f"ΑΠΔ#{ame}", "label": f"ΑΠΔ e-ΕΦΚΑ · ΑΜΕ {ame}", "status": "error",
+                            "periods": [], "detail": login["reason"]})
+            continue
+        messages = []
+        for key, (label, new_url, old_url) in APD_FUNDS.items():
+            try:
+                found = apd_submissions(login["http"], new_url if login["portal"] == "new" else old_url, year)
+            except Exception as exc:                   # noqa: BLE001
+                log.warning("apd %s %s/%s: %s", key, afm, ame, exc)
+                found = None
+            if found is None and key == "ΑΠΔ" and login["portal"] == "new":
+                # παλιά μέθοδος (ζωντανά επαληθευμένη 2026-10-22): κινήσεις ΑΠΔ στην οικονομική καρτέλα εργοδότη
+                end = min(today, date(year + 1, 2, 28)) if year < today.year else today
+                lines = transactions(login["http"], f"01/01/{year}", end.strftime("%d/%m/%Y"))
+                if lines is not None:
+                    legacy = apd_entry(lines, year, today)
+                    entries.append({**legacy, "obligation": f"ΑΠΔ#{ame}", "label": f"{label} · ΑΜΕ {ame}"})
+                    messages.append(f"{label}: οικονομική καρτέλα")
+                    continue
+            if found is None:
+                entries.append({"obligation": f"{key}#{ame}", "label": f"{label} · ΑΜΕ {ame}", "status": "error",
+                                "periods": [], "detail": "Δεν φόρτωσε η σελίδα υποβολών ΑΠΔ (άλλαξε η σελίδα;)"})
+                messages.append(f"{label}: σφάλμα")
+                continue
+            entries.append(submissions_entry(key, ame, found["rows"], year, found["payment_id"], today))
+            messages.append(f"{label}: {len(found['rows'])} υποβολές")
+        conn.execute("UPDATE efka_ames SET check_status='ok', check_message=? WHERE afm=? AND ame=?",
+                     ("; ".join(messages), afm, ame))
+    # οι παλιές εγγραφές «ΑΠΔ» (ένα ΑΜΕ, πριν τη v19) αντικαθίστανται από τις ανά ΑΜΕ
+    if any(e["status"] != "error" for e in entries):
+        conn.execute("DELETE FROM obligation_checks WHERE afm=? AND year=? AND obligation='ΑΠΔ'", (afm, year))
+    store_results(conn, afm, year, entries)
+    return entries

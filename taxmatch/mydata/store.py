@@ -96,17 +96,18 @@ def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], month
             conn.execute(
                 "INSERT INTO mydata_docs(afm, mark, direction, invoice_type, series, aa, issue_date, issuer_vat, issuer_name, "
                 "issuer_country, counter_vat, counter_name, counter_country, net, vat, total, withheld, withheld_json, "
-                "cancelled, url, provider, fetched_at, stamp, vat_class, rent) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "cancelled, url, provider, fetched_at, stamp, vat_class, rent, taxes_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(afm, mark) DO UPDATE SET invoice_type=excluded.invoice_type, issue_date=excluded.issue_date, "
                 "net=excluded.net, vat=excluded.vat, total=excluded.total, withheld=excluded.withheld, "
                 "withheld_json=excluded.withheld_json, cancelled=excluded.cancelled, url=excluded.url, "
                 "provider=excluded.provider, fetched_at=excluded.fetched_at, stamp=excluded.stamp, vat_class=excluded.vat_class, "
-                "rent=excluded.rent",
+                "rent=excluded.rent, taxes_json=excluded.taxes_json",
                 (afm, d["mark"], d["direction"], d["invoice_type"], d["series"], d["aa"], d["issue_date"], d["issuer_vat"],
                  d["issuer_name"], d["issuer_country"], d["counter_vat"], d["counter_name"], d["counter_country"],
                  d["net"], d["vat"], d["total"], d["withheld"], json.dumps(d["withheld_lines"]), int(d["cancelled"]),
                  d["url"], d["provider"], now, d.get("stamp", 0.0), int(bool(d.get("vat_class"))),
-                 int(bool(d.get("rent")))))
+                 int(bool(d.get("rent"))), json.dumps(d.get("taxes") or {})))
         per_month: dict[str, int] = {ym: 0 for ym in months}
         for mark, issued in {d["mark"]: d["issue_date"][:7] for d in docs if d["mark"]}.items():
             if issued in per_month:

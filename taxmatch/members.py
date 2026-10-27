@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import date
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urljoin
 
@@ -36,6 +37,23 @@ def _rows(raw: str) -> list[dict[str, Any]]:
 
 def _s(v: Any) -> str:
     return "" if v is None else str(v).strip()
+
+
+def snapshot(conn: sqlite3.Connection, company: str, tax_year: Optional[int] = None) -> None:
+    """Αντικαθιστά το στιγμιότυπο των μελών της εταιρείας για τη συγκεκριμένη χρήση."""
+    year = tax_year or date.today().year
+    now = db.utcnow()
+    conn.execute("DELETE FROM company_member_history WHERE company_afm=? AND tax_year=?", (company, year))
+    conn.execute("INSERT INTO company_member_history(company_afm, tax_year, member_afm, name, role, share, since, source, "
+                 "snapshot_at) SELECT company_afm, ?, member_afm, name, role, share, since, source, ? "
+                 "FROM company_members WHERE company_afm=?", (year, now, company))
+
+
+def member_years(conn: sqlite3.Connection, company: str) -> list[int]:
+    """Χρήσεις με διαθέσιμο ιστορικό· δημιουργεί το τρέχον στιγμιότυπο από την ενεργή λίστα."""
+    snapshot(conn, company)
+    return [r[0] for r in conn.execute("SELECT DISTINCT tax_year FROM company_member_history "
+                                       "WHERE company_afm=? ORDER BY tax_year DESC", (company,))]
 
 
 def parse_members(melh: str, sxeseis: str) -> list[dict[str, str]]:
@@ -88,6 +106,7 @@ def store(conn: sqlite3.Connection, company: str, members: Iterable[dict[str, st
                      "ELSE excluded.source END, updated_at=excluded.updated_at",
                      (company, m["afm"], m.get("name", ""), m.get("role", ""), m.get("share", ""), m.get("since", ""),
                       source, now))
+    snapshot(conn, company)
     return len(members)
 
 
@@ -103,14 +122,41 @@ def fetch_for_company(conn: sqlite3.Connection, afm: str,
     return {"ok": True, "reason": "", "n": store(conn, afm, found, "aade")}
 
 
-def company_members(conn: sqlite3.Connection, company: str) -> list[dict[str, Any]]:
-    """Μέλη με ό,τι χρειάζεται η οθόνη: αν είναι πελάτης, αν έχει κωδικούς, οφειλές (σύνολα ανά πύλη)."""
+def company_members(conn: sqlite3.Connection, company: str, tax_year: Optional[int] = None) -> list[dict[str, Any]]:
+    """Μέλη με επιχειρηματική κατάσταση, γνωστές άλλες συμμετοχές, κωδικούς και οφειλές."""
+    from .obligations import is_legal_entity
+
+    year = tax_year or date.today().year
+    if year == date.today().year:
+        snapshot(conn, company, year)
     out = []
-    for r in conn.execute("SELECT m.*, b.afm AS client_afm, b.email FROM company_members m LEFT JOIN businesses b "
-                          "ON b.afm=m.member_afm WHERE m.company_afm=? ORDER BY m.role DESC, m.name", (company,)):
+    for r in conn.execute("SELECT m.*, b.afm AS client_afm, b.email, b.activity_state, b.legal_form AS member_legal_form "
+                          "FROM company_member_history m LEFT JOIN businesses b "
+                          "ON b.afm=m.member_afm WHERE m.company_afm=? AND m.tax_year=? ORDER BY m.role DESC, m.name",
+                          (company, year)):
         d = dict(r)
         d["is_client"] = bool(r["client_afm"])
         d["has_creds"] = credentials.get(conn, r["member_afm"]) is not None if d["is_client"] else False
+        state, legal_form = r["activity_state"] or "", r["member_legal_form"] or ""
+        if not d["is_client"]:
+            d["own_business"] = "Άγνωστο"
+        elif state == "none":
+            d["own_business"] = "Όχι"
+        elif state == "ceased":
+            d["own_business"] = "Διακοπή"
+        elif state == "active" and not is_legal_entity(legal_form):
+            d["own_business"] = "Ναι — ενεργή"
+        elif state == "active":
+            d["own_business"] = "Νομικό πρόσωπο"
+        else:
+            d["own_business"] = "Άγνωστο"
+        other_companies = conn.execute(
+            "SELECT DISTINCT h.company_afm, COALESCE(b.name, '') AS name FROM company_member_history h "
+            "LEFT JOIN businesses b ON b.afm=h.company_afm WHERE h.member_afm=? AND h.tax_year=? "
+            "AND h.company_afm<>? ORDER BY name, h.company_afm",
+            (r["member_afm"], year, company)).fetchall()
+        d["other_companies"] = " · ".join(f"{item['name'] or item['company_afm']} ({item['company_afm']})"
+                           for item in other_companies) or "Δεν υπάρχουν καταχωρισμένες"
         d["debts"] = {x["source"]: x for x in (dict(y) for y in conn.execute(
             "SELECT source, total, status, synced_at FROM debt_source_sync WHERE afm=?", (r["member_afm"],)))}
         out.append(d)
@@ -184,6 +230,7 @@ def parent_company(conn: sqlite3.Connection) -> dict[str, str]:
 
 def remove(conn: sqlite3.Connection, company: str, member_afm: str) -> None:
     conn.execute("DELETE FROM company_members WHERE company_afm=? AND member_afm=?", (company, member_afm))
+    snapshot(conn, company)
 
 
 def parse_afm_list(value: Any) -> list[str]:

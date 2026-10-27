@@ -137,6 +137,20 @@ def test_submission_status_per_client_on_calendar_events(conn):
     assert not deadlines._checks_for(conn, AFM)["done"]
 
 
+def test_work_items_are_grouped_by_task_and_keep_completion(conn):
+    _vat_client(conn)
+    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (AFM,))
+    rows = deadlines.work_items(conn, 2026, AFM)
+    vat = next(r for r in rows if r["rule_id"] == "vat_monthly")
+    apd = next(r for r in rows if r["rule_id"] == "apd")
+    assert vat["category"] == "ΑΑΔΕ" and apd["category"] == "Μισθοδοσία"
+
+    deadlines.mark_done(conn, AFM, apd["rule_id"], apd["ref_month"])
+    updated = next(r for r in deadlines.work_items(conn, 2026, AFM)
+                   if r["rule_id"] == "apd" and r["ref_month"] == apd["ref_month"])
+    assert updated["submission"]["status"] == "done"
+
+
 def test_not_obligated_check_removes_liability(conn):
     _vat_client(conn)
     conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (AFM,))

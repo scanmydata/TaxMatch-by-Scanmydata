@@ -133,6 +133,51 @@ def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[
 
 CLIMATE_TYPE = "8.2"      # Ειδικό στοιχείο είσπραξης τέλους ανθεκτικότητας στην κλιματική κρίση (πρώην φόρος διαμονής)
 
+#: Τέλη που εισπράττει ο πελάτης και αποδίδει με ΔΙΚΗ τους δήλωση, ανά κατηγορία myDATA (επίσημο API v2.0.0, πίνακες
+#: 8.5 «Λοιποί φόροι» και 8.7 «Τέλη») — ρητό αίτημα χρήστη 2026-10-27: οι υποχρεώσεις δημιουργούνται από το myDATA.
+#:   plastic_bag : τέλη 8  «Περιβαλλοντικό Τέλος & πλαστικής σακούλας ν. 2339/2001 αρ. 6α» → ΑΑΔΕ otherAppH7 (τρίμηνο)
+#:   plastics    : τέλη 16 «Εισφορά προστασίας περιβάλλοντος πλαστικών προϊόντων [άρθρο 4 ν. 4736/2020]» → εφαρμογή
+#:                 «Plastic» της ΑΑΔΕ (τρίμηνο)
+#:   parepid     : τέλη 18–22 «Τέλος διαμονής παρεπιδημούντων» / «Τέλος επί των ακαθάριστων εσόδων» (εστιατόρια,
+#:                 κέντρα διασκέδασης, καζίνο, λοιπά) → dae.govapp.gr (μήνας ή τρίμηνο, όπως ο ΦΠΑ)
+#:   stay        : λοιποί φόροι 6–10, 20–30 (ξενοδοχεία, ενοικιαζόμενα, βραχυχρόνια μίσθωση) → ΑΑΔΕ otherAppH6 —
+#:                 μαζί με τα 8.2 (`CLIMATE_TYPE`)
+FEE_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "plastic_bag": ("fees", ("8",)),
+    "plastics": ("fees", ("16",)),
+    "parepid": ("fees", ("18", "19", "20", "21", "22")),
+    "stay": ("other", ("6", "7", "8", "9", "10") + tuple(str(n) for n in range(20, 31))),
+}
+
+
+def fee_totals(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, float]:
+    """Ποσά των `FEE_GROUPS` στα ΕΚΔΟΘΕΝΤΑ του μήνα (μη ακυρωμένα). Κατηγορία με ποσό 0 μετρά ως 0,001 — η
+    υποχρέωση δήλωσης υπάρχει ακόμη κι αν το ποσό στο παραστατικό είναι 0 (π.χ. λάθος τιμολογίου)."""
+    out = {k: 0.0 for k in FEE_GROUPS}
+    for r in conn.execute("SELECT taxes_json FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 AND "
+                          "substr(issue_date,1,7)=? AND taxes_json NOT IN ('', '{}')", (afm, ym)):
+        try:
+            taxes = json.loads(r["taxes_json"])
+        except ValueError:
+            continue
+        for key, (kind, cats) in FEE_GROUPS.items():
+            for cat in cats:
+                if cat in (taxes.get(kind) or {}):
+                    out[key] += max(float(taxes[kind][cat] or 0), 0.001)
+    return {k: round(v, 3) for k, v in out.items()}
+
+
+def fee_months(conn: sqlite3.Connection, afm: str, year: int, group: str) -> set[str]:
+    """Μήνες ('YYYY-MM') της χρήσης με τέλος της ομάδας `group` (FEE_GROUPS) στα έσοδα — για τη διαμονή και τα 8.2.
+    Οι πύλες (TAXISnet H6/H7, Plastic) ΔΕΝ ξέρουν ποιος είναι υπόχρεος: δείχνουν «δεν υποβλήθηκε» / «ενεργός» για ΟΛΟΥΣ
+    (ζωντανά 2026-10-27) — η υποχρέωση προκύπτει ΜΟΝΟ από το myDATA (ρητή οδηγία χρήστη)."""
+    out = {ym for ym in (f"{year}-{m:02d}" for m in range(1, 13)) if fee_totals(conn, afm, ym).get(group)}
+    if group == "stay":
+        out |= {r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(issue_date,1,7) FROM mydata_docs WHERE afm=? AND direction='outgoing' AND cancelled=0 "
+            "AND invoice_type=? AND substr(issue_date,1,4)=?", (afm, CLIMATE_TYPE, str(year)))}
+    return out
+
 
 def special_fees(conn: sqlite3.Connection, afm: str, ym: str) -> dict[str, float]:
     """Τέλη που ΕΙΣΠΡΑΤΤΕΙ ο πελάτης στα έσοδά του τον μήνα και οφείλει να δηλώσει/αποδώσει:
@@ -206,6 +251,7 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
     for afm, months in synced_months(conn).items():
         for ym in months:
             fees = special_fees(conn, afm, ym)
+            extra = fee_totals(conn, afm, ym)
             flows = ic_flows(conn, afm, ym)
             out.setdefault(afm, {})[ym] = {
                 "vies": any(flows.values()),
@@ -214,8 +260,11 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
                 "vies_in": bool(flows["goods_in"] or flows["services_in"]),
                 "intrastat": intrastat(conn, afm, ym, months)["any"],
                 "withholding": bool(withholding(conn, afm, ym)),
-                "climate": fees["climate_docs"] > 0,
+                "climate": fees["climate_docs"] > 0 or extra["stay"] > 0,
                 "digital_fee": fees["digital_fee"] > 0,
+                "plastic_bag": extra["plastic_bag"] > 0,
+                "plastics": extra["plastics"] > 0,
+                "parepid": extra["parepid"] > 0,
             }
     return out
 
