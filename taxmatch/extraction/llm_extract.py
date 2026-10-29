@@ -402,8 +402,9 @@ def extract_article(conn: sqlite3.Connection, article: sqlite3.Row, client: LLMC
 def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, lookback_days: int,
                     session: Optional[requests.Session] = None, use_full_text: bool = True,
                     on_progress: Optional[Callable[[str], None]] = None,
-                    sleep: Callable[[float], None] = time.sleep) -> dict:
-    """Επεξεργάζεται εκκρεμή άρθρα (νεότερα πρώτα). Σταματά νωρίς σε auth/rate-limit/δίκτυο."""
+                    sleep: Callable[[float], None] = time.sleep, deadline: Optional[float] = None) -> dict:
+    """Επεξεργάζεται εκκρεμή άρθρα (νεότερα πρώτα). Σταματά νωρίς σε auth/rate-limit/δίκτυο — και στο `deadline`
+    (`time.monotonic()`), αν δοθεί: τα υπόλοιπα μένουν για την επόμενη φορά (ΔΕΝ μετρά ως σφάλμα)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = conn.execute(
         "SELECT * FROM articles WHERE extraction_status IN ('pending','failed') AND extraction_tries < ? "
@@ -417,6 +418,9 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     consecutive_network = 0
     recovered = False
     for i, art in enumerate(rows, 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            stats["time_limit"] = True
+            break
         if on_progress:
             on_progress(f"Ανάλυση άρθρου {i}/{len(rows)}")
         attempts = 0

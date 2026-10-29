@@ -53,12 +53,18 @@ class _ToastItem(QFrame):
             self.bar.setFixedHeight(16)
             self.bar.setFormat("%p%")
             col.addWidget(self.bar)
-        for text, fn in actions or []:                   # κουμπιά ενεργειών (π.χ. «Συνέχεια στον browser»)
+        closing = []
+        for action in actions or []:                     # κουμπιά ενεργειών (π.χ. «Συνέχεια στον browser»)
+            text, fn = action[0], action[1]              # 3ο στοιχείο True: το μήνυμα κλείνει με το κλικ
             btn = QPushButton(text)
             btn.clicked.connect(fn)
+            if len(action) > 2 and action[2]:
+                closing.append(btn)
             col.addWidget(btn)
         row.addLayout(col, 1)
         self.close_btn = QPushButton("×")
+        for btn in closing:
+            btn.clicked.connect(self.close_btn.click)
         self.close_btn.setFlat(True)
         self.close_btn.setFixedSize(20, 20)
         self.close_btn.setStyleSheet(f"QPushButton {{ border:none; background:transparent; color:{CURRENT.muted}; "
@@ -213,6 +219,7 @@ def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = Non
         ms += 2000                                       # ήρθε από παράθυρο που δεν βλέπει πια ο χρήστης: λίγο περισσότερο
     if actions and ms:
         ms = max(ms, 20000)                              # με κουμπιά: χρόνος να τα πατήσει ο χρήστης
+    # `actions`: [(κείμενο, συνάρτηση)] ή [(κείμενο, συνάρτηση, True)] — το True κλείνει το μήνυμα με το κλικ
     _host_for(target).add(message, level, ms, title=title or context, actions=actions)
 
 

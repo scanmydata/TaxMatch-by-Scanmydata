@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)   # εσωτερικό: test suite/ανάπτυξη μόνο
     g.add_argument("--version", action="store_true")
     p.add_argument("--time", default="08:00", help="ώρα για --install-task (ΩΩ:ΛΛ)")
+    p.add_argument("--all", action="store_true", help="με --daily: όλες οι ενεργές εργασίες, όχι μόνο όσες οφείλονται")
     args = p.parse_args(argv)
 
     if args.version:
@@ -27,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.daily:
         from .daily import main as daily_main
-        return daily_main()
+        return daily_main(force=args.all)
     if args.install_task or args.remove_task:
         from . import scheduler_win
         ok, msg = scheduler_win.install(args.time) if args.install_task else scheduler_win.remove()

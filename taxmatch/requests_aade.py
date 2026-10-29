@@ -227,6 +227,10 @@ def open_request(conn: sqlite3.Connection, afm: str, request_id: str, with_files
     for f in files:
         if not with_files:
             continue
+        have = next(iter(folder.glob(f"{f['fileId']}_*")), None) if folder.exists() else None
+        if have is not None:                            # κατέβηκε ήδη — τα συνημμένα δεν αλλάζουν
+            f["path"] = str(have)
+            continue
         got = http.follow("GET", f"{API}/downloadFile/{f['fileId']}")
         content = got.get("content") or b""
         if got.get("status", 200) != 200 or not content:
@@ -245,6 +249,7 @@ def client_requests(conn: sqlite3.Connection, afm: str) -> list[dict[str, Any]]:
     rows = [dict(r) for r in conn.execute("SELECT * FROM aade_requests WHERE afm=? ORDER BY coalesce(nullif(updated,''), "
                                           "submitted) DESC", (afm,))]
     for r in rows:
+        r["opened"] = bool(r["files_json"])             # '' = δεν άνοιξε ποτέ· '[]' = άνοιξε, χωρίς συνημμένα
         r["files"] = json.loads(r["files_json"] or "[]")
     return rows
 
@@ -260,6 +265,15 @@ def unseen(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Αλλαγές που δεν έχει δει ο χρήστης — για την ειδοποίηση στην κορυφή της εφαρμογής."""
     return [dict(r) for r in conn.execute("SELECT r.afm, r.id, r.change, r.process, r.topic, b.name FROM aade_requests r "
                                           "LEFT JOIN businesses b ON b.afm=r.afm WHERE r.seen=0 ORDER BY r.afm")]
+
+
+def waiting_on_client(conn: sqlite3.Connection, afms: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Αιτήματα «Σε εκκρεμότητα από τον συναλλασσόμενο» (η ΑΑΔΕ περιμένει ενέργεια του πελάτη) — είτε τα έχει δει ο
+    χρήστης είτε όχι: μένουν στις ειδοποιήσεις ώσπου να αλλάξει η κατάσταση στην ΑΑΔΕ (ρητό αίτημα 2026-10-29)."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT r.afm, r.id, r.case_no, r.status, r.process, r.topic, r.updated, b.name FROM aade_requests r "
+        "LEFT JOIN businesses b ON b.afm=r.afm ORDER BY r.afm, r.updated DESC")]
+    return [r for r in rows if stage(r["status"]) == "waiting_client" and (afms is None or r["afm"] in afms)]
 
 
 def date_text(raw: str) -> str:

@@ -613,6 +613,7 @@ def _skip_eprofile(http: _HyperHttp, page: dict[str, Any]) -> dict[str, Any]:
 
 
 AME_KINDS = ("Κοινών Επιχειρήσεων", "Οικοδομοτεχνικών Έργων")
+AME_HANDOFF_LABEL = "e-ΕΦΚΑ — ανάκτηση ΑΜΕ"
 
 
 def retrieve_ame(conn: sqlite3.Connection, afm: str,
@@ -635,19 +636,30 @@ def retrieve_ame(conn: sqlite3.Connection, afm: str,
         if not attempts:
             return {"ok": False, "ame": "", "reason": REASONS_EL["NoCredentials"]}
         last_reason = "NoPistErg"
+        stalled: Optional[tuple[_HyperHttp, str]] = None    # σύνδεση που πέρασε αλλά «κόλλησε» σε ενδιάμεση σελίδα
         for method, (user, password) in attempts:
             http = http_factory()
             res = (_eaccess_ika(http, user, password) if method == "ika"
                    else _eaccess_taxis(http, user, password, afm))
             if not res.get("ok"):
                 last_reason = res.get("reason") or last_reason
+                if last_reason == "NoPistErg" and getattr(http, "jar", None):
+                    stalled = (http, getattr(http, "last_url", "") or APPS + "/eAccess/login.xhtml")
                 continue
             page = _skip_eprofile(http, http.follow("GET", APPS + "/ePistErg"))
             if "ePistErg" in page["url"]:
                 break
             last_reason = "NoPistErg"
+            stalled = (http, page.get("url") or APPS + "/ePistErg")
         else:
-            return {"ok": False, "ame": "", "reason": REASONS_EL.get(last_reason, "Αποτυχία σύνδεσης e-ΕΦΚΑ.")}
+            out = {"ok": False, "ame": "", "reason": REASONS_EL.get(last_reason, "Αποτυχία σύνδεσης e-ΕΦΚΑ.")}
+            if stalled is not None:
+                # Ο e-ΕΦΚΑ ζητά κάτι μετά τη σύνδεση (συνήθως επιβεβαίωση στοιχείων επικοινωνίας) — ο χρήστης συνεχίζει
+                # στον browser ήδη συνδεδεμένος και μετά «Ξανά δοκιμή» (handoff.py, ρητό αίτημα 2026-10-29)
+                from . import handoff
+                out["handoff"] = handoff.remember(AME_HANDOFF_LABEL, afm, stalled[0], url=stalled[1],
+                                                  reason=out["reason"])
+            return out
         found = []
         construction = "Οικοδομοτεχνικών Έργων"
         for kind in AME_KINDS:
@@ -681,6 +693,10 @@ def retrieve_ame(conn: sqlite3.Connection, afm: str,
     if include_oikodomotexnika:
         conn.execute("UPDATE efka_credentials SET ame_oikodomotexnikon=?, updated_at=? WHERE afm=?",
                      (construction_ame, db.utcnow(), afm))
+    from . import handoff
+    for h in handoff.pending(afm):                     # πέτυχε (π.χ. μετά από «Ξανά δοκιμή»): η εκκρεμότητα σβήνει
+        if h["label"] == AME_HANDOFF_LABEL:
+            handoff.forget(h["id"])
     return {"ok": True, "ame": primary_ame, "reason": "", "all": found}
 
 

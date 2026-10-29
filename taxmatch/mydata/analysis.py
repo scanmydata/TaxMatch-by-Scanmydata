@@ -21,6 +21,7 @@ import sqlite3
 from datetime import date
 from typing import Any, Optional
 
+from .. import db as _db
 from .parse import WITHHELD_CATEGORIES
 from .store import synced_months
 
@@ -267,9 +268,17 @@ def vat_balance(conn: sqlite3.Connection, afm: str, months: list[str]) -> dict[s
     return out
 
 
+_FLAGS_CACHE = _db.StateCache()
+
+
 def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
     """ΑΦΜ -> μήνας -> {'vies', 'intrastat', 'withholding', 'climate', 'digital_fee'} για όσους μήνες έχουν κατέβει
-    (για το Ημερολόγιο)."""
+    (για το Ημερολόγιο). Κρατιέται όσο η βάση δεν αλλάζει (`db.state_key`) — ήταν το μισό κόστος κάθε αλλαγής σελίδας.
+    ΜΟΝΟ ανάγνωση από τους καλούντες."""
+    return _FLAGS_CACHE.get(conn, _month_flags)
+
+
+def _month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for afm, months in synced_months(conn).items():
         cache: dict[str, dict[str, float]] = {}

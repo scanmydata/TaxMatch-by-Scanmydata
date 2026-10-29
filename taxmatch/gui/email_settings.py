@@ -74,8 +74,6 @@ class EmailSettingsBox(QGroupBox):
         form.addRow(auto_head)
         self.auto_debts = QCheckBox("Οφειλές ΑΑΔΕ — μόνο όταν αλλάξουν από το τελευταίο email (με τις ταυτότητες οφειλής σε PDF)")
         form.addRow(self.auto_debts)
-        self.daily_debts = QCheckBox("Λήψη οφειλών ΑΑΔΕ για όλους τους πελάτες με κωδικούς TAXISnet")
-        form.addRow(self.daily_debts)
         self.auto_news = QCheckBox("Νέα που αφορούν τον πελάτη — μόνο όσα δεν του έχουν σταλεί")
         form.addRow(self.auto_news)
         freq = QHBoxLayout()
@@ -110,7 +108,6 @@ class EmailSettingsBox(QGroupBox):
         self.bcc.setText(g("email_bcc"))
         self.signature.setPlainText(g("email_signature"))
         self.auto_debts.setChecked(g("auto_email_debts") == "1")
-        self.daily_debts.setChecked(g("daily_debts") == "1")
         self.auto_news.setChecked(g("auto_email_news") == "1")
         self.freq.setCurrentIndex(max(0, self.freq.findData(g("auto_email_news_freq") or "weekly")))
         self.weekday.setCurrentIndex(max(0, self.weekday.findData(g("auto_email_weekday") or "1")))
@@ -126,7 +123,6 @@ class EmailSettingsBox(QGroupBox):
                            ("smtp_from", self.sender.text().strip()), ("email_bcc", self.bcc.text().strip()),
                            ("email_signature", self.signature.toPlainText().strip()),
                            ("auto_email_debts", "1" if self.auto_debts.isChecked() else "0"),
-                           ("daily_debts", "1" if self.daily_debts.isChecked() else "0"),
                            ("auto_email_news", "1" if self.auto_news.isChecked() else "0"),
                            ("auto_email_news_freq", self.freq.currentData()),
                            ("auto_email_weekday", self.weekday.currentData())):

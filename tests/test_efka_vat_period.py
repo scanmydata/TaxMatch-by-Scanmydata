@@ -325,3 +325,49 @@ def test_retrieve_ame_falls_back_to_taxis_when_ika_does_not_open_pisterg(conn, m
 
     assert result["ok"] and result["ame"] == "0020012345"
     assert attempted == [("taxis_user", "taxis_pass", AFM)]
+
+
+def test_retrieve_ame_stalled_after_login_offers_browser_handoff_and_clears_on_success(conn, monkeypatch):
+    """Ο e-ΕΦΚΑ ζητά επιβεβαίωση στοιχείων μετά τη σύνδεση → handoff (cookies μόνο στη μνήμη)· μετά την επιβεβαίωση στον
+    browser, «Ξανά δοκιμή» πετυχαίνει και η εκκρεμότητα σβήνει (ρητό αίτημα 2026-10-29)."""
+    from taxmatch import handoff
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    credentials.set_(conn, AFM, "taxis_user", "taxis_pass")
+    episterg = "https://apps.e-efka.gov.gr/ePistErg"
+    confirmed = {"done": False}
+
+    class FakeHttp:
+        jar = {"apps.e-efka.gov.gr": {"JSESSIONID": "x"}}
+        last_url = ""
+
+        def follow(self, method, url, *args, **kwargs):
+            if url == episterg and not confirmed["done"]:
+                self.last_url = "https://apps.e-efka.gov.gr/eProfile/confirm.xhtml"
+                return {"url": self.last_url, "text": "<p>Επιβεβαιώστε τα στοιχεία επικοινωνίας</p>"}
+            if url == episterg:
+                return {"url": url, "text": '<a href="/ePistErg/secure/common.xhtml">Κοινών Επιχειρήσεων</a>'}
+            return {"url": url, "text": ('<tbody id="AMEsForm:AMEsResults_data"><tr data-ri="0"><td>0020012345</td>'
+                                         '<td>ΑΛΦΑ ΙΚΕ</td></tr></tbody>')}
+
+    monkeypatch.setattr(efka, "_eaccess_taxis", lambda *_a: {"ok": True})
+    monkeypatch.setattr(efka, "_skip_eprofile", lambda _http, page: page)
+    res = efka.retrieve_ame(conn, AFM, http_factory=FakeHttp)
+    assert not res["ok"] and res["handoff"]["url"].endswith("/eProfile/confirm.xhtml")
+    assert [h["label"] for h in handoff.pending(AFM)] == [efka.AME_HANDOFF_LABEL]
+    confirmed["done"] = True                                          # ο χρήστης επιβεβαίωσε στον browser
+    assert efka.retrieve_ame(conn, AFM, http_factory=FakeHttp)["ame"] == "0020012345"
+    assert handoff.pending(AFM) == []
+
+
+def test_lookup_retrieves_missing_ame_for_employers(conn):
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    credentials.set_(conn, AFM, "taxis_user", "taxis_pass")
+    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (AFM,))
+    calls = []
+    aade = lambda u, p, afm: {"ok": True, "doy": "Α' ΑΘΗΝΩΝ", "name": "ΑΛΦΑ ΙΚΕ", "kind": "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ",
+                              "all_tags": {}}
+    out = service.lookup_and_store(conn, AFM, aade_fetch=aade, amka_fetch=lambda c, a: {"ok": True},
+                                   ame_fetch=lambda c, a: calls.append(a) or {"ok": False, "reason": "κόλλησε",
+                                                                             "handoff": {"id": "1"}})
+    assert calls == [AFM] and "ΑΜΕ: κόλλησε" in out["errors"]
+    assert {"code": "efka_handoff", "message": "κόλλησε"} in out["issues"]

@@ -1,6 +1,7 @@
 """Καπνοδοκιμές του native GUI (PySide6): ανοίγει πραγματικά widgets (offscreen, χωρίς οθόνη) πάνω σε απομονωμένη
 βάση και ελέγχει ότι δεν σκάει και ότι δείχνει σωστά δεδομένα. ΔΕΝ προσομοιώνει κλικ χρήστη (αυτό επαληθεύτηκε
 οπτικά, χειροκίνητα, σε πραγματικό παράθυρο Windows) — εδώ ελέγχεται η κατασκευή/φόρτωση των widgets."""
+import json
 import os
 from pathlib import Path
 
@@ -1088,8 +1089,11 @@ def test_client_detail_shows_submission_checks(window, conn):
     q1 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Α΄ τρίμηνο" in title)
     q2 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Β΄ τρίμηνο" in title)
     assert t.item(q1, 1).text() == f"Μάρτιος {y}" and t.item(q1, 2).text() == "ΑΑΔΕ"
-    assert t.item(q1, 5).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 6).text()
+    assert t.item(q1, 5).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 7).text()
     assert t.item(q2, 5).text() == "ΔΕΝ υποβλήθηκε"
+    assert t.item(q1, 6).text() == ""                       # χωρίς PDF δήλωσης
+    t.setCurrentCell(q1, 0)
+    assert "1.234,50" in dlg._obligation_html(dlg._current_obligation())   # περιεχόμενο του popup (διπλό κλικ)
     t.setCurrentCell(q2, 0)
     dlg._toggle_done()
     q2 = next(r for r in range(t.rowCount()) if "Β΄ τρίμηνο" in t.item(r, 3).text() and "τριμηνιαία" in t.item(r, 3).text())
@@ -1295,6 +1299,51 @@ def test_client_debts_tab_lists_debts_and_sends_email_via_dialog(window, conn, m
     dlg.deleteLater()
 
 
+def test_ame_stall_flash_message_offers_browser_retry_and_dismiss(window, conn, monkeypatch):
+    """Ανάκτηση ΑΜΕ που κόλλησε μετά τη σύνδεση: «Άνοιγμα browser», «Ξανά δοκιμή» (κλείνει το μήνυμα), «Παράβλεψη»."""
+    from taxmatch import efka
+    from taxmatch.gui import toast as toast_mod
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    entry = {"id": "x", "afm": AFM, "label": efka.AME_HANDOFF_LABEL, "url": "https://apps.e-efka.gov.gr/x",
+             "cookies": {}, "reason": ""}
+    opened, retried = [], []
+    monkeypatch.setattr(window, "open_handoff", lambda h: opened.append(h["id"]))
+    monkeypatch.setattr(window, "retry_ame", lambda afm, w=None: retried.append(afm))
+    window.offer_handoffs([entry])                                  # ίδια διαδρομή με μαζική ανανέωση/έλεγχο υποβολών
+    host = toast_mod._host_for(window)                              # noqa: SLF001
+    item = host._box.itemAt(host._box.count() - 1).widget()         # noqa: SLF001
+    buttons = {b.text(): b for b in item.findChildren(toast_mod.QPushButton) if b is not item.close_btn}
+    assert set(buttons) == {"Άνοιγμα browser — ΑΛΦΑ ΙΚΕ", "Ξανά δοκιμή — ΑΛΦΑ ΙΚΕ", "Παράβλεψη"}
+    buttons["Άνοιγμα browser — ΑΛΦΑ ΙΚΕ"].click()
+    assert opened == ["x"] and host.contains(item)                  # ο browser δεν κλείνει το μήνυμα
+    buttons["Ξανά δοκιμή — ΑΛΦΑ ΙΚΕ"].click()
+    assert retried == [AFM] and not host.contains(item)
+
+
+def test_request_waiting_on_client_gives_flash_message_and_notice(window, conn, monkeypatch):
+    """Αίτημα «Σε εκκρεμότητα από τον συναλλασσόμενο» → toast με κουμπί προς την καρτέλα πελάτη + μόνιμη ειδοποίηση
+    (ακόμη κι αφού το δει ο χρήστης), ώσπου να αλλάξει η κατάσταση."""
+    from taxmatch import db as dbm, notices as notices_m
+    from taxmatch.gui import main_window as mw
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    conn.execute("INSERT INTO aade_requests(afm, id, case_no, status, process, change, seen, fetched_at) "
+                 "VALUES (?,?,?,?,?,?,?,?)", (AFM, "7", "Β-2", "Σε εκκρεμότητα από τον συναλλασσόμενο",
+                                              "Μεταβολή εργασιών", "waiting_client", 1, dbm.utcnow()))
+    shown = []
+    monkeypatch.setattr(mw, "toast", lambda w, msg, level="ok", ms=None, title="", actions=None:
+                        shown.append((msg, level, title, actions)))
+    assert window.notify_waiting_requests() == 1
+    [(msg, level, title, actions)] = shown
+    assert level == "warn" and "εκκρεμότητα" in title and "Μεταβολή εργασιών" in msg and "Β-2" in msg
+    opened = []
+    monkeypatch.setattr(window, "open_client_detail", lambda afm, tab="": opened.append((afm, tab)))
+    actions[0][1]()
+    assert opened == [(AFM, "requests_tab")]
+    assert any("εκκρεμότητα από τον πελάτη" in n["text"] for n in notices_m.collect(conn))
+    conn.execute("UPDATE aade_requests SET status='Απαντημένο' WHERE id='7'")
+    assert window.notify_waiting_requests() == 0
+
+
 def test_client_card_has_requests_and_members_tabs(window, conn, monkeypatch):
     """Αιτήματα ΑΑΔΕ (με αθέατες αλλαγές) και Μέλη εταιρείας (με ποιο μέλος είναι πελάτης) στην καρτέλα πελάτη."""
     from taxmatch import db as dbm, members
@@ -1311,8 +1360,28 @@ def test_client_card_has_requests_and_members_tabs(window, conn, monkeypatch):
     assert dlg.detail_tabs.currentIndex() == dlg._detail_tab_indices["members_tab"]
     dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["requests_tab"])
     assert dlg.requests_tab.table.rowCount() == 1 and dlg.requests_tab.table.item(0, 0).text() == "●"
+    # διπλό κλικ → «καρτέλα αιτήματος»: απάντηση + συνημμένα ΧΩΡΙΣΤΑ ανά προέλευση (αίτησης / απάντησης ΑΑΔΕ)
+    from taxmatch.gui import requests_tab as rt
+    tmp_pdf = Path(os.environ["TAXMATCH_DATA_DIR"]) / "answer.pdf"
+    tmp_pdf.write_bytes(b"%PDF")
+    conn.execute("UPDATE aade_requests SET files_json=? WHERE id='555'", (json.dumps(
+        [{"fileId": 1, "fileName": "aitisi.pdf", "fileOrigin": "attachedFile", "path": str(tmp_pdf)},
+         {"fileId": 2, "fileName": "apantisi.pdf", "fileOrigin": "internalFile", "path": str(tmp_pdf)}]),))
+    dlg.requests_tab.reload()
+    assert dlg.requests_tab.table.item(0, 6).text() == "📎 2"
+    seen_cards = []
+
+    def fake_exec(card):
+        texts = [card.files_box.itemAt(i).widget().text() for i in range(card.files_box.count())]
+        seen_cards.append(texts)
+        assert not card._tasks                                      # noqa: SLF001 — όλα κατεβασμένα: καμία λήψη
+        return 1
+    monkeypatch.setattr(rt.RequestCard, "exec", fake_exec)
     dlg.requests_tab.table.selectRow(0)
-    assert "Έγινε." in dlg.requests_tab.detail.text()
+    dlg.requests_tab._open()                                        # noqa: SLF001
+    [texts] = seen_cards
+    assert texts[0].startswith("Συνημμένα της αίτησης") and "aitisi.pdf" in texts[1]
+    assert texts[2].startswith("Συνημμένα της απάντησης ΑΑΔΕ") and "apantisi.pdf" in texts[3]
     assert conn.execute("SELECT seen FROM aade_requests WHERE id='555'").fetchone()["seen"] == 1
     dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["members_tab"])
     mt = dlg.members_tab

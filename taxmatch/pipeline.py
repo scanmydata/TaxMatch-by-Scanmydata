@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from typing import Callable, Optional
 
@@ -66,8 +67,12 @@ def enabled_sources(conn: sqlite3.Connection) -> list[sources.Source]:
 
 
 def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], None]] = None,
-                 session: Optional[requests.Session] = None, conn: Optional[sqlite3.Connection] = None) -> dict:
-    """Τρέχει όλα τα βήματα. Ένα βήμα που αποτυγχάνει δεν ακυρώνει τα επόμενα. Επιστρέφει τα στατιστικά (και τα γράφει στο `runs`)."""
+                 session: Optional[requests.Session] = None, conn: Optional[sqlite3.Connection] = None,
+                 time_budget: Optional[float] = None) -> dict:
+    """Τρέχει όλα τα βήματα. Ένα βήμα που αποτυγχάνει δεν ακυρώνει τα επόμενα. Επιστρέφει τα στατιστικά (και τα γράφει στο `runs`).
+    `time_budget` (δευτερόλεπτα από την έναρξη): η ανάλυση άρθρων με LLM σταματά εκεί και τα υπόλοιπα άρθρα μένουν για
+    την επόμενη φορά — στον χρονοπρογραμματισμό, ώστε να προλαβαίνουν και οι άλλες εργασίες (scheduled_jobs.py)."""
+    deadline = time.monotonic() + time_budget if time_budget else None
     own_conn = conn is None
     conn = conn or db.connect()
     progress = on_progress or (lambda _m: None)
@@ -102,7 +107,7 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
                     log.exception("ML απέτυχε")
                     stats["ml"] = {"error": str(exc)[:200]}
 
-                stats["extract"] = _extract_step(conn, session, progress, errors)
+                stats["extract"] = _extract_step(conn, session, progress, errors, deadline)
 
                 progress("Αντιστοίχιση με πελάτες…")
                 stats["match"] = engine.rematch(conn)
@@ -121,7 +126,7 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
 
 
 def _extract_step(conn: sqlite3.Connection, session: Optional[requests.Session],
-                  progress: Callable[[str], None], errors: list[str]) -> dict:
+                  progress: Callable[[str], None], errors: list[str], deadline: Optional[float] = None) -> dict:
     try:
         client = llm_extract.LLMClient.from_settings(conn, session)
     except llm_extract.NotConfigured as exc:
@@ -132,7 +137,8 @@ def _extract_step(conn: sqlite3.Connection, session: Optional[requests.Session],
     limit = settings_store.get_int(conn, "max_extractions_per_run", 60)
     lookback = settings_store.get_int(conn, "lookback_days", 10)
     use_text = settings_store.get(conn, "fetch_full_text") != "0"
-    out = llm_extract.extract_pending(conn, client, limit, lookback, session or client.session, use_text, progress)
+    out = llm_extract.extract_pending(conn, client, limit, lookback, session or client.session, use_text, progress,
+                                      deadline=deadline)
     if out.get("stopped"):
         errors.append(out["stopped"])
     # Για την ειδοποίηση μέσα στην εφαρμογή: μόνιμο μήνυμα όσο η ανάλυση δεν δουλεύει, σβήνει με την πρώτη επιτυχία

@@ -123,6 +123,25 @@ def test_intrastat_archive_parse_and_entry():
     assert e["status"] == "not_submitted"
 
 
+def test_intrastat_real_page_shape_unclosed_form_and_unquoted_links(tmp_path):
+    """Όπως η πραγματική σελίδα (ζωντανά 2026-10-29): `<form>` χωρίς `</form>`, href χωρίς εισαγωγικά."""
+    page = ('<form method=post action="history" runtat="server">\n<input type=hidden name=io>\n'
+            '<select name=io2 onchange=post(0)><option value=2026 selected>2026</select>\n'
+            '<tr><td><a href=javascript:post(1,0,20260911912)><b>202609/11912</b></a></td><td>E</td><td>Άφιξη</td>'
+            '<td>1</a></td><td>2.940</td><td>2.940</td><td>23/10/2026</td><td>23/10/2026</td></tr>')
+    [f] = intrastat.forms(page)
+    assert f["action"] == "history" and [(e["name"], e["type"]) for e in f["elements"]] == [("io", "hidden"),
+                                                                                           ("io2", "select")]
+    [row] = intrastat.parse_archive(page)
+    assert row["link"] == "javascript:post(1,0,20260911912)" and row["flow"] == "Άφιξη"
+    e = intrastat.entry([row], 2026, {}, today=date(2026, 10, 29))
+    (tmp_path / f"INTRASTAT_{AFM}_202609_11912_AFIKSI_ΔΗΛΩΣΗ.pdf").write_bytes(b"%PDF")
+    (tmp_path / f"INTRASTAT_{AFM}_202609_11912_AFIKSI_ΒΕΒΑΙΩΣΗ.pdf").write_bytes(b"%PDF")
+    intrastat.attach_pdfs(e, AFM, tmp_path)
+    [p] = e["periods"]
+    assert p["amounts"]["submission_pdf"].endswith("_ΔΗΛΩΣΗ.pdf") and len(p["amounts"]["submission_pdfs"]) == 2
+
+
 class _ElstatHttp:
     """Ψεύτικη ΕΛ.ΣΤΑΤ: login → history (ΑΦΜ με post(0,0,77)) → αρχείο έτους."""
 

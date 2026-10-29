@@ -612,6 +612,28 @@ MIGRATIONS: list[str] = [
 ]
 
 
+def state_key(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Αλλάζει σε ΚΑΘΕ αλλαγή της βάσης ΓΙΑ ΑΥΤΗ τη σύνδεση: `data_version` (commit από ΑΛΛΗ σύνδεση — π.χ. εργασία
+    παρασκηνίου) + `total_changes` (γραφές της ίδιας). Για cache υπολογισμών που μόνο διαβάζουν (ταχύτητα πλοήγησης)."""
+    return conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes
+
+
+class StateCache:
+    """Μία τιμή για την τελευταία σύνδεση, που ξαναϋπολογίζεται μόλις αλλάξει η βάση (`state_key`). Κρατά ΤΗ ΣΥΝΔΕΣΗ
+    (όχι `id()`): ζωντανό αντικείμενο = καμία νέα σύνδεση στην ίδια διεύθυνση μνήμης με λάθος τιμή (το
+    `sqlite3.Connection` δεν δέχεται weak reference)."""
+
+    def __init__(self) -> None:
+        self._conn, self._key, self._value = None, None, None
+
+    def get(self, conn: sqlite3.Connection, compute):
+        key = state_key(conn)
+        if self._conn is not conn or self._key != key:
+            value = compute(conn)
+            self._conn, self._key, self._value = conn, state_key(conn), value
+        return self._value
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

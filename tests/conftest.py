@@ -21,6 +21,14 @@ def isolated_env(tmp_path, monkeypatch):
     from taxmatch.business_profiles import vies
     monkeypatch.setattr(vies, "MIN_INTERVAL", 0)
     monkeypatch.setattr(vies, "lookup", lambda afm, session=None: vies.ViesResult(error="offline (test)"))
+    # Ποτέ το ΠΡΑΓΜΑΤΙΚΟ Windows Task Scheduler του χρήστη από tests (2026-10-29: ένα test ξανάγραψε το task του)
+    from taxmatch import scheduler_win
+    monkeypatch.setattr(scheduler_win, "_run", lambda args: (_ for _ in ()).throw(
+        AssertionError(f"schtasks από test: {args[:2]}")))
+    monkeypatch.setattr(scheduler_win, "is_installed", lambda: False)
+    monkeypatch.setattr(scheduler_win, "install", lambda hhmm="08:00": (True, "test"))
+    monkeypatch.setattr(scheduler_win, "remove", lambda: (True, "test"))
+    monkeypatch.setattr(scheduler_win, "run_now", lambda: (True, "test"))
     yield
 
 

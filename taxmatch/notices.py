@@ -131,8 +131,15 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if eligible and settings_store.get(conn, "notice_vat_quarter_read") == _vat_quarter_stamp(eligible, deadline):
         eligible = []                                   # «Αναγνώστηκε» για αυτούς τους πελάτες / αυτή την προθεσμία
     # ---- «Τα Αιτήματά μου» ΑΑΔΕ: απαντήσεις/αλλαγές που δεν έχει δει ο χρήστης (requests_aade.py)
-    from .requests_aade import CHANGE_LABEL, unseen
-    pending = unseen(conn)
+    from .requests_aade import CHANGE_LABEL, unseen, waiting_on_client
+    waiting_rows = waiting_on_client(conn)
+    if waiting_rows:                                    # η ΑΑΔΕ περιμένει ενέργεια — μένει ώσπου να αλλάξει η κατάσταση
+        afms = list(dict.fromkeys(r["afm"] for r in waiting_rows))
+        out.append({"level": "warn", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες", "afms": afms,
+                    "text": f"{len(waiting_rows)} {'αίτημα' if len(waiting_rows) == 1 else 'αιτήματα'} ΑΑΔΕ σε "
+                            f"εκκρεμότητα από τον πελάτη (χρειάζεται ενέργεια): {_names(conn, afms)}."})
+    pending = [r for r in unseen(conn) if r["change"] != "waiting_client"
+               or not any(w["id"] == r["id"] and w["afm"] == r["afm"] for w in waiting_rows)]
     if pending:
         afms = list(dict.fromkeys(r["afm"] for r in pending))
         answered = sum(1 for r in pending if r["change"] == "answered")

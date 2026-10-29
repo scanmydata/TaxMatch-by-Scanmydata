@@ -291,7 +291,8 @@ def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str,
 
 def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[requests.Session] = None,
                      aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile,
-                     amka_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> dict[str, Any]:
+                     amka_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None,
+                     ame_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> dict[str, Any]:
     """Ανάκτηση στοιχείων πελάτη. Σειρά: Μητρώο ΑΑΔΕ (ΚΑΔ, κατάσταση/διακοπή, ΔΟΥ, ΦΠΑ, βιβλία, είδος) → ΓΕΜΗ ως fallback
     (ΚΑΔ όταν λείπουν, νομική μορφή νομικών προσώπων) → VIES (επωνυμία). Κάθε πηγή είναι προαιρετική.
     Επιστρέφει {'status', 'errors', 'sources', 'issues'} και ενημερώνει τη γραμμή. `issues`: [{'code', 'message'}] με
@@ -491,6 +492,26 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
                 errors.append("ΑΜΚΑ: " + efka.REASONS_EL.get(amka.get("reason", ""), amka.get("reason", "")))
         except Exception as exc:                       # noqa: BLE001
             log.warning("ΑΜΚΑ %s: %s", afm, exc)
+    if ame_fetch is None and aade_fetch is lookup_aade.fetch_company_profile:      # πραγματική ανάκτηση (όχι tests)
+        from .. import efka
+        ame_fetch = efka.retrieve_ame
+    if ame_fetch is not None:
+        # Εργοδότης χωρίς ΑΜΕ: και ο ΑΜΕ από την «Πιστοποίηση Εργοδοτών» (και στη μαζική ανανέωση — ρητό αίτημα
+        # 2026-10-29). Αν ο e-ΕΦΚΑ κολλήσει μετά τη σύνδεση (επιβεβαίωση στοιχείων), μένει «Συνέχεια στον browser».
+        from .. import efka
+        row = conn.execute("SELECT employer FROM businesses WHERE afm=?", (afm,)).fetchone()
+        if row and row["employer"] and not efka.get_ame(conn, afm) and (credentials.get(conn, afm)
+                                                                         or efka.ika_credentials(conn, afm)):
+            try:
+                ame = ame_fetch(conn, afm)
+                if ame.get("ok"):
+                    sources.append("e-ΕΦΚΑ (ΑΜΕ)")
+                else:
+                    errors.append("ΑΜΕ: " + ame.get("reason", ""))
+                    if ame.get("handoff"):
+                        issues.append({"code": "efka_handoff", "message": ame.get("reason", "")})
+            except Exception as exc:                   # noqa: BLE001
+                log.warning("ΑΜΕ %s: %s", afm, exc)
     if kads:
         set_kads(conn, afm, kads)
     elif aade and aade.get("business_state") in ("ceased", "none"):

@@ -2,7 +2,9 @@
 
 Το task δημιουργείται ΓΙΑ ΤΟΝ ΤΡΕΧΟΝΤΑ ΧΡΗΣΤΗ (χωρίς admin, χωρίς αποθήκευση κωδικού Windows):
 * StartWhenAvailable: αν ο υπολογιστής ήταν κλειστός την ώρα εκτέλεσης, τρέχει μόλις ανοίξει.
-* RunOnlyIfNetworkAvailable, δεν σταματά με μπαταρία, όριο 1 ώρα, IgnoreNew αν τρέχει ήδη.
+* RunOnlyIfNetworkAvailable, δεν σταματά με μπαταρία, όριο 6 ώρες, IgnoreNew αν τρέχει ήδη.
+  (Μέχρι την v0.10 το όριο ήταν 1 ώρα — η ανάλυση άρθρων το εξαντλούσε και τα Windows τερμάτιζαν το task πριν τις
+  υπόλοιπες εργασίες. Το `TASK_VERSION` ξαναγράφει αυτόματα το task των παλιών εγκαταστάσεων — `refresh_if_outdated`.)
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from xml.sax.saxutils import escape
 from . import config
 
 TASK_NAME = "TaxMatch Daily Check"
+TASK_VERSION = "2"                   # αλλάζει όταν αλλάζει το XML του task → ξαναγράφεται στην εκκίνηση της εφαρμογής
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -31,7 +34,7 @@ def task_xml(command: str, arguments: str, hhmm: str, start: date | None = None)
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>TaxMatch by ScanMyData — καθημερινός έλεγχος φορολογικών νέων</Description>
+    <Description>TaxMatch by ScanMyData — προγραμματισμένες εργασίες (νέα, myDATA, υποβολές, οφειλές, αιτήματα, email) v{TASK_VERSION}</Description>
   </RegistrationInfo>
   <Triggers>
     <CalendarTrigger>
@@ -55,7 +58,7 @@ def task_xml(command: str, arguments: str, hhmm: str, start: date | None = None)
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
-    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT6H</ExecutionTimeLimit>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -88,7 +91,7 @@ def install(hhmm: str = "08:00") -> tuple[bool, str]:
         Path(tmp).unlink(missing_ok=True)
     if res.returncode != 0:
         return False, (res.stderr or res.stdout).strip()[:300] or "Αποτυχία δημιουργίας task"
-    return True, f"Ο καθημερινός έλεγχος προγραμματίστηκε για τις {hhmm}."
+    return True, f"Ο χρονοπρογραμματισμός ενεργοποιήθηκε — κάθε μέρα στις {hhmm} τρέχουν όσες εργασίες οφείλονται."
 
 
 def remove() -> tuple[bool, str]:
@@ -100,6 +103,33 @@ def remove() -> tuple[bool, str]:
     if res.returncode != 0:
         return False, (res.stderr or res.stdout).strip()[:300]
     return True, "Ο προγραμματισμένος έλεγχος αφαιρέθηκε."
+
+
+def refresh_if_outdated(conn, hhmm: str) -> bool:
+    """Παλιό task (άλλο `TASK_VERSION`) → ξαναγράφεται με την ίδια ώρα. Καλείται στην εκκίνηση της εφαρμογής."""
+    from . import settings_store
+    # ΜΟΝΟ από το εγκατεστημένο πρόγραμμα: από python (tests/ανάπτυξη) θα έστρεφε το ΠΡΑΓΜΑΤΙΚΟ task του χρήστη στο
+    # python του φακέλου ανάπτυξης (συνέβη 2026-10-29 από test — επαναφέρθηκε).
+    if not config.is_frozen() or os.environ.get("TAXMATCH_DATA_DIR"):
+        return False
+    if settings_store.get(conn, "sched_task_version") == TASK_VERSION or not is_installed():
+        return False
+    ok, _msg = install(hhmm or "08:00")
+    if ok:
+        settings_store.set_value(conn, "sched_task_version", TASK_VERSION)
+    return ok
+
+
+def run_now() -> tuple[bool, str]:
+    """«Εκτέλεση τώρα»: ΟΛΕΣ οι ενεργές εργασίες σε ξεχωριστή διεργασία (`--daily --all`) — συνεχίζει κι αν κλείσει το
+    παράθυρο· το αποτέλεσμα φαίνεται στις Ρυθμίσεις → Χρονοπρογραμματισμός και στο Αρχείο καταγραφής."""
+    cmd = [*config.executable_command(), "--daily", "--all"]
+    try:
+        subprocess.Popen(cmd, creationflags=_CREATE_NO_WINDOW | (0x00000008 if os.name == "nt" else 0),  # DETACHED
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    except OSError as exc:
+        return False, f"Δεν ξεκίνησε η εκτέλεση: {exc}"
+    return True, "Οι ενεργές εργασίες ξεκίνησαν στο παρασκήνιο — δείτε την κατάσταση σε λίγα λεπτά."
 
 
 def is_installed() -> bool:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
@@ -37,6 +37,22 @@ from .table_kit import SortItem, TableKit, interactive
 from .widgets import due_badge, fit_to_screen, kind_colour
 from .workers import run_task
 
+_O_PDF = 6        # στήλη «PDF» του πίνακα «Προθεσμίες & υποβολές»
+
+
+def _pdfs_of(amounts: dict[str, Any]) -> list[str]:
+    files = amounts.get("submission_pdfs") or ([amounts["submission_pdf"]] if amounts.get("submission_pdf") else [])
+    return [f for f in files if Path(f).exists()]
+
+
+def obligation_pdfs(r: dict[str, Any]) -> list[str]:
+    """PDF υποβληθεισών δηλώσεων (ΑΑΔΕ / ΕΛ.ΣΤΑΤ) που κατέβηκαν με τον έλεγχο υποβολών, για μια γραμμή προθεσμίας."""
+    out: list[str] = []
+    for c in r["submission"].get("checks") or []:
+        out += [f for f in _pdfs_of(c.get("amounts") or {}) if f not in out]
+    return out
+
+
 if TYPE_CHECKING:
     from .main_window import MainWindow
 
@@ -51,7 +67,7 @@ def _scrolled(page: QWidget) -> QScrollArea:
     return area
 
 class ClientDetailDialog(QDialog):
-    def __init__(self, main: "MainWindow", afm: str) -> None:
+    def __init__(self, main: "MainWindow", afm: str, tab: str = "") -> None:
         super().__init__(main)
         self.main = main
         self.conn = main.conn
@@ -120,6 +136,8 @@ class ClientDetailDialog(QDialog):
         close_row.addWidget(close_btn)
         root.addLayout(close_row)
         self._reload()
+        if tab in self._detail_tab_indices:                  # π.χ. από την ειδοποίηση αιτημάτων σε εκκρεμότητα
+            tabs.setCurrentIndex(self._detail_tab_indices[tab])
 
     def _add_lazy_detail_tab(self, tabs: QTabWidget, name: str, label: str, tab_icon, factory) -> None:
         placeholder = QWidget()
@@ -604,7 +622,10 @@ class ClientDetailDialog(QDialog):
                 message = f"ΑΜΕ: {found}"
             else:
                 message = res["reason"]
-            toast(self, message, "ok" if res["ok"] else "warn")
+            if res.get("handoff"):                       # κόλλησε μετά τη σύνδεση → browser / ξανά δοκιμή / παράβλεψη
+                self.main.offer_ame_retry([res["handoff"]], self)
+            else:
+                toast(self, message, "ok" if res["ok"] else "warn")
             self._reload()
 
         def failed(m):
@@ -712,43 +733,87 @@ class ClientDetailDialog(QDialog):
         self.year_summary.setWordWrap(True)
         self.year_summary.setTextFormat(Qt.TextFormat.RichText)
         box.addWidget(self.year_summary)
-        self.year_table = QTableWidget(0, 8)
+        self.year_table = QTableWidget(0, 9)
         self.year_table.verticalHeader().setVisible(False)
         self.year_table.setAlternatingRowColors(True)
         self.year_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.year_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # ταξινόμηση, αναζήτηση, χωνί σε κάθε στήλη, στήλες που σύρονται και θυμούνται — όπως ο πίνακας πελατών
         self.year_kit = TableKit(self.year_table, [("Προθεσμία", 90), ("Μήνας", 125), ("Κατηγορία", 110),
-                               ("Υποχρέωση", 0), ("Υπόχρεος", 110), ("Υποβολή", 150),
+                               ("Υποχρέωση", 0), ("Υπόχρεος", 110), ("Υποβολή", 150), ("PDF", 80),
                                ("Ποσά δήλωσης", 240), ("Αιτιολογία", 220)],
-                                 "client_obligations", prefs=getattr(self.main, "_prefs", None),
+                                 "client_obligations2", prefs=getattr(self.main, "_prefs", None),
                                  placeholder="Αναζήτηση υποχρέωσης (τίτλος, υποβολή, αιτιολογία…)")
         box.addWidget(self.year_kit.bar)
-        self.year_table.itemSelectionChanged.connect(self._show_obligation_detail)
-        self.year_table.doubleClicked.connect(lambda *_: self._toggle_done())
+        # Διπλό κλικ = popup λεπτομερειών (ρητό αίτημα 2026-10-29 — πριν ένα πλαίσιο κάτω από τον πίνακα)· κλικ στη
+        # στήλη «PDF» = άνοιγμα του PDF της δήλωσης.
+        self.year_table.doubleClicked.connect(lambda *_: self._open_obligation_detail())
+        self.year_table.cellClicked.connect(self._obligation_cell_clicked)
         box.addWidget(self.year_table, 3)
-        # Λεπτομέρειες της επιλεγμένης υποχρέωσης: πώς προέκυψε, τι βρήκε ο έλεγχος, ποσά, ταυτότητα οφειλής, πότε.
-        self.obligation_detail = QLabel("Επιλέξτε μια υποχρέωση για λεπτομέρειες.")
-        self.obligation_detail.setObjectName("card")
-        self.obligation_detail.setWordWrap(True)
-        self.obligation_detail.setTextFormat(Qt.TextFormat.RichText)
-        self.obligation_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
-                                                       | Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        self.obligation_detail.setOpenExternalLinks(True)     # «PDF δήλωσης» (λήψη με τον έλεγχο υποβολών)
-        self.obligation_detail.setMinimumHeight(70)
-        self.obligation_detail.setMaximumHeight(150)
-        box.addWidget(self.obligation_detail)
         self.checks_list = QListWidget()                       # λοιπές δηλώσεις του ελέγχου (ΜΥΦ, Φ5, …)
         self.checks_list.setMaximumHeight(110)
         box.addWidget(self.checks_list)
         return page
 
-    def _show_obligation_detail(self) -> None:
+    def _current_obligation(self) -> dict[str, Any] | None:
         row = self.year_table.currentRow()
         item = self.year_table.item(row, 0) if row >= 0 else None
-        if item is None:
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _obligation_cell_clicked(self, row: int, col: int) -> None:
+        if col != _O_PDF:
             return
-        r = item.data(Qt.ItemDataRole.UserRole)
+        item = self.year_table.item(row, 0)
+        files = obligation_pdfs(item.data(Qt.ItemDataRole.UserRole)) if item is not None else []
+        if len(files) == 1:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(files[0]))
+        elif files:
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self.year_table)
+            for f in files:
+                menu.addAction(Path(f).name, lambda f=f: QDesktopServices.openUrl(QUrl.fromLocalFile(f)))
+            rect = self.year_table.visualRect(self.year_table.model().index(row, col))
+            menu.exec(self.year_table.viewport().mapToGlobal(rect.bottomLeft()))
+
+    def _open_obligation_detail(self) -> None:
+        r = self._current_obligation()
+        if r is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(r["title"])
+        lay = QVBoxLayout(dlg)
+        label = QLabel(self._obligation_html(r))
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                      | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        label.setOpenExternalLinks(True)                     # PDF δήλωσης / βεβαίωσης
+        label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        label.setContentsMargins(8, 8, 8, 8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(label)
+        lay.addWidget(scroll, 1)
+        buttons = QHBoxLayout()
+        toggle = QPushButton("Αναίρεση ολοκλήρωσης" if r["submission"]["status"] == "done"
+                             else "Σήμανση ως ολοκληρωμένο")
+
+        def toggle_done() -> None:
+            dlg.accept()
+            self._toggle_done()
+        toggle.clicked.connect(toggle_done)
+        buttons.addWidget(toggle)
+        buttons.addStretch()
+        close = QPushButton("Κλείσιμο")
+        close.setDefault(True)
+        close.clicked.connect(dlg.accept)
+        buttons.addWidget(close)
+        lay.addLayout(buttons)
+        fit_to_screen(dlg, 760, 440)
+        dlg.exec()
+
+    def _obligation_html(self, r: dict[str, Any]) -> str:
+        """Πώς προέκυψε η υποχρέωση, τι βρήκε ο έλεγχος, ποσά, ταυτότητα οφειλής, PDF, πότε."""
         sub = r["submission"]
         esc = html.escape
         lines = [f"<b>{esc(r['title'])}</b> — προθεσμία <b>{date.fromisoformat(r['date']).strftime('%d/%m/%Y')}</b>"
@@ -776,8 +841,9 @@ class ClientDetailDialog(QDialog):
                 line += f"<br>&nbsp;&nbsp;Ποσά: {esc(amounts)}"
             if a.get("state"):
                 line += f" · κατάσταση {esc(a['state'])}"
-            if a.get("submission_pdf") and Path(a["submission_pdf"]).exists():
-                line += f" · <a href='{QUrl.fromLocalFile(a['submission_pdf']).toString()}'>PDF δήλωσης</a>"
+            for f in _pdfs_of(a):
+                line += (f"<br>&nbsp;&nbsp;📄 <a style='color:{CURRENT.accent}' href='{QUrl.fromLocalFile(f).toString()}'>"
+                         f"{esc(Path(f).name)}</a>")
             if c.get("checked_at"):
                 line += f" <span style='color:{CURRENT.muted}'>(έλεγχος {esc(c['checked_at'][:10])})</span>"
             lines.append(line)
@@ -786,7 +852,7 @@ class ClientDetailDialog(QDialog):
                          + ("Δεν υπάρχει ακόμη αυτόματος έλεγχος υποβολής — σημειώστε το χειροκίνητα ως ολοκληρωμένο."
                             if sub["manual"] else "Δεν έχει ελεγχθεί — «Έλεγχος υποβολών» για τη χρήση.") + "</span>")
         lines.append(f"<span style='color:{CURRENT.muted}'>{esc(r['description'])}</span>")
-        self.obligation_detail.setText("<br>".join(lines))
+        return "<br>".join(lines)
 
     def _reload_checks(self) -> None:
         self._sync_handoff()
@@ -807,14 +873,19 @@ class ClientDetailDialog(QDialog):
                            if len(month_parts) == 2 and month_parts[1].isdigit()
                            and 1 <= int(month_parts[1]) <= 12 else ref_month or "—")
             category = "Μισθοδοσία" if r["rule_id"] in {"apd", "ergani_e4", "fmy_wages"} else "ΑΑΔΕ"
+            pdfs = obligation_pdfs(r)
             cells = [date.fromisoformat(r["date"]).strftime("%d/%m/%Y"), month_label, category, r["title"],
                      "Ναι" if r["status"] == "yes" else "Ίσως", label,
+                     ("📄 PDF" if len(pdfs) == 1 else f"📄 ×{len(pdfs)}") if pdfs else "",
                      obligations.amounts_text(sub["amounts"]), r["reason"]]
             for col, text in enumerate(cells):
                 item = SortItem(text)
                 item.setToolTip(r["description"])
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, r)
+                if col == _O_PDF and pdfs:
+                    item.setForeground(QColor(CURRENT.accent))
+                    item.setToolTip("Κλικ: άνοιγμα — " + ", ".join(Path(f).name for f in pdfs))
                 if col == 5 and sub["status"]:
                     item.setForeground(QColor(colours.get(sub["status"], CURRENT.muted)))
                 elif col == 5 and r["date"] < today and r["status"] == "yes":

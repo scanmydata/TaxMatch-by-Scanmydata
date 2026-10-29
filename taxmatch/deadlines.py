@@ -7,7 +7,7 @@ import sqlite3
 from datetime import date, timedelta
 from typing import Any, Optional
 
-from . import obligations
+from . import db, obligations
 from .ingestion.filters import normalize_text
 
 
@@ -131,7 +131,16 @@ _SAME_DEADLINE_DAYS = 6
 _RANK = {"yes": 0, "maybe": 1, "no": 2}
 
 
+_BUSINESSES_CACHE = db.StateCache()
+
+
 def _businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Πελάτες με τα δεδομένα που διαβάζουν οι κανόνες — κρατιούνται όσο η βάση δεν αλλάζει (`db.state_key`), ώστε η
+    εναλλαγή Αρχική ↔ Ημερολόγιο να μην τα ξαναϋπολογίζει (ρητό αίτημα ταχύτητας 2026-10-29). Αντίγραφα ανά κλήση."""
+    return [dict(b) for b in _BUSINESSES_CACHE.get(conn, _load_businesses)]
+
+
+def _load_businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     from .mydata import analysis as mydata_analysis
     flags = mydata_analysis.month_flags(conn)          # ανά μήνα: VIES / Intrastat / παρακράτηση από το myDATA
     checks = _checks_for(conn)

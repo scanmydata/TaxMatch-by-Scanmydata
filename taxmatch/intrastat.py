@@ -10,7 +10,8 @@
 Στατ.Αξία | Δημιουργία | Μεταβολή» — πρωτόκολλο `YYYYMM/αύξων`, άρα ο μήνας είναι μέσα στο πρωτόκολλο.
 
 Κωδικοί: ΕΝΑΣ λογαριασμός του γραφείου (Ρυθμίσεις → `intrastat_user` / `intrastat_pass`), όχι ανά πελάτη.
-**Το καθαρό HTTP ΔΕΝ έχει δοκιμαστεί ζωντανά** (δεν υπάρχουν κωδικοί ΕΛ.ΣΤΑΤ) — μόνο ανάγνωση, ποτέ υποβολή.
+ΖΩΝΤΑΝΑ ✓ (2026-10-29, λογαριασμός γραφείου): σύνδεση, αρχείο 2025/2026, δηλώσεις + βεβαιώσεις σε PDF. Η σελίδα
+γράφει HTML χωρίς `</form>` και με href χωρίς εισαγωγικά — ο parser τα ανέχεται. Μόνο ανάγνωση, ποτέ υποβολή.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ REASONS_EL = {"NoCredentials": "Δεν έχουν οριστεί οι κωδικ
               "NoYearSelect": "Δεν φόρτωσε το αρχείο δηλώσεων της επιχείρησης (άλλαξε η σελίδα;).",
               "YearNotAvailable": "Το έτος δεν υπάρχει στο αρχείο δηλώσεων της επιχείρησης."}
 
-_FORM = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.S | re.I)
+_FORM_OPEN = re.compile(r"<form\b([^>]*)>", re.I)
 _FIELD = re.compile(r"<(input|select|textarea|button)\b([^>]*)>(.*?</\1>)?", re.S | re.I)
 
 
@@ -53,9 +54,16 @@ def _text(s: str) -> str:
 def forms(page: str) -> list[dict[str, Any]]:
     """Οι φόρμες της σελίδας με τα στοιχεία τους ΜΕ ΤΗ ΣΕΙΡΑ του `form.elements` (όπως τα αριθμεί το `post()`)."""
     out = []
-    for fm in _FORM.finditer(page or ""):
+    page = page or ""
+    starts = list(_FORM_OPEN.finditer(page))
+    for k, fm in enumerate(starts):
+        # Το «Αρχείο Δηλώσεων» (history) ΔΕΝ κλείνει τη φόρμα (`</form>` λείπει — ζωντανά 2026-10-29)· ο browser την
+        # κλείνει στο τέλος της σελίδας. Άρα: μέχρι το `</form>`, την επόμενη `<form` ή το τέλος.
+        stop = starts[k + 1].start() if k + 1 < len(starts) else len(page)
+        close = re.search(r"</form\s*>", page[fm.end():stop], re.I)
+        body = page[fm.end():fm.end() + close.start()] if close else page[fm.end():stop]
         elements = []
-        for f in _FIELD.finditer(fm.group(2)):
+        for f in _FIELD.finditer(body):
             kind, attrs, inner = f.group(1).lower(), f.group(2), f.group(3) or ""
             itype = _attr(attrs, "type").lower() if kind == "input" else kind
             value = _attr(attrs, "value")
@@ -136,7 +144,8 @@ def parse_archive(page: str) -> list[dict[str, str]]:
         cells = [_text(c) for c in re.findall(r"<td\b[^>]*>(.*?)</td>", tr, re.S | re.I)]
         if len(cells) < 3 or not re.match(r"^\d{6}/", cells[0].replace(" ", "")):
             continue
-        link = re.search(r"""href=["'](javascript:post\(\s*1\s*,[^"']*)["']""", tr, re.I)
+        # href ΧΩΡΙΣ εισαγωγικά στη σελίδα της ΕΛ.ΣΤΑΤ (`href=javascript:post(1,0,20260911912)` — ζωντανά)
+        link = re.search(r"""href=["']?(javascript:post\(\s*1\s*,[^"'\s>]*)""", tr, re.I)
         rows.append({"protocol": cells[0].replace(" ", ""), "type": cells[1], "flow": cells[2],
                      "lines": cells[3] if len(cells) > 3 else "", "invoice_value": cells[4] if len(cells) > 4 else "",
                      "stat_value": cells[5] if len(cells) > 5 else "", "created": cells[6] if len(cells) > 6 else "",
@@ -237,6 +246,8 @@ def save_pdfs(http: _HyperHttp, archive: dict[str, Any], afm: str, rows: list[di
         if len(args) < 3:
             continue
         base = f"INTRASTAT_{afm}_{r['protocol'].replace('/', '_')}_{'AFIKSI' if _flow_of(r['flow']) == 'arrivals' else 'APOSTOLI'}"
+        if (folder / f"{base}_ΔΗΛΩΣΗ.pdf").exists():
+            continue                                    # μία φορά ανά δήλωση (όπως τα PDF της ΑΑΔΕ)
         try:
             view = _post(http, url, page, int(args[0]), int(args[1]), args[2])
             write_pdf(view["text"], folder / f"{base}_ΔΗΛΩΣΗ.pdf", f"Intrastat {r['protocol']}")
@@ -251,6 +262,18 @@ def save_pdfs(http: _HyperHttp, archive: dict[str, Any], afm: str, rows: list[di
         except Exception as exc:                        # noqa: BLE001 — το PDF είναι επιπλέον
             log.warning("intrastat pdf %s %s: %s", afm, r["protocol"], exc)
     return saved
+
+
+def attach_pdfs(e: dict[str, Any], afm: str, folder: Path) -> None:
+    """Τα PDF (δήλωση + βεβαίωση) που ήδη υπάρχουν στον φάκελο → `amounts` της περιόδου τους, ώστε να ανοίγουν από
+    την υποχρέωση (στήλη «PDF»). Ό,τι κατέβηκε σε προηγούμενο έλεγχο μένει συνδεδεμένο και χωρίς νέα λήψη."""
+    if not folder.exists():
+        return
+    for p in e["periods"]:
+        files = sorted(str(f) for f in folder.glob(f"INTRASTAT_{afm}_{p['period'].replace('-', '')}_*.pdf"))
+        if files:
+            decl = [f for f in files if f.endswith("_ΔΗΛΩΣΗ.pdf")]
+            p["amounts"] = {**(p.get("amounts") or {}), "submission_pdf": (decl or files)[0], "submission_pdfs": files}
 
 
 def check_entries(conn: sqlite3.Connection, afm: str, year: int, want_pdf: bool = False,
@@ -271,12 +294,11 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int, want_pdf: bool 
             raise RuntimeError(REASONS_EL.get(archive["reason"], archive["reason"]))
         rows = parse_archive(archive["page"])
         e = entry(rows, year, liable_months(conn, afm, year))
+        from . import config
+        folder = config.data_dir() / "submissions" / afm / str(year)
         if want_pdf and rows:
-            from . import config
-            files = save_pdfs(http, archive, afm, [r for r in rows if r["protocol"].startswith(str(year))],
-                              config.data_dir() / "submissions" / afm / str(year))
-            if files:
-                e["detail"] = (e.get("detail") or "") + f" {len(files)} PDF στον φάκελο υποβολών."
+            save_pdfs(http, archive, afm, [r for r in rows if r["protocol"].startswith(str(year))], folder)
+        attach_pdfs(e, afm, folder)
         return [e]
     except Exception as exc:                            # noqa: BLE001 — δίκτυο / αλλαγή σελίδας
         log.warning("intrastat %s/%s: %s", afm, year, exc)

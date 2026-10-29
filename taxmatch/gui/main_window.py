@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_TITLE, __version__, config, crypto, deadlines, easycheck, efka, logs, notices as notices_mod, obligations, office, pipeline, scheduler_win, settings_store
 from .. import backup as backup_mod
-from .. import fee_portals, handoff
+from .. import fee_portals, handoff, scheduled_jobs
 from .. import intrastat as intrastat_mod
 from .. import fiscal
 from .. import members as members_mod
@@ -325,6 +325,12 @@ class MainWindow(QMainWindow):
         self._setup_tray()
         self.reload_all()
         QTimer.singleShot(400, self._maybe_first_run_tour)
+        self._sched_seen: Optional[str] = None
+        try:                                                   # παλιό task (π.χ. όριο 1 ώρας) → ξαναγράφεται
+            scheduler_win.refresh_if_outdated(self.conn, settings_store.get(self.conn, "daily_time") or "08:00")
+        except Exception:                                      # noqa: BLE001 — ποτέ δεν μπλοκάρει την εκκίνηση
+            pass
+        self._check_schedule()
         self._sched_timer = QTimer(self)
         self._sched_timer.setInterval(60_000)
         self._sched_timer.timeout.connect(self._check_schedule)
@@ -403,6 +409,9 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not self._title_bar_done:
             self._title_bar_done = paint_title_bar(self, not self.menu.chk_light.isChecked())
+        if not getattr(self, "_startup_toasts_done", False):
+            self._startup_toasts_done = True
+            QTimer.singleShot(1500, lambda: self.notify_waiting_requests())
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if getattr(self, "tray", None) and not getattr(self, "_really_quit", False) and \
@@ -1126,21 +1135,8 @@ class MainWindow(QMainWindow):
 
         def work(report, cancelled):
             def one(conn, afm):
-                result = {"ok": True, "entries": []}
-                for y in years:
-                    r = easycheck.check_client(conn, afm, y, want_pdf=want_pdf)
-                    result["ok"] = result["ok"] and r.get("ok")
-                    result["entries"] += r.get("entries", [])
-                    apd = efka.check_apd_entries(conn, afm, y)        # ΑΠΔ e-ΕΦΚΑ + ΤΕΚΑ ανά ΑΜΕ (όχι ΑΑΔΕ)
-                    result["entries"] += apd
-                    # τέλη σε πύλες εκτός TAXISnet «other»: πλαστικά (Plastic), παρεπιδημούντες (dae.govapp.gr)
-                    fees = fee_portals.check_entries(conn, afm, y)
-                    # Intrastat στην ΕΛ.ΣΤΑΤ με τους κωδικούς του ΓΡΑΦΕΙΟΥ (μόνο όσους αφορά: κατώφλια/σημαία)
-                    fees += intrastat_mod.check_entries(conn, afm, y, want_pdf=want_pdf)
-                    if fees:
-                        easycheck.store_results(conn, afm, y, fees)
-                        result["entries"] += fees
-                return result
+                # ΑΑΔΕ + ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ + πύλες τελών + Intrastat — ίδια συνάρτηση με τον χρονοπρογραμματισμό
+                return scheduled_jobs.submission_check_client(conn, afm, years, want_pdf=want_pdf)
 
             def each(afm, n, result):
                 state["done"] = n
@@ -1182,6 +1178,10 @@ class MainWindow(QMainWindow):
     def offer_handoffs(self, items: list[dict], window: Optional[QWidget] = None) -> None:
         """Έλεγχοι που κόλλησαν ΜΕΤΑ τη σύνδεση: toast με «Συνέχεια στον browser» — ανοίγει Chrome/Edge συνδεδεμένο στο
         σημείο όπου σταμάτησε η εφαρμογή (handoff.py, ρητό αίτημα 2026-10-27)."""
+        ame = [h for h in items if h["label"] == efka.AME_HANDOFF_LABEL]
+        if ame:                                         # ανάκτηση ΑΜΕ: και «Ξανά δοκιμή» μετά τον browser
+            self.offer_ame_retry(ame, window)
+        items = [h for h in items if h["label"] != efka.AME_HANDOFF_LABEL]
         if not items:
             return
         names = self._client_names([h["afm"] for h in items])
@@ -1191,6 +1191,70 @@ class MainWindow(QMainWindow):
         toast(window or self, f"{len(items)} {'έλεγχος σταμάτησε' if len(items) == 1 else 'έλεγχοι σταμάτησαν'} μετά "
                               f"τη σύνδεση (π.χ. επιβεβαίωση στοιχείων στον e-ΕΦΚΑ). Συνεχίστε στον browser από το ίδιο "
                               f"σημείο{more}:", "warn", actions=actions)
+
+    def offer_ame_retry(self, items: list[dict], window: Optional[QWidget] = None) -> None:
+        """Ανάκτηση ΑΜΕ που κόλλησε ΜΕΤΑ τη σύνδεση (ο e-ΕΦΚΑ ζητά π.χ. επιβεβαίωση στοιχείων επικοινωνίας): flash
+        message με «Άνοιγμα browser» (ήδη συνδεδεμένος — ο χρήστης επιβεβαιώνει εκεί), «Ξανά δοκιμή» και «Παράβλεψη»
+        (ρητό αίτημα 2026-10-29) — από την καρτέλα πελάτη και από τη μαζική ανανέωση στοιχείων."""
+        if not items:
+            return
+        names = self._client_names([h["afm"] for h in items])
+        actions: list = []
+        for h in items[:3]:
+            name = names.get(h["afm"], h["afm"])
+            actions.append((f"Άνοιγμα browser — {name}", lambda _c=False, h=h: self.open_handoff(h)))
+            actions.append((f"Ξανά δοκιμή — {name}", lambda _c=False, a=h["afm"]: self.retry_ame(a, window), True))
+        actions.append(("Παράβλεψη", lambda _c=False: None, True))
+        more = f"\n… και άλλοι {len(items) - 3} (καρτέλα πελάτη → «Συνέχεια στον browser»)" if len(items) > 3 else ""
+        toast(window or self, "Ο e-ΕΦΚΑ ζητά ενέργεια μετά τη σύνδεση (συνήθως επιβεβαίωση στοιχείων επικοινωνίας). "
+                              "Ανοίξτε τον browser — είστε ήδη συνδεδεμένοι — ολοκληρώστε την επιβεβαίωση και πατήστε "
+                              "«Ξανά δοκιμή»:\n" + "\n".join(f"• {names.get(h['afm'], h['afm'])}" for h in items[:3]) + more,
+              "warn", ms=180_000, title="Η ανάκτηση ΑΜΕ σταμάτησε", actions=actions)
+
+    def retry_ame(self, afm: str, window: Optional[QWidget] = None) -> None:
+        name = self._client_names([afm]).get(afm, afm)
+        toast(window or self, f"Νέα προσπάθεια ανάκτησης ΑΜΕ — {name}…", "info")
+
+        def work(_p):
+            conn = dbmod.connect()                     # δικό του thread — ποτέ η σύνδεση του UI
+            try:
+                return efka.retrieve_ame(conn, afm)
+            finally:
+                conn.close()
+
+        def done(res):
+            if res["ok"]:
+                toast(window or self, f"ΑΜΕ {res['ame']} — {name}", "ok")
+                self.reload_clients()
+            elif res.get("handoff"):
+                self.offer_ame_retry([res["handoff"]], window)
+            else:
+                toast(window or self, f"{name}: {res['reason']}", "warn")
+            if window is not None and hasattr(window, "_reload"):
+                try:
+                    window._reload()                   # noqa: SLF001 — ανοιχτή καρτέλα πελάτη
+                except RuntimeError:
+                    pass
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(window or self, m, "danger")))
+
+    def notify_waiting_requests(self, afms: Optional[list[str]] = None, window: Optional[QWidget] = None) -> int:
+        """Flash message για αιτήματα ΑΑΔΕ «σε εκκρεμότητα από τον συναλλασσόμενο» (η ΑΑΔΕ περιμένει ενέργεια του
+        πελάτη) — μετά την ενημέρωση αιτημάτων και στην εκκίνηση (ρητό αίτημα 2026-10-29), με κουμπί που ανοίγει την
+        καρτέλα του πελάτη στα «Αιτήματα ΑΑΔΕ»."""
+        from .. import requests_aade
+        rows = requests_aade.waiting_on_client(self.conn, afms)
+        if not rows:
+            return 0
+        lines = [f"• {r['name'] or r['afm']} — {r['process'] or r['topic'] or 'αίτημα'}"
+                 + (f" (υπόθεση {r['case_no']})" if r["case_no"] else "") for r in rows[:5]]
+        more = f"\n… και άλλα {len(rows) - 5}" if len(rows) > 5 else ""
+        actions = [(f"Άνοιγμα — {r['name'] or r['afm']}",
+                    lambda _c=False, a=r["afm"]: self.open_client_detail(a, tab="requests_tab"))
+                   for r in list({r["afm"]: r for r in rows}.values())[:3]]
+        toast(window or self, "\n".join(lines) + more, "warn", title=(
+            f"{len(rows)} {'αίτημα' if len(rows) == 1 else 'αιτήματα'} ΑΑΔΕ σε εκκρεμότητα από τον πελάτη — "
+            "χρειάζεται ενέργεια"), actions=actions)
+        return len(rows)
 
     def open_handoff(self, entry: dict) -> None:
         toast(self, f"Άνοιγμα browser — {entry['label']}…", "info")
@@ -1300,6 +1364,7 @@ class MainWindow(QMainWindow):
             self._reload_notices()
             if on_done:
                 on_done()
+            self.notify_waiting_requests(afms, window)
             if total == 1 and state["failed"]:
                 return f"Αιτήματα: {state['reason']}", "danger"
             msg = f"Αιτήματα ΑΑΔΕ ({state['done']}/{total}): {state['changes']} αλλαγές"
@@ -1438,6 +1503,7 @@ class MainWindow(QMainWindow):
         # Μόνιμο toast με ποσοστό και τον πελάτη που επεξεργάζεται τώρα (ρητό αίτημα χρήστη, 2026-10-22) — κλείνει
         # μόνο του όταν τελειώσει η ανάκτηση.
         stop = threading.Event()
+        started = time.monotonic()
         bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…",
                             on_cancel=stop.set)
         state = {"done": 0}
@@ -1477,6 +1543,7 @@ class MainWindow(QMainWindow):
             self.reload_dashboard()
             self._reload_notices()
             self._refresh_status_bar()
+            self.offer_handoffs([h for h in handoff.pending(since=started) if h["afm"] in afms])
 
         def failed(m: str) -> None:
             self._client_refresh_timer.stop()
@@ -1486,14 +1553,14 @@ class MainWindow(QMainWindow):
 
         self._tasks.append(run_task(self, work, on_progress=on_progress, on_done=done, on_error=failed))
 
-    def open_client_detail(self, afm: str) -> None:
+    def open_client_detail(self, afm: str, tab: str = "") -> None:
         if self._client_detail_open or (self._recent_client_detail_timer.isActive()
                                         and self._recent_client_detail_afm == afm):
             return
         self._client_detail_open = True
         notices_mod.clear_marks(self.conn, afm)            # ο χρήστης είδε τον πελάτη: οι αστερίσκοι του σβήνουν
         try:
-            dlg = ClientDetailDialog(self, afm)
+            dlg = ClientDetailDialog(self, afm, tab=tab)
             dlg.exec()
         finally:
             self._client_detail_open = False
@@ -2483,8 +2550,11 @@ class MainWindow(QMainWindow):
         sf.addWidget(save_src)
         root.addWidget(src_box)
 
-        sched_box = QGroupBox("Καθημερινός έλεγχος (Windows Task Scheduler)")
-        sf2 = QHBoxLayout(sched_box)
+        # Χρονοπρογραμματισμός ΟΛΩΝ των εργασιών (scheduled_jobs.py, ρητό αίτημα 2026-10-29): το Windows task ξυπνά μία
+        # φορά τη μέρα και τρέχει όσες εργασίες οφείλονται, με συχνότητα ανά εργασία.
+        sched_box = QGroupBox("Χρονοπρογραμματισμός (Windows Task Scheduler — τρέχει και με κλειστή την εφαρμογή)")
+        sched_root = QVBoxLayout(sched_box)
+        sf2 = QHBoxLayout()
         self.sched_time = QLineEdit()
         self.sched_time.setPlaceholderText("08:00")
         self.sched_time.setFixedWidth(70)
@@ -2496,20 +2566,58 @@ class MainWindow(QMainWindow):
         sched_off = QPushButton("Απενεργοποίηση")
         sched_off.clicked.connect(self._remove_schedule)
         sf2.addWidget(sched_off)
-        # Λήψη myDATA (έσοδα + έξοδα, μόνο οι μήνες που χρειάζονται) στον ίδιο καθημερινό έλεγχο — mydata/scheduled.py
-        self.sched_mydata = QCheckBox("και λήψη myDATA")
-        self.sched_mydata.setToolTip("Για πελάτες με κωδικούς myDATA: τρέχων + προηγούμενος μήνας και όσοι λείπουν — "
-                                     "εντοπίζει παρακρατήσεις, τέλος ανθεκτικότητας (8.2), ψηφιακό τέλος συναλλαγής, VIES/"
-                                     "Intrastat για το Ημερολόγιο. Χωρίς PDF.")
-        self.sched_mydata.toggled.connect(
-            lambda on: settings_store.set_value(self.conn, "daily_mydata", "1" if on else "0"))
-        sf2.addWidget(self.sched_mydata)
-        self.sched_requests = QCheckBox("και αιτήματα ΑΑΔΕ")
-        self.sched_requests.setToolTip("«Τα Αιτήματά μου» κάθε πελάτη με κωδικούς: ειδοποίηση όταν απαντηθεί ή περιμένει "
-                                       "ενέργεια του πελάτη")
-        self.sched_requests.toggled.connect(
-            lambda on: settings_store.set_value(self.conn, "daily_requests", "1" if on else "0"))
-        sf2.addWidget(self.sched_requests)
+        sched_run = QPushButton(icon("refresh", CURRENT.txt, 16), "  Εκτέλεση τώρα")
+        sched_run.setToolTip("Όλες οι ενεργές εργασίες τώρα, στο παρασκήνιο (συνεχίζουν κι αν κλείσει η εφαρμογή)")
+        sched_run.clicked.connect(self._run_schedule_now)
+        sf2.addWidget(sched_run)
+        self.sched_state = QLabel("")
+        sf2.addWidget(self.sched_state)
+        sf2.addStretch()
+        sched_root.addLayout(sf2)
+        days = QHBoxLayout()
+        days.addWidget(QLabel("Εβδομαδιαίες εργασίες κάθε:"))
+        self.sched_weekday = QComboBox()
+        for i, name in enumerate(scheduled_jobs.WEEKDAYS, 1):
+            self.sched_weekday.addItem(name, i)
+        self.sched_weekday.currentIndexChanged.connect(lambda _i: settings_store.set_value(
+            self.conn, "sched_weekday", str(self.sched_weekday.currentData())))
+        days.addWidget(self.sched_weekday)
+        days.addSpacing(16)
+        days.addWidget(QLabel("Μηνιαίες εργασίες από την ημέρα:"))
+        self.sched_monthday = QComboBox()
+        for d in range(1, 29):
+            self.sched_monthday.addItem(str(d), d)
+        self.sched_monthday.currentIndexChanged.connect(lambda _i: settings_store.set_value(
+            self.conn, "sched_monthday", str(self.sched_monthday.currentData())))
+        days.addWidget(self.sched_monthday)
+        days.addStretch()
+        sched_root.addLayout(days)
+        grid = QGridLayout()
+        for col, head in enumerate(("Εργασία", "Συχνότητα", "Τελευταία εκτέλεση")):
+            h = QLabel(f"<b>{head}</b>")
+            grid.addWidget(h, 0, col)
+        self.sched_freq: dict[str, QComboBox] = {}
+        self.sched_result: dict[str, QLabel] = {}
+        for row, job in enumerate(scheduled_jobs.JOBS, 1):
+            name = QLabel(job.label)
+            name.setToolTip(job.tooltip)
+            grid.addWidget(name, row, 0)
+            combo = QComboBox()
+            for key, text in scheduled_jobs.FREQS.items():
+                combo.addItem(text, key)
+            combo.setToolTip(job.tooltip)
+            combo.currentIndexChanged.connect(lambda _i, j=job.id, c=combo: scheduled_jobs.set_freq(
+                self.conn, j, c.currentData()))
+            grid.addWidget(combo, row, 1)
+            result = QLabel("")
+            result.setObjectName("muted")
+            result.setWordWrap(True)
+            grid.addWidget(result, row, 2)
+            self.sched_freq[job.id], self.sched_result[job.id] = combo, result
+        grid.setColumnStretch(2, 1)
+        sched_root.addLayout(grid)
+        sf2 = QHBoxLayout()
+        sched_root.addLayout(sf2)
         self.fetch_members = QCheckBox("Άντληση μελών εταιρειών")
         self.fetch_members.setToolTip("Με την ανάκτηση στοιχείων, και τα μέλη/εκπρόσωποι κάθε εταιρείας (όχι ατομικής) από "
                                       "το Μητρώο ΑΑΔΕ — καρτέλα εταιρείας → «Μέλη»")
@@ -2569,8 +2677,8 @@ class MainWindow(QMainWindow):
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
         self.sched_time.setText(settings_store.get(self.conn, "daily_time") or "08:00")
-        for box, key, on_default in ((self.sched_mydata, "daily_mydata", True), (self.sched_requests, "daily_requests", False),
-                                     (self.fetch_members, "fetch_members", False)):
+        self._reload_schedule()
+        for box, key, on_default in ((self.fetch_members, "fetch_members", False),):
             box.blockSignals(True)
             box.setChecked(settings_store.get(self.conn, key) == "1" or (on_default and settings_store.get(self.conn, key) != "0"))
             box.blockSignals(False)
@@ -2669,6 +2777,23 @@ class MainWindow(QMainWindow):
             settings_store.set_source_enabled(self.conn, sid, chk.isChecked())
         toast(self, "Οι πηγές ενημερώθηκαν.", "ok")
 
+    def _reload_schedule(self) -> None:
+        for job_id, combo in self.sched_freq.items():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(scheduled_jobs.freq(self.conn, job_id))))
+            combo.blockSignals(False)
+            last = settings_store.get(self.conn, f"sched_last_{job_id}")
+            result = settings_store.get(self.conn, f"sched_result_{job_id}")
+            self.sched_result[job_id].setText(f"{logs.format_local(last)} — {result}" if last else "—")
+        for combo, value in ((self.sched_weekday, scheduled_jobs.weekday(self.conn)),
+                             (self.sched_monthday, scheduled_jobs.monthday(self.conn))):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(value)))
+            combo.blockSignals(False)
+        on = scheduler_win.is_installed()
+        self.sched_state.setText("● Ενεργό" if on else "○ Ανενεργό — πατήστε «Ενεργοποίηση»")
+        self.sched_state.setStyleSheet(f"color:{CURRENT.ok if on else CURRENT.warn};")
+
     def _install_schedule(self) -> None:
         try:
             ok, msg = scheduler_win.install(self.sched_time.text().strip() or "08:00")
@@ -2677,10 +2802,17 @@ class MainWindow(QMainWindow):
         toast(self, msg, "ok" if ok else "warn")
         if ok:
             settings_store.set_value(self.conn, "daily_time", self.sched_time.text().strip())
+            settings_store.set_value(self.conn, "sched_task_version", scheduler_win.TASK_VERSION)
+        self._reload_schedule()
 
     def _remove_schedule(self) -> None:
         ok, msg = scheduler_win.remove()
         toast(self, msg, "ok" if ok else "warn")
+        self._reload_schedule()
+
+    def _run_schedule_now(self) -> None:
+        ok, msg = scheduler_win.run_now()
+        toast(self, msg, "info" if ok else "danger")
 
     def _test_llm(self) -> None:
         def work(_progress):
@@ -2860,7 +2992,21 @@ class MainWindow(QMainWindow):
         self._tasks.append(run_task(self, work, on_progress=self.run_status.setText, on_done=done, on_error=failed))
 
     def _check_schedule(self) -> None:
-        pass  # ο πραγματικός προγραμματισμός τρέχει από το Windows Task Scheduler (--daily), ανεξάρτητα από το παράθυρο
+        """Ο πραγματικός προγραμματισμός τρέχει από το Windows Task Scheduler (--daily), ανεξάρτητα από το παράθυρο·
+        εδώ μόνο: όταν τελειώσει μια προγραμματισμένη εκτέλεση ενώ η εφαρμογή είναι ανοιχτή, ανανέωση οθονών + toast."""
+        stamp = settings_store.get(self.conn, "sched_last_wake")
+        if not stamp or stamp == self._sched_seen:
+            return
+        first, self._sched_seen = self._sched_seen is None, stamp
+        if first:
+            return
+        self.reload_all()
+        self.notify_waiting_requests()
+        if hasattr(self, "sched_freq"):
+            self._reload_schedule()
+        done = [j for j in scheduled_jobs.JOBS if settings_store.get(self.conn, f"sched_last_{j.id}") >= stamp[:16]]
+        toast(self, "\n".join(f"{j.label}: {settings_store.get(self.conn, f'sched_result_{j.id}')}" for j in done)
+              or "Καμία εργασία δεν οφειλόταν.", "ok", title="Ολοκληρώθηκε η προγραμματισμένη εκτέλεση")
 
     # ------------------------------------------------------------------ μενού / θέμα
     def _on_menu(self, action: str) -> None:
