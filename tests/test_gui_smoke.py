@@ -2,6 +2,7 @@
 βάση και ελέγχει ότι δεν σκάει και ότι δείχνει σωστά δεδομένα. ΔΕΝ προσομοιώνει κλικ χρήστη (αυτό επαληθεύτηκε
 οπτικά, χειροκίνητα, σε πραγματικό παράθυρο Windows) — εδώ ελέγχεται η κατασκευή/φόρτωση των widgets."""
 import json
+from datetime import timedelta
 import os
 from pathlib import Path
 
@@ -934,6 +935,11 @@ def test_dashboard_click_shows_clients_concerned(window, conn, monkeypatch):
             return 0
 
     monkeypatch.setattr(mw, "NewsDialog", FakeDialog)
+    # Η Αρχική δείχνει 21 ημέρες· στις αρχές του μήνα η επόμενη μηνιαία ΦΠΑ (τέλος μήνα) πέφτει εκτός — το test δεν
+    # πρέπει να εξαρτάται από τη σημερινή ημερομηνία (απέτυχε 2026-11-02 χωρίς αλλαγή κώδικα).
+    original = mw.deadlines.events_between
+    monkeypatch.setattr(mw.deadlines, "events_between",
+                        lambda conn_, start, end, **kw: original(conn_, start, end + timedelta(days=40), **kw))
     window.reload_dashboard()
     items = [window.dash_deadlines.item(i) for i in range(window.dash_deadlines.count())]
     vat = next(i for i in items if "ΦΠΑ (μηνιαία)" in i.text())
@@ -1085,9 +1091,10 @@ def test_client_detail_shows_submission_checks(window, conn):
              "period_type": "quarter"}]}])
     dlg = ClientDetailDialog(window, AFM)
     t = dlg.year_table
-    rows = {t.item(r, 3).text(): r for r in range(t.rowCount())}
-    q1 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Α΄ τρίμηνο" in title)
-    q2 = next(r for title, r in rows.items() if "τριμηνιαία" in title and "Β΄ τρίμηνο" in title)
+    def vat_row(month):                                             # τίτλος χωρίς περίοδο — ο μήνας στη στήλη 1
+        return next(r for r in range(t.rowCount())
+                    if t.item(r, 3).text() == "Δήλωση ΦΠΑ (τριμηνιαία)" and t.item(r, 1).text() == f"{month} {y}")
+    q1, q2 = vat_row("Μάρτιος"), vat_row("Ιούνιος")
     assert t.item(q1, 1).text() == f"Μάρτιος {y}" and t.item(q1, 2).text() == "ΑΑΔΕ"
     assert t.item(q1, 5).text() == "Υποβλήθηκε" and "1.234,50 €" in t.item(q1, 7).text()
     assert t.item(q2, 5).text() == "ΔΕΝ υποβλήθηκε"
@@ -1096,7 +1103,7 @@ def test_client_detail_shows_submission_checks(window, conn):
     assert "1.234,50" in dlg._obligation_html(dlg._current_obligation())   # περιεχόμενο του popup (διπλό κλικ)
     t.setCurrentCell(q2, 0)
     dlg._toggle_done()
-    q2 = next(r for r in range(t.rowCount()) if "Β΄ τρίμηνο" in t.item(r, 3).text() and "τριμηνιαία" in t.item(r, 3).text())
+    q2 = vat_row("Ιούνιος")
     assert t.item(q2, 5).text().startswith("Ολοκληρώθηκε")
     window.reload_clients()
     ct = window.client_table
@@ -1184,6 +1191,49 @@ def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
     assert dlg.mydata.table.rowCount() == 1 and dlg.mydata.table.item(0, 3).text() == "ΣΥΜΒΟΥΛΟΣ"
     assert "200,00 €" in dlg.mydata.summary.text() and "επιχειρηματικής" in dlg.mydata.summary.text()
     assert "δεκτοί" not in dlg.mydata.creds_status.text() and dlg.mydata.user.text() == "u"
+    dlg.deleteLater()
+
+
+def test_mydata_tab_type_names_classifications_and_invoice_card(window, conn, monkeypatch):
+    """Τύπος με ονομασία, χαρακτηρισμοί στο hover, διπλό κλικ = καρτέλα παραστατικού (ρητό αίτημα 2026-10-29)."""
+    from taxmatch.gui import mydata_tab as mt
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    from taxmatch.mydata import parse
+    xml = (b'<RequestedDoc xmlns="http://www.aade.gr/myDATA/invoice/v1.0" '
+           b'xmlns:icls="https://www.aade.gr/myDATA/incomeClassificaton/v1.0"><invoicesDoc><invoice><mark>9</mark>'
+           b'<invoiceHeader><series>A</series><aa>7</aa><issueDate>2026-03-05</issueDate><invoiceType>2.1</invoiceType>'
+           b'</invoiceHeader><paymentMethods><paymentMethodDetails><type>3</type><amount>124</amount>'
+           b'</paymentMethodDetails></paymentMethods><invoiceDetails><lineNumber>1</lineNumber><netValue>100</netValue>'
+           b'<vatCategory>1</vatCategory><vatAmount>24</vatAmount><incomeClassification>'
+           b'<icls:classificationType>E3_561_001</icls:classificationType>'
+           b'<icls:classificationCategory>category1_3</icls:classificationCategory><icls:amount>100</icls:amount>'
+           b'</incomeClassification></invoiceDetails><invoiceSummary><totalNetValue>100</totalNetValue>'
+           b'<totalVatAmount>24</totalVatAmount><totalGrossValue>124</totalGrossValue></invoiceSummary>'
+           b'</invoice></invoicesDoc></RequestedDoc>')
+    [doc] = parse.parse_page(xml, "outgoing")
+    det = doc["detail"]
+    assert det["lines"][0]["classifications"][0] == {"kind": "income", "type": "E3_561_001", "category": "category1_3",
+                                                      "amount": 100.0, "vat_type": ""}
+    assert det["payments"] == [{"type": "3", "amount": 124.0}]
+    service.add(conn, AFM, "ΑΛΦΑ")
+    dlg = ClientDetailDialog(window, AFM)
+    dlg.detail_tabs.setCurrentIndex(dlg._detail_tab_indices["mydata"])
+    tab = dlg.mydata
+    ym = tab.month.currentData()
+    import json as _json
+    conn.execute("INSERT INTO mydata_docs(afm, mark, direction, invoice_type, issue_date, net, vat, total, fetched_at, "
+                 "detail_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 (AFM, "9", "outgoing", "2.1", f"{ym}-05", 100, 24, 124, "x", _json.dumps(det)))
+    tab.reload()
+    assert tab.table.item(0, 1).text() == "2.1 · Τιμολόγιο Παροχής Υπηρεσιών"
+    assert "Έσοδα από Παροχή Υπηρεσιών" in tab.table.item(0, 3).toolTip() and "E3_561_001" in tab.table.item(0, 3).toolTip()
+    seen = []
+    monkeypatch.setattr(mt.InvoiceCard, "exec", lambda card: seen.append(card) or 1)
+    tab.table.selectRow(0)
+    tab._open_selected()                                            # noqa: SLF001 — διπλό κλικ
+    [card] = seen
+    texts = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
+    assert "Μετρητά" in texts and "124,00 €" in texts and card.fetch_btn.isEnabled() is False   # χωρίς URL παρόχου
     dlg.deleteLater()
 
 
@@ -1313,10 +1363,12 @@ def test_ame_stall_flash_message_offers_browser_retry_and_dismiss(window, conn, 
     host = toast_mod._host_for(window)                              # noqa: SLF001
     item = host._box.itemAt(host._box.count() - 1).widget()         # noqa: SLF001
     buttons = {b.text(): b for b in item.findChildren(toast_mod.QPushButton) if b is not item.close_btn}
-    assert set(buttons) == {"Άνοιγμα browser — ΑΛΦΑ ΙΚΕ", "Ξανά δοκιμή — ΑΛΦΑ ΙΚΕ", "Παράβλεψη"}
-    buttons["Άνοιγμα browser — ΑΛΦΑ ΙΚΕ"].click()
+    assert set(buttons) == {"Άνοιγμα browser", "Ξανά δοκιμή", "Παράβλεψη"}
+    assert any(lbl.text() == "ΑΛΦΑ ΙΚΕ" for lbl in item.findChildren(QLabel))      # ο πελάτης ως ετικέτα, όχι στο κουμπί
+    assert all(b.sizeHint().width() < 300 for b in buttons.values())               # χωρούν στο πλάτος του μηνύματος
+    buttons["Άνοιγμα browser"].click()
     assert opened == ["x"] and host.contains(item)                  # ο browser δεν κλείνει το μήνυμα
-    buttons["Ξανά δοκιμή — ΑΛΦΑ ΙΚΕ"].click()
+    buttons["Ξανά δοκιμή"].click()
     assert retried == [AFM] and not host.contains(item)
 
 
@@ -1337,7 +1389,7 @@ def test_request_waiting_on_client_gives_flash_message_and_notice(window, conn, 
     assert level == "warn" and "εκκρεμότητα" in title and "Μεταβολή εργασιών" in msg and "Β-2" in msg
     opened = []
     monkeypatch.setattr(window, "open_client_detail", lambda afm, tab="": opened.append((afm, tab)))
-    actions[0][1]()
+    actions[0][1][0][1]()
     assert opened == [(AFM, "requests_tab")]
     assert any("εκκρεμότητα από τον πελάτη" in n["text"] for n in notices_m.collect(conn))
     conn.execute("UPDATE aade_requests SET status='Απαντημένο' WHERE id='7'")
@@ -1397,19 +1449,23 @@ def test_client_card_has_requests_and_members_tabs(window, conn, monkeypatch):
     dlg.deleteLater()
 
 
-def test_client_efka_form_remembers_construction_ame_option(window, conn):
+def test_client_efka_form_always_searches_construction_and_opens_ame_list(window, conn):
+    """Χωρίς checkbox «και οικοδομοτεχνικά» — πάντα και τα δύο· η λίστα ΑΜΕ ανοίγει όταν υπάρχουν πολλά (2026-10-29)."""
     from taxmatch import efka
     from taxmatch.gui.client_detail_dialog import ClientDetailDialog
     service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
-    efka.set_(conn, AFM, ame="0020012345", construction_ame="0030098765", search_oikodomotexnika=True)
+    efka.set_(conn, AFM, ame="0020012345", construction_ame="0030098765")
     dlg = ClientDetailDialog(window, AFM)
-    assert dlg.e_oikodomotexnika.isChecked()
+    assert not hasattr(dlg, "e_oikodomotexnika")
     assert dlg.e_ame.text() == "0020012345" and dlg.e_oikodom_ame.text() == "0030098765"
-
-    dlg.e_oikodomotexnika.setChecked(False)
     dlg._save_efka()
-    assert not efka.searches_oikodomotexnika(conn, AFM)
-    assert efka.get_oikodom_ame(conn, AFM) == "0030098765"
+    assert efka.searches_oikodomotexnika(conn, AFM) and efka.get_oikodom_ame(conn, AFM) == "0030098765"
+    efka.upsert_ame(conn, AFM, "0020012345", kind="koinon")
+    dlg._reload()
+    assert dlg.ames_table.isHidden() and dlg.ames_toggle.text() == "▸ Λίστα ΑΜΕ (1)"   # ένα ΑΜΕ: κλειστή
+    efka.upsert_ame(conn, AFM, "0030098765", kind="oikodom")
+    dlg._reload()
+    assert not dlg.ames_table.isHidden() and dlg.ames_toggle.text() == "▾ Λίστα ΑΜΕ (2)"
     dlg.deleteLater()
 
 

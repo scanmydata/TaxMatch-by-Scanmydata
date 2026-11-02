@@ -453,13 +453,22 @@ def declaration_debts(conn: sqlite3.Connection, afm: str) -> list[dict[str, Any]
     return out
 
 
+def _settled_carrier(r: Any) -> bool:
+    """Φορέας ΚΕΑΟ χωρίς τίποτα να οφείλεται («—» σε εκτός/σε ρύθμιση και υπόλοιπο καρτέλας 0,00) — δεν είναι οφειλή·
+    φαίνεται μόνο στο ιστορικό (ρητό αίτημα 2026-10-29)."""
+    if r["kind"] != "carrier" or (r["overdue"] or 0) > 0 or (r["non_overdue"] or 0) > 0 or (r["total"] or 0) > 0:
+        return False
+    balance = ((json.loads(r["details_json"] or "{}").get("totals") or {}).get("balance") or "")
+    return not balance or amount(balance) <= 0
+
+
 def client_debts(conn: sqlite3.Connection, afm: str, include_inactive: bool = False) -> list[dict[str, Any]]:
     """Όλες οι οφειλές του πελάτη για προβολή/email: ΑΑΔΕ (εκτός/σε ρύθμιση), ΚΕΑΟ (φορείς, ρυθμίσεις), ΕΦΚΑ (τρέχουσες
     εισφορές) + χρεωστικές δηλώσεις. Οι μη ενεργές ρυθμίσεις ΚΕΑΟ μόνο με `include_inactive` (ιστορικό)."""
     order = "CASE source WHEN 'aade' THEN 0 WHEN 'keao' THEN 1 ELSE 2 END, kind, overdue DESC, total DESC"
     rows = [{**dict(r), "details": json.loads(r["details_json"] or "{}")}
             for r in conn.execute(f"SELECT * FROM aade_debts WHERE afm=? ORDER BY {order}", (afm,))
-            if include_inactive or r["kind"] != "keao_inactive"]
+            if include_inactive or (r["kind"] != "keao_inactive" and not _settled_carrier(r))]
     # Με πετυχημένη λήψη οφειλών ΑΑΔΕ, ΑΥΤΗ είναι η εικόνα (έχει ήδη τις απλήρωτες δηλώσεις, π.χ. Φ2 με την ίδια
     # ταυτότητα)· οι χρεωστικές δηλώσεις του ελέγχου υποβολών δεν ξέρουν αν πληρώθηκαν — ζωντανά (2026-10-22) έβγαιναν
     # όλες οι πληρωμένες της χρονιάς. Χωρίς λήψη: μόνο του τελευταίου τριμήνου, ως ένδειξη.

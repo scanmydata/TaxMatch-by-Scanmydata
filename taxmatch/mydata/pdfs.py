@@ -106,13 +106,16 @@ def file_name(doc: dict) -> str:
 
 def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optional[Callable[[int, int], None]] = None,
                    fetch: Callable[[str], bytes] = None,
-                   should_cancel: Optional[Callable[[], bool]] = None) -> dict[str, int]:
-    """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει.
+                   should_cancel: Optional[Callable[[], bool]] = None,
+                   marks: Optional[list[str]] = None) -> dict[str, int]:
+    """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει
+    (`marks`: μόνο αυτά — π.χ. «Λήψη PDF» από την καρτέλα παραστατικού).
     Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) δεν ξαναζητούνται."""
     session = requests.Session()
     fetch = fetch or (lambda u: fetch_pdf(u, session))
     rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))]
+        "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))
+        if marks is None or r["mark"] in marks]
     counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0}
     try:
         for i, doc in enumerate(rows, 1):

@@ -147,6 +147,11 @@ def intrastat(conn: sqlite3.Connection, afm: str, ym: str, synced: Optional[set[
             result[name] = False
         else:
             result[name] = None                         # λείπουν μήνες — δεν μπορούμε να πούμε «όχι»
+        # Υπόχρεος (πάνω από το κατώφλι) αλλά ΚΑΜΙΑ κίνηση αγαθών αυτής της ροής τον μήνα (κατεβασμένος στο myDATA) ⇒
+        # δεν υποβάλλεται δήλωση για τον μήνα — η ΕΛ.ΣΤΑΤ δεν ζητά μηδενικές (ρητό αίτημα 2026-10-29: π.χ. 05/2026)
+        if result[name] and ym in synced and total([ym], flows) == 0:
+            result[name] = False
+            reasons.append(f"καμία κίνηση ({label}) τον μήνα στο myDATA")
     vals = [result["arrivals"], result["dispatches"]]
     result["any"] = True if True in vals else (False if vals == [False, False] else None)
     result["reason"] = "; ".join(reasons)
@@ -278,6 +283,45 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
     return _FLAGS_CACHE.get(conn, _month_flags)
 
 
+#: Χαρακτηρισμός Ε3 «Διαφήμιση» — από αυτόν προκύπτει το τέλος διαφήμισης 2% υπέρ δήμων (ρητό αίτημα 2026-11-02)
+ADVERT_E3 = "E3_585_015"
+#: Google Ireland Ltd (ΑΦΜ ΦΠΑ IE6388047V) — 14.3 από αυτήν ⇒ πρόταση «ειδική εισφορά διαδικτύου ΕΔΟΕΑΠ» (ΑΚΕΕΔ)
+GOOGLE_VAT = "6388047V"
+GOOGLE_TYPE = "14.3"
+
+
+def _vat_digits(vat: str) -> str:
+    v = (vat or "").upper().replace(" ", "")
+    return v[2:] if v[:2].isalpha() else v
+
+
+def advert_docs(conn: sqlite3.Connection, afm: str, ym: str) -> list[dict[str, Any]]:
+    """Παραστατικά του μήνα με χαρακτηρισμό E3_585_015 (από την ανάλυση `detail_json` — μόνο όσα κατέβηκαν με ανάλυση)."""
+    out = []
+    for r in conn.execute("SELECT mark, invoice_type, net, detail_json FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
+                          "substr(issue_date,1,7)=? AND detail_json LIKE ?", (afm, ym, f"%{ADVERT_E3}%")):
+        try:
+            det = json.loads(r["detail_json"] or "{}")
+        except ValueError:
+            continue
+        items = det.get("summary_classifications") or [c for line in det.get("lines", [])
+                                                       for c in line.get("classifications", [])]
+        amount = sum(c.get("amount") or 0.0 for c in items if c.get("type") == ADVERT_E3)
+        if amount:
+            out.append({"mark": r["mark"], "invoice_type": r["invoice_type"], "amount": round(amount, 2)})
+    return out
+
+
+def google_ads_docs(conn: sqlite3.Connection, afm: str, ym: str) -> int:
+    """Πλήθος 14.3 (ενδοκοινοτική λήψη υπηρεσιών) από τη Google τον μήνα."""
+    n = 0
+    for r in conn.execute("SELECT issuer_vat, counter_vat FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
+                          "substr(issue_date,1,7)=? AND invoice_type=?", (afm, ym, GOOGLE_TYPE)):
+        if GOOGLE_VAT in (_vat_digits(r["issuer_vat"]), _vat_digits(r["counter_vat"])):
+            n += 1
+    return n
+
+
 def _month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for afm, months in synced_months(conn).items():
@@ -300,6 +344,8 @@ def _month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]
                 "plastic_bag": extra["plastic_bag"] > 0,
                 "plastics": extra["plastics"] > 0,
                 "parepid": extra["parepid"] > 0,
+                "advert": bool(advert_docs(conn, afm, ym)),
+                "google_ads": google_ads_docs(conn, afm, ym) > 0,
             }
     return out
 

@@ -232,6 +232,35 @@ def credentials(conn: sqlite3.Connection) -> Optional[tuple[str, str]]:
     return (user, password) if user and password else None
 
 
+def printable(page: str, start_marker: str = "", end_markers: tuple[str, ...] = ()) -> str:
+    """HTML σελίδας ΕΛ.ΣΤΑΤ → για PDF: χωρίς μενού/εικόνες/σενάρια και με πίνακες στο πλάτος της σελίδας. Οι πίνακες της
+    ΕΛ.ΣΤΑΤ έχουν ΣΤΑΘΕΡΟ πλάτος (720/800 px) και οι τελευταίες στήλες των γραμμών κόβονταν δεξιά (αναφορά χρήστη
+    2026-10-29). `start_marker`/`end_markers`: κρατά μόνο το περιεχόμενο ανάμεσα (π.χ. «ΠΡΟΒΟΛΗ ΔΗΛΩΣΗΣ» → «Εκτύπωση»)."""
+    page = page or ""
+    styles = "".join(re.findall(r"<style\b.*?</style>", page, re.S | re.I))
+    body = page
+    if start_marker and start_marker in page:
+        i = page.index(start_marker)
+        ends = [page.find(m, i) for m in end_markers if page.find(m, i) > 0]
+        body = f"<h3>{_html.escape(start_marker)}</h3>" + page[i + len(start_marker):min(ends) if ends else len(page)]
+        body = re.sub(r"<a\b[^>]*>\s*$", "", body)
+    body = re.sub(r"<(script|style)\b.*?</\1>", "", body, flags=re.S | re.I)
+    body = re.sub(r"<img\b[^>]*>", "", body, flags=re.I)
+    body = re.sub(r"\bwidth\s*=\s*[\"']?\d+[\"']?(?=[\s>])", "width=100%", body, flags=re.I)
+    return (f"<html><head>{styles}<style>table {{ width:100%; }} td {{ font-size:8pt; }}</style></head>"
+            f"<body>{body}</body></html>")
+
+
+def _is_landscape(path: Path) -> bool:
+    """PDF που γράφτηκε με τη σωστή (οριζόντια) διάταξη — τα παλιά (κάθετα, κομμένα) ξαναφτιάχνονται μία φορά."""
+    try:
+        from pypdf import PdfReader
+        box = PdfReader(str(path)).pages[0].mediabox
+        return float(box.width) > float(box.height)
+    except Exception:                                   # noqa: BLE001 — άκυρο αρχείο = ξανά λήψη
+        return False
+
+
 def save_pdfs(http: _HyperHttp, archive: dict[str, Any], afm: str, rows: list[dict[str, str]], folder: Path) -> list[str]:
     """PDF ανά υποβληθείσα δήλωση: η «Προβολή δήλωσης» και η «Βεβαίωση παραλαβής» (σελίδες HTML της ΕΛ.ΣΤΑΤ → PDF),
     όπως ο runner. Επιστρέφει τα αρχεία που γράφτηκαν."""
@@ -246,18 +275,20 @@ def save_pdfs(http: _HyperHttp, archive: dict[str, Any], afm: str, rows: list[di
         if len(args) < 3:
             continue
         base = f"INTRASTAT_{afm}_{r['protocol'].replace('/', '_')}_{'AFIKSI' if _flow_of(r['flow']) == 'arrivals' else 'APOSTOLI'}"
-        if (folder / f"{base}_ΔΗΛΩΣΗ.pdf").exists():
+        if (folder / f"{base}_ΔΗΛΩΣΗ.pdf").exists() and _is_landscape(folder / f"{base}_ΔΗΛΩΣΗ.pdf"):
             continue                                    # μία φορά ανά δήλωση (όπως τα PDF της ΑΑΔΕ)
         try:
             view = _post(http, url, page, int(args[0]), int(args[1]), args[2])
-            write_pdf(view["text"], folder / f"{base}_ΔΗΛΩΣΗ.pdf", f"Intrastat {r['protocol']}")
+            write_pdf(printable(view["text"], "ΠΡΟΒΟΛΗ ΔΗΛΩΣΗΣ", ("Παραλαβή Βεβαίωσης", "javascript:window.print")),
+                      folder / f"{base}_ΔΗΛΩΣΗ.pdf", f"Intrastat {r['protocol']}", landscape=True)
             saved.append(str(folder / f"{base}_ΔΗΛΩΣΗ.pdf"))
             cert = next((_attr(a.group(1), "href") for a in re.finditer(r"<a\b([^>]*)>(.*?)</a>", view["text"], re.S | re.I)
                          if _text(a.group(2)) == "Παραλαβή Βεβαίωσης"), "")
             cargs = _post_args(cert)
             if len(cargs) >= 3:
                 bev = _post(http, view["url"], view["text"], int(cargs[0]), int(cargs[1]), cargs[2])
-                write_pdf(bev["text"], folder / f"{base}_ΒΕΒΑΙΩΣΗ.pdf", f"Βεβαίωση Intrastat {r['protocol']}")
+                write_pdf(printable(bev["text"]), folder / f"{base}_ΒΕΒΑΙΩΣΗ.pdf", f"Βεβαίωση Intrastat {r['protocol']}",
+                          landscape=True)
                 saved.append(str(folder / f"{base}_ΒΕΒΑΙΩΣΗ.pdf"))
         except Exception as exc:                        # noqa: BLE001 — το PDF είναι επιπλέον
             log.warning("intrastat pdf %s %s: %s", afm, r["protocol"], exc)

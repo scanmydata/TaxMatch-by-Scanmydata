@@ -12,3 +12,5 @@ tzdata>=2024.1
 # Flask: ΜΟΝΟ για το test suite (tests/test_web.py και συγγενή) και το εσωτερικό `taxmatch --serve` (ανάπτυξη) —
 # η πραγματική εφαρμογή είναι native (taxmatch/gui/), όχι Flask/webview.
 Flask>=3.0,<4
+# Αυτόματη λύση captcha (ΑΚΕΕΔ ΕΔΟΕΑΠ — advertising.py): onnxruntime + OpenCV, ~200 MB στο πακέτο
+ddddocr>=1.6

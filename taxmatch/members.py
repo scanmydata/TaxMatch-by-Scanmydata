@@ -253,6 +253,47 @@ def short_role(role: str) -> str:
     return "Μέλος"
 
 
+def legal_representative(conn: sqlite3.Connection, company: str) -> Optional[dict[str, Any]]:
+    """Ο νόμιμος εκπρόσωπος της εταιρείας από τα (ενεργά) μέλη του Μητρώου — αλλιώς ο διαχειριστής."""
+    rows = [dict(r) for r in conn.execute("SELECT * FROM company_members WHERE company_afm=?", (company,))]
+    for wanted in ("Νόμιμος εκπρόσωπος", "Διαχειριστής"):
+        hit = next((r for r in rows if short_role(r.get("role", "")) == wanted), None)
+        if hit:
+            return hit
+    return None
+
+
+def sync_aml_rep(conn: sqlite3.Connection, company: str) -> bool:
+    """Δέουσα επιμέλεια ↔ πελάτες (ρητό αίτημα 2026-10-29): ο νόμιμος εκπρόσωπος του φακέλου συμπληρώνεται/ενημερώνεται
+    από τα μέλη της ανάκτησης στοιχείων — και, αν ο εκπρόσωπος είναι ο ίδιος πελάτης, από τα στοιχεία του (email,
+    τηλέφωνο, διεύθυνση). Ό,τι έγραψε ο χρήστης για ΑΛΛΟ πρόσωπο δεν αλλάζει· κενά πεδία μόνο συμπληρώνονται.
+    True αν άλλαξε κάτι."""
+    from .aml import store as aml_store
+    rep_member = legal_representative(conn, company)
+    if not rep_member:
+        return False
+    profile = aml_store.get_profile(conn, company)
+    rep = dict(profile["rep"])
+    if rep.get("afm") and rep["afm"] != rep_member["member_afm"]:
+        return False                                    # ο χρήστης όρισε άλλον εκπρόσωπο — δεν τον πατάμε
+    client = conn.execute("SELECT name, email, mobile, phone, address FROM businesses WHERE afm=?",
+                          (rep_member["member_afm"],)).fetchone()
+    found = {"afm": rep_member["member_afm"], "name": (client["name"] if client else "") or rep_member.get("name", ""),
+             "role": short_role(rep_member.get("role", "")),
+             "email": client["email"] if client else "", "phone": (client["mobile"] or client["phone"]) if client else "",
+             "address": client["address"] if client else ""}
+    changed = False
+    for key, value in found.items():
+        if value and (not rep.get(key) or key in ("afm", "name")) and rep.get(key) != value:
+            rep[key] = value
+            changed = True
+    if changed:
+        aml_store.save_profile(conn, company, pep_status=profile["pep_status"],
+                               relationship_start=profile["relationship_start"], relationship_end=profile["relationship_end"],
+                               purpose=profile["purpose"], kyc=profile["kyc"], notes=profile["notes"], rep=rep)
+    return changed
+
+
 def remove(conn: sqlite3.Connection, company: str, member_afm: str) -> None:
     conn.execute("DELETE FROM company_members WHERE company_afm=? AND member_afm=?", (company, member_afm))
     snapshot(conn, company)

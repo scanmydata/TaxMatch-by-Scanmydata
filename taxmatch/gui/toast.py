@@ -54,13 +54,30 @@ class _ToastItem(QFrame):
             self.bar.setFormat("%p%")
             col.addWidget(self.bar)
         closing = []
-        for action in actions or []:                     # κουμπιά ενεργειών (π.χ. «Συνέχεια στον browser»)
-            text, fn = action[0], action[1]              # 3ο στοιχείο True: το μήνυμα κλείνει με το κλικ
-            btn = QPushButton(text)
-            btn.clicked.connect(fn)
+
+        def button(action) -> QPushButton:
+            btn = QPushButton(action[0])                 # 3ο στοιχείο True: το μήνυμα κλείνει με το κλικ
+            btn.clicked.connect(action[1])
             if len(action) > 2 and action[2]:
                 closing.append(btn)
-            col.addWidget(btn)
+            return btn
+        for action in actions or []:                     # κουμπιά ενεργειών (π.χ. «Συνέχεια στον browser»)
+            if isinstance(action[1], list):
+                # ομάδα: ετικέτα (π.χ. ο πελάτης) + σύντομα κουμπιά δίπλα-δίπλα — μακριά κείμενα σε κουμπιά κόβονταν
+                # στο πλάτος του μηνύματος (αναφορά χρήστη 2026-10-29)
+                if action[0]:
+                    head = QLabel(action[0])
+                    head.setWordWrap(True)
+                    head.setStyleSheet(f"color:{CURRENT.txt}; border:none; background:transparent; font-weight:600;")
+                    col.addWidget(head)
+                line = QHBoxLayout()
+                line.setSpacing(6)
+                for sub in action[1]:
+                    line.addWidget(button(sub))
+                line.addStretch()
+                col.addLayout(line)
+            else:
+                col.addWidget(button(action))
         row.addLayout(col, 1)
         self.close_btn = QPushButton("×")
         for btn in closing:
@@ -219,7 +236,8 @@ def toast(window: QWidget, message: str, level: str = "ok", ms: int | None = Non
         ms += 2000                                       # ήρθε από παράθυρο που δεν βλέπει πια ο χρήστης: λίγο περισσότερο
     if actions and ms:
         ms = max(ms, 20000)                              # με κουμπιά: χρόνος να τα πατήσει ο χρήστης
-    # `actions`: [(κείμενο, συνάρτηση)] ή [(κείμενο, συνάρτηση, True)] — το True κλείνει το μήνυμα με το κλικ
+    # `actions`: [(κείμενο, συνάρτηση)] ή [(κείμενο, συνάρτηση, True)] — το True κλείνει το μήνυμα με το κλικ —
+    # ή ομάδες [(ετικέτα, [(κείμενο, συνάρτηση[, True]), …])]: ετικέτα + σύντομα κουμπιά στην ίδια γραμμή
     _host_for(target).add(message, level, ms, title=title or context, actions=actions)
 
 

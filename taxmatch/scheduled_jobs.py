@@ -116,21 +116,29 @@ def _taxis_afms(conn: sqlite3.Connection) -> list[str]:
         "WHERE c.taxis_user<>'' AND c.taxis_pass<>'' ORDER BY c.afm")]
 
 
-def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int], want_pdf: bool = False) -> dict[str, Any]:
+def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int], want_pdf: bool = False,
+                            ask_captcha: Optional[Callable[[bytes], str]] = None) -> dict[str, Any]:
     """Πλήρης έλεγχος υποβολών ενός πελάτη (ίδιος για GUI και χρονοπρογραμματισμό): ΑΑΔΕ, ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ ανά ΑΜΕ,
-    πύλες τελών (Plastic, dae.govapp.gr) και Intrastat ΕΛ.ΣΤΑΤ με τους κωδικούς του γραφείου."""
-    from . import easycheck, efka, fee_portals, intrastat
+    πύλες τελών (Plastic, dae.govapp.gr), Intrastat ΕΛ.ΣΤΑΤ με τους κωδικούς του γραφείου, ειδική εισφορά διαδικτύου
+    ΕΔΟΕΑΠ (ΑΚΕΕΔ — `ask_captcha` για τον κωδικό ασφαλείας) και τέλος διαφήμισης ΤΠΔ (της ΠΡΟΗΓΟΥΜΕΝΗΣ χρήσης,
+    πληρώνεται τον Ιούλιο)."""
+    from . import advertising, easycheck, efka, fee_portals, intrastat
     result: dict[str, Any] = {"ok": True, "entries": []}
     for y in years:
         r = easycheck.check_client(conn, afm, y, want_pdf=want_pdf)
         result["ok"] = result["ok"] and r.get("ok")
         result["entries"] += r.get("entries", [])
-        result["entries"] += efka.check_apd_entries(conn, afm, y)
+        result["entries"] += efka.check_apd_entries(conn, afm, y, want_pdf=want_pdf)
         fees = fee_portals.check_entries(conn, afm, y)
         fees += intrastat.check_entries(conn, afm, y, want_pdf=want_pdf)
+        fees += advertising.check_akeed(conn, afm, y, ask_captcha=ask_captcha, want_pdf=want_pdf)
         if fees:
             easycheck.store_results(conn, afm, y, fees)
             result["entries"] += fees
+        tpd = advertising.check_tpd(conn, afm, y - 1, want_pdf=want_pdf)
+        if tpd:
+            easycheck.store_results(conn, afm, y - 1, tpd)
+            result["entries"] += tpd
     return result
 
 

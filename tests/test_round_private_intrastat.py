@@ -99,8 +99,12 @@ def test_intrastat_previous_year_uses_current_year_threshold(conn, monkeypatch):
     res = analysis.intrastat(conn, AFM, "2026-01", synced)
     assert res["arrivals"] is not True                    # 216.000 > 200.000 (2025) αλλά < 250.000 (2026)
     flows.update({f"2025-{m:02d}": {"goods_in": 22_000.0} for m in range(1, 13)})        # 264.000
+    flows["2026-01"] = {"goods_in": 5_000.0}
     res = analysis.intrastat(conn, AFM, "2026-01", synced, {})
     assert res["arrivals"] is True and res["flows_label"] == "αφίξεις"
+    # υπόχρεος, αλλά μήνας ΧΩΡΙΣ αφίξεις στο myDATA ⇒ καμία δήλωση τον μήνα (ρητό αίτημα: π.χ. 05/2026)
+    res = analysis.intrastat(conn, AFM, "2026-05", synced | {"2026-02", "2026-03", "2026-04", "2026-05"}, {})
+    assert res["arrivals"] is False and "καμία κίνηση" in res["reason"]
 
 
 _ARCHIVE = """<html><form method="post" action="history.aspx"><input type="hidden" name="io1" value="">
@@ -218,3 +222,30 @@ def test_teka_only_when_chosen_in_profile():
     assert obligations.liability("apd_teka", biz, "2026-08")[0] == "no"
     biz["teka"] = 1
     assert obligations.liability("apd_teka", biz, "2026-08")[0] == "yes"
+
+
+# ---------------------------------------------------------------- Δέουσα επιμέλεια ↔ μέλη/πελάτες (2026-10-29)
+def test_aml_legal_representative_follows_members_and_uses_member_credentials(conn):
+    from taxmatch import members
+    from taxmatch.aml import retrieval, store
+    from taxmatch.business_profiles import credentials
+    rep_afm = "123456783"
+    service.add(conn, AFM, "ΑΛΦΑ ΟΕ")
+    members.store(conn, AFM, [{"afm": rep_afm, "name": "ΠΑΠΑΣ ΓΙΑΝΝΗΣ", "role": "ΝΟΜΙΜΟΣ ΕΚΠΡΟΣΩΠΟΣ"}], "aade")
+    members.sync_member_clients(conn, AFM, check_business=False)
+    conn.execute("UPDATE businesses SET email='p@x.gr' WHERE afm=?", (rep_afm,))
+    assert members.sync_aml_rep(conn, AFM) is True
+    rep = store.get_profile(conn, AFM)["rep"]
+    assert (rep["afm"], rep["role"], rep["email"]) == (rep_afm, "Νόμιμος εκπρόσωπος", "p@x.gr")
+    assert retrieval.get_rep_credentials(conn, AFM) is None
+    credentials.set_(conn, rep_afm, "repuser", "reppass")
+    assert retrieval.get_rep_credentials(conn, AFM) == ("repuser", "reppass")   # οι κωδικοί του ίδιου του εκπροσώπου
+    assert members.sync_aml_rep(conn, AFM) is False                             # τίποτα νέο
+
+
+def test_aml_files_list_has_no_duplicates(conn, tmp_path):
+    from taxmatch.aml import retrieval
+    service.add(conn, AFM, "ΑΛΦΑ ΟΕ")
+    for _ in range(2):
+        retrieval.save_file(conn, AFM, "registry", b"%PDF-1.4 x" * 100, "ΑΛΦΑ ΟΕ")
+    assert len(retrieval.list_files(conn, AFM)) == 1

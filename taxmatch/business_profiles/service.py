@@ -475,6 +475,7 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         try:
             # τα μέλη γίνονται και εγγραφές πελατών + έλεγχος ατομικής επιχείρησης (RgWsPublic2, αν υπάρχουν κωδικοί)
             members_mod.sync_member_clients(conn, afm)
+            members_mod.sync_aml_rep(conn, afm)          # νόμιμος εκπρόσωπος του φακέλου Δέουσας επιμέλειας
         except Exception as exc:                       # noqa: BLE001 — τα μέλη είναι επιπλέον· ποτέ αποτυχία ανάκτησης
             log.warning("μέλη %s: %s", afm, exc)
     if amka_fetch is None and aade_fetch is lookup_aade.fetch_company_profile:     # πραγματική ανάκτηση (όχι tests)

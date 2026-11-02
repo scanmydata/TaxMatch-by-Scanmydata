@@ -21,10 +21,14 @@ if (ROOT / "packaging" / "manual.pdf").exists():          # το χτίζει τ
     datas.append((str(ROOT / "packaging" / "manual.pdf"), "."))
 datas += collect_data_files("feedparser")
 datas += collect_data_files("tzdata")            # ζώνες ώρας (Europe/Athens) για το αρχείο καταγραφής
+# ddddocr: αυτόματη λύση captcha στην ΑΚΕΕΔ ΕΔΟΕΑΠ (advertising.py — ρητό αίτημα 2026-11-02). Μοντέλα onnx
+# (common_old = προεπιλογή, common = beta)· το common_det (ανίχνευση αντικειμένων) δεν χρειάζεται — −20 MB.
+datas += collect_data_files("ddddocr", excludes=["**/common_det.onnx", "**/README.md"])
 
 hiddenimports = (
     collect_submodules("feedparser")
     + ["openpyxl.cell._writer", "PySide6.QtSvg", "PySide6.QtNetwork"]
+    + collect_submodules("ddddocr")
 )
 
 a = Analysis(
@@ -36,7 +40,8 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     # Μόνο PySide6-essentials χρειάζεται — τα υπόλοιπα bindings Qt, και ό,τι δεν αγγίζει καθόλου η εφαρμογή.
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "PIL", "pytest", "PyQt5", "PyQt6", "PySide2", "gi", "qtpy",
+    # numpy / PIL / cv2 / onnxruntime ΧΡΕΙΑΖΟΝΤΑΙ πλέον (ddddocr) — δεν εξαιρούνται
+    excludes=["tkinter", "matplotlib", "pandas", "pytest", "PyQt5", "PyQt6", "PySide2", "gi", "qtpy",
              "webview", "clr_loader", "pythonnet"],
     noarchive=False,
 )

@@ -325,6 +325,9 @@ class MainWindow(QMainWindow):
         self._setup_tray()
         self.reload_all()
         QTimer.singleShot(400, self._maybe_first_run_tour)
+        # captcha από τον χρήστη για ελέγχους στο παρασκήνιο (ΑΚΕΕΔ ΕΔΟΕΑΠ) — gui/captcha.py
+        from .captcha import CaptchaBridge
+        self.captcha = CaptchaBridge(self)
         self._sched_seen: Optional[str] = None
         try:                                                   # παλιό task (π.χ. όριο 1 ώρας) → ξαναγράφεται
             scheduler_win.refresh_if_outdated(self.conn, settings_store.get(self.conn, "daily_time") or "08:00")
@@ -523,6 +526,10 @@ class MainWindow(QMainWindow):
             notices_mod.mark_parepid_read(self.conn)
             toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη «Κύριος ΚΑΔ» ώσπου να ανοίξετε "
                         "την καρτέλα τους — και βρίσκονται με το φίλτρο «Πιθανοί υπόχρεοι τέλους παρεπιδημούντων».", "ok")
+        if key == "google":
+            from .. import advertising
+            settings_store.set_value(self.conn, "notice_google_read", ",".join(advertising.google_candidates(self.conn)))
+            toast(self, "Η πρόταση κρύφτηκε — η επιλογή «Ειδική εισφορά διαδικτύου» μένει στο Προφίλ κάθε πελάτη.", "ok")
         if key == "vat_quarter":
             notices_mod.mark_vat_quarter_read(self.conn)
             toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη ΦΠΑ ώσπου να ανοίξετε την "
@@ -1136,7 +1143,8 @@ class MainWindow(QMainWindow):
         def work(report, cancelled):
             def one(conn, afm):
                 # ΑΑΔΕ + ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ + πύλες τελών + Intrastat — ίδια συνάρτηση με τον χρονοπρογραμματισμό
-                return scheduled_jobs.submission_check_client(conn, afm, years, want_pdf=want_pdf)
+                return scheduled_jobs.submission_check_client(conn, afm, years, want_pdf=want_pdf,
+                                                              ask_captcha=self.captcha.ask)
 
             def each(afm, n, result):
                 state["done"] = n
@@ -1185,8 +1193,8 @@ class MainWindow(QMainWindow):
         if not items:
             return
         names = self._client_names([h["afm"] for h in items])
-        actions = [(f"Συνέχεια στον browser — {names.get(h['afm'], h['afm'])} · {h['label']}",
-                    lambda _c=False, h=h: self.open_handoff(h)) for h in items[:4]]
+        actions = [(f"{names.get(h['afm'], h['afm'])} · {h['label']}",
+                    [("Συνέχεια στον browser", lambda _c=False, h=h: self.open_handoff(h))]) for h in items[:4]]
         more = f" (και άλλοι {len(items) - 4} — από την καρτέλα κάθε πελάτη)" if len(items) > 4 else ""
         toast(window or self, f"{len(items)} {'έλεγχος σταμάτησε' if len(items) == 1 else 'έλεγχοι σταμάτησαν'} μετά "
                               f"τη σύνδεση (π.χ. επιβεβαίωση στοιχείων στον e-ΕΦΚΑ). Συνεχίστε στον browser από το ίδιο "
@@ -1202,9 +1210,9 @@ class MainWindow(QMainWindow):
         actions: list = []
         for h in items[:3]:
             name = names.get(h["afm"], h["afm"])
-            actions.append((f"Άνοιγμα browser — {name}", lambda _c=False, h=h: self.open_handoff(h)))
-            actions.append((f"Ξανά δοκιμή — {name}", lambda _c=False, a=h["afm"]: self.retry_ame(a, window), True))
-        actions.append(("Παράβλεψη", lambda _c=False: None, True))
+            actions.append((name, [("Άνοιγμα browser", lambda _c=False, h=h: self.open_handoff(h)),
+                                   ("Ξανά δοκιμή", lambda _c=False, a=h["afm"]: self.retry_ame(a, window), True)]))
+        actions.append(("", [("Παράβλεψη", lambda _c=False: None, True)]))
         more = f"\n… και άλλοι {len(items) - 3} (καρτέλα πελάτη → «Συνέχεια στον browser»)" if len(items) > 3 else ""
         toast(window or self, "Ο e-ΕΦΚΑ ζητά ενέργεια μετά τη σύνδεση (συνήθως επιβεβαίωση στοιχείων επικοινωνίας). "
                               "Ανοίξτε τον browser — είστε ήδη συνδεδεμένοι — ολοκληρώστε την επιβεβαίωση και πατήστε "
@@ -1248,8 +1256,8 @@ class MainWindow(QMainWindow):
         lines = [f"• {r['name'] or r['afm']} — {r['process'] or r['topic'] or 'αίτημα'}"
                  + (f" (υπόθεση {r['case_no']})" if r["case_no"] else "") for r in rows[:5]]
         more = f"\n… και άλλα {len(rows) - 5}" if len(rows) > 5 else ""
-        actions = [(f"Άνοιγμα — {r['name'] or r['afm']}",
-                    lambda _c=False, a=r["afm"]: self.open_client_detail(a, tab="requests_tab"))
+        actions = [(r["name"] or r["afm"], [("Άνοιγμα αιτημάτων",
+                    lambda _c=False, a=r["afm"]: self.open_client_detail(a, tab="requests_tab"))])
                    for r in list({r["afm"]: r for r in rows}.values())[:3]]
         toast(window or self, "\n".join(lines) + more, "warn", title=(
             f"{len(rows)} {'αίτημα' if len(rows) == 1 else 'αιτήματα'} ΑΑΔΕ σε εκκρεμότητα από τον πελάτη — "

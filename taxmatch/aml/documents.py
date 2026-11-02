@@ -33,6 +33,15 @@ td, th { border: 1px solid #999; padding: 4px 6px; vertical-align: top; } th { b
 """
 _BOX = "☐"
 _CHECK = "☒"
+# Κενά για ΧΕΙΡΟΓΡΑΦΗ συμπλήρωση (ρητό αίτημα 2026-10-29): γραμμές αντί για άδεια κελιά — το QTextDocument αγνοεί
+# ύψη κελιών στο CSS, οπότε το ύψος μπαίνει με περιεχόμενο (γραμμές / αλλαγές γραμμής).
+_LINE = "<span style='color:#777'>" + "_" * 58 + "</span>"
+_SHORT = "<span style='color:#777'>" + "_" * 22 + "</span>"
+_TALL = "<br>&nbsp;<br>&nbsp;"
+
+
+def _lines(n: int) -> str:
+    return "<br><br>".join([_LINE] * n)
 
 
 def _e(value: Any) -> str:
@@ -53,7 +62,13 @@ def _page(title: str, subtitle: str, body: str) -> str:
 
 
 def _rows(pairs: Iterable[tuple[str, Any]]) -> str:
-    return "<table>" + "".join(f"<tr><th width='34%'>{_e(k)}</th><td>{_e(v) or '&nbsp;'}</td></tr>" for k, v in pairs) + "</table>"
+    """Ετικέτα / τιμή· κενή τιμή = γραμμή για χειρόγραφη συμπλήρωση (όχι άδειο κελί)."""
+    return "<table>" + "".join(f"<tr><th width='34%'>{_e(k)}</th><td>{_e(v) or ('<br>' + _LINE)}</td></tr>"
+                               for k, v in pairs) + "</table>"
+
+
+def _blank_cells(n: int) -> str:
+    return "".join(f"<td>{_TALL}</td>" for _ in range(n))
 
 
 def _client(conn: sqlite3.Connection, afm: str) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -69,18 +84,23 @@ def _client(conn: sqlite3.Connection, afm: str) -> tuple[dict[str, Any], dict[st
 def declaration_html(conn: sqlite3.Connection, afm: str) -> str:
     b, p, kind = _client(conn, afm)
     legal = kind in ("company", "partnership", "public", "trust")
+    rep = p.get("rep") or {}
     pep_rows = "".join(f"<tr><td>{_CHECK if p['pep_status'] == key else _BOX} {_e(label)}</td></tr>"
                        for key, label in model.PEP_STATUS if key != "unknown")
+    known_ubos = "".join(
+        f"<tr><td>{_e(u.get('name'))}</td><td>{_e(u.get('afm'))}</td><td>{_e(u.get('nationality'))}</td>"
+        f"<td>{_e(' / '.join(x for x in (str(u.get('percent') or ''), u.get('control') or '') if x))}</td>"
+        f"<td>{_e(dict(model.PEP_STATUS).get(u.get('pep', ''), ''))}</td></tr>" for u in p.get("ubos") or [])
     ubo = ("<h2>3. Πραγματικοί δικαιούχοι (φυσικά πρόσωπα με >25% ή έλεγχο — άρθρο 3 παρ. 17)</h2>"
            "<table><tr><th>Ονοματεπώνυμο</th><th>ΑΦΜ</th><th>Ιθαγένεια</th><th>Ποσοστό / τρόπος ελέγχου</th><th>ΠΕΠ;</th></tr>"
-           + "<tr><td class='blank'></td><td></td><td></td><td></td><td></td></tr>" * 4 + "</table>"
+           + known_ubos + f"<tr>{_blank_cells(5)}</tr>" * max(2, 4 - len(p.get("ubos") or [])) + "</table>"
            + (f"<p class='muted'>Σημείωση γραφείου: {_e(UBO_LABEL.get(p['ubo_state'], ''))} {_e(p['ubo_notes'])}</p>"
               if p["ubo_state"] or p["ubo_notes"] else "")) if legal else \
         "<h2>3. Πραγματικός δικαιούχος</h2><p>Δηλώνω ότι ενεργώ για δικό μου λογαριασμό και ότι πραγματικός δικαιούχος " \
         f"είμαι ο ίδιος/η ίδια. {_BOX} Ενεργώ για λογαριασμό τρίτου: ______________________________</p>"
     tx = "".join(f"<tr><td>{_e(TX_LABELS['amount'].get(t['amount'], ''))}</td><td>{_e(TX_LABELS['channel'].get(t['channel'], ''))}</td>"
                  f"<td>{_e(TX_LABELS['frequency'].get(t['frequency'], ''))}</td><td>{_e(TX_LABELS['country'].get(t['country'], ''))}</td></tr>"
-                 for t in p["transactions"]) or "<tr><td class='blank'></td><td></td><td></td><td></td></tr>" * 2
+                 for t in p["transactions"]) or f"<tr>{_blank_cells(4)}</tr>" * 3
     body = (
         "<p>Σύμφωνα με τον ν. 4557/2018 (άρθρα 13 και 18) το γραφείο οφείλει να ταυτοποιεί τους πελάτες του, να "
         "εξακριβώνει τους πραγματικούς δικαιούχους και να γνωρίζει τον σκοπό της συνεργασίας. Παρακαλούμε ελέγξτε, "
@@ -90,26 +110,29 @@ def declaration_html(conn: sqlite3.Connection, afm: str) -> str:
             ("Είδος", CLIENT_KIND_LABEL.get(kind, "")), ("Νομική μορφή", b.get("legal_form", "")),
             ("Διεύθυνση έδρας/κατοικίας", b.get("address", "")),
             ("Κύρια δραστηριότητα (ΚΑΔ)", f"{b.get('kad_main_code', '')} {b.get('kad_main_desc', '')}".strip()),
-            ("Αρ. ταυτότητας/διαβατηρίου" + (" νόμιμου εκπροσώπου" if legal else ""), ""),
-            ("Τηλέφωνο / email", ""),
+            ("Αρ. ταυτότητας/διαβατηρίου" + (" νόμιμου εκπροσώπου" if legal else ""), rep.get("id_number", "")),
+            ("Τηλέφωνο / email", " · ".join(x for x in (b.get("mobile") or b.get("phone") or "", b.get("email") or "") if x)),
         ])
-        + ("<h2>2. Νόμιμος εκπρόσωπος</h2>" + _rows([("Ονοματεπώνυμο", ""), ("ΑΦΜ", ""), ("Ιδιότητα", ""),
-                                                      ("Αρ. ταυτότητας/διαβατηρίου", "")]) if legal else "")
+        + ("<h2>2. Νόμιμος εκπρόσωπος</h2>" + _rows([
+            ("Ονοματεπώνυμο", rep.get("name", "")), ("ΑΦΜ", rep.get("afm", "")), ("Ιδιότητα", rep.get("role", "")),
+            ("Αρ. ταυτότητας/διαβατηρίου", rep.get("id_number", "")), ("Διεύθυνση κατοικίας", rep.get("address", "")),
+            ("Τηλέφωνο / email", " · ".join(x for x in (rep.get("phone", ""), rep.get("email", "")) if x))]) if legal else "")
         + ubo
         + "<h2>4. Πολιτικώς εκτεθειμένο πρόσωπο (άρθρο 3 παρ. 9–11, άρθρο 18)</h2>"
           "<p>Είμαι (ή κάποιος πραγματικός δικαιούχος είναι) πολιτικώς εκτεθειμένο πρόσωπο, μέλος οικογένειας ή στενός "
           "συνεργάτης τέτοιου προσώπου:</p><table>" + pep_rows + "</table>"
         + "<h2>5. Σκοπός και φύση της συνεργασίας — προέλευση κεφαλαίων</h2>"
-          f"<div class='box'>{_e(p['purpose']) or '<br><br>'}</div>"
+          f"<div class='box'>{_e(p['purpose']) or _lines(4)}</div>"
           "<p>Κύρια ρεύματα συναλλαγών/εσόδων:</p><table><tr><th>Ποσό (ετήσιο)</th><th>Μέσο πληρωμής</th><th>Συχνότητα</th>"
           f"<th>Χώρα</th></tr>{tx}</table>"
-          f"<p>Τρόπος εξόφλησης αμοιβής γραφείου: {_e(dict(FEE_PAYMENTS).get(p['fee_payment'], '')) or '________________'}</p>"
+          f"<p>Τρόπος εξόφλησης αμοιβής γραφείου: {_e(dict(FEE_PAYMENTS).get(p['fee_payment'], '')) or _SHORT}</p>"
         + "<h2>6. Δεσμεύσεις</h2><p>Δηλώνω ότι τα στοιχεία είναι αληθή και πλήρη, ότι θα ενημερώνω το γραφείο για κάθε "
           "μεταβολή τους (ιδίως εκπροσώπησης, μετόχων/εταίρων και πραγματικών δικαιούχων) και ότι γνωρίζω πως, αν δεν "
           "παρασχεθούν τα στοιχεία που απαιτεί ο νόμος, το γραφείο δεν μπορεί να συνάψει ή να συνεχίσει τη συνεργασία "
           "(άρθρο 13 παρ. 2). Ενημερώθηκα ότι τα προσωπικά δεδομένα τηρούνται για 5 έτη μετά τη λήξη της συνεργασίας "
           "αποκλειστικά για την πρόληψη του ξεπλύματος (άρθρο 30 ν. 4557/2018 και ΓΚΠΔ).</p>"
-          "<br><table><tr><td width='50%'>Τόπος / ημερομηνία<br><br></td><td>Υπογραφή (και σφραγίδα)<br><br><br></td></tr></table>"
+          f"<br><table><tr><td width='50%'>Τόπος / ημερομηνία<br><br>{_SHORT}</td>"
+          f"<td>Υπογραφή (και σφραγίδα)<br><br><br><br>{_SHORT}</td></tr></table>"
     )
     return _page("ΔΗΛΩΣΗ ΠΑΡΟΧΗΣ ΣΤΟΙΧΕΙΩΝ ΠΕΛΑΤΗ", "Πρόληψη νομιμοποίησης εσόδων από εγκληματικές δραστηριότητες", body)
 
@@ -147,12 +170,13 @@ def questionnaire_html(conn: sqlite3.Connection, afm: str) -> str:
     body = (f"<p>Πελάτης: <b>{_e(b['name'])}</b> — ΑΦΜ {_e(b['afm'])} — {_e(CLIENT_KIND_LABEL.get(kind, ''))}</p>"
             "<p>Το ερωτηματολόγιο βοηθά το γραφείο να εκτιμήσει τον κίνδυνο της συνεργασίας, όπως ορίζει ο "
             "ν. 4557/2018 (άρθρο 13). Απαντήστε όσο πιο συγκεκριμένα γίνεται.</p>"
-            + "".join(f"<h2>{i}. {_e(q)}</h2><div class='box'><br><br><br></div>" for i, q in enumerate(qs, 1))
+            + "".join(f"<h2>{i}. {_e(q)}</h2><div class='box'>{_lines(4)}</div>" for i, q in enumerate(qs, 1))
             + "<h2>Έγγραφα που παρακαλούμε να προσκομίσετε</h2><table>"
             + "".join(f"<tr><td>{_CHECK if k in p['docs'] else _BOX} {_e(t)}"
                       f"{'' if k in required_documents(b.get('legal_form', ''), kind) else ' (αν ζητηθεί)'}</td></tr>"
                       for k, t in documents_for(b.get("legal_form", ""), kind))
-            + "</table><br><table><tr><td width='50%'>Ημερομηνία<br><br></td><td>Υπογραφή<br><br><br></td></tr></table>")
+            + f"</table><br><table><tr><td width='50%'>Ημερομηνία<br><br>{_SHORT}</td>"
+              f"<td>Υπογραφή<br><br><br><br>{_SHORT}</td></tr></table>")
     return _page("ΕΡΩΤΗΜΑΤΟΛΟΓΙΟ ΓΝΩΡΙΜΙΑΣ ΠΕΛΑΤΗ (KYC)", "Δέουσα επιμέλεια — ν. 4557/2018", body)
 
 
@@ -282,14 +306,17 @@ def case_file_html(conn: sqlite3.Connection, case_id: int) -> str:
 
 
 # ------------------------------------------------------------------ PDF
-def write_pdf(html_text: str, target: Path, title: str) -> Path:
-    """Απαιτεί ενεργό QGuiApplication (η εφαρμογή το έχει πάντα· στα tests αρκεί offscreen)."""
+def write_pdf(html_text: str, target: Path, title: str, landscape: bool = False) -> Path:
+    """Απαιτεί ενεργό QGuiApplication (η εφαρμογή το έχει πάντα· στα tests αρκεί offscreen). `landscape`: οριζόντια
+    σελίδα — για φαρδιούς πίνακες πυλών (π.χ. γραμμές δήλωσης Intrastat), που αλλιώς κόβονται δεξιά."""
     from PySide6.QtCore import QMarginsF, QSizeF
     from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QTextDocument
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     writer = QPdfWriter(str(target))
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    if landscape:
+        writer.setPageOrientation(QPageLayout.Orientation.Landscape)
     writer.setPageMargins(QMarginsF(16, 14, 16, 14), QPageLayout.Unit.Millimeter)
     writer.setTitle(title)
     writer.setCreator("TaxMatch by ScanMyData")

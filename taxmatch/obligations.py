@@ -268,6 +268,22 @@ RULES: list[Rule] = [
          "περιόδου (μήνας ή τρίμηνο, όπως ο ΦΠΑ). Μόνο αν τιμολογεί τα τέλη (κατηγορίες τελών 18–22 στο myDATA).",
          "https://dae.govapp.gr/", "monthly", month_end_or_next, applies=_conditional,
          hide_if_feed_terms=("παρεπιδημουντων",), period=_period_month),
+    # Ρητό αίτημα 2026-11-02 — βλ. taxmatch/advertising.py για τους ελέγχους υποβολής
+    Rule("internet_contribution", "Ειδική εισφορά διαδικτύου 2% ΕΔΟΕΑΠ (ΑΚΕΕΔ) — {period}",
+         "Αναλυτική Κατάσταση Ειδικής Εισφοράς Διαδικτύου (ΑΚΕΕΔ): 2% επί των αμοιβών διαφήμισης/προβολής στο διαδίκτυο "
+         "(π.χ. Google Ads). Υπόχρεος ο λήπτης της υπηρεσίας· υποβολή στην εφαρμογή ΕΔΟΕΑΠ (apps.e-efka.gov.gr/EDOEAPeACD) "
+         "έως την τελευταία ημερολογιακή ημέρα του επόμενου μήνα, πληρωμή έως την τελευταία εργάσιμη (ΕΔΟΕΑΠ εγκ. 11/2018). "
+         "Την ενεργοποιείτε στο Προφίλ του πελάτη· η εφαρμογή την προτείνει όταν βρει 14.3 από Google στο myDATA.",
+         "https://www.taxheaven.gr/news/41612/edoeap-sxetika-me-thn-eidikh-eisfora-posostoy-2-epi-twn-amoibwn-twn-yphresiwn-diafhmishs-h-probolhs-egkyklios-11",
+         "monthly", month_end, applies=_conditional, hide_if_feed_terms=("ακεεδ", "εδοεαπ"), period=_period_month),
+    Rule("advertising_fee", "Τέλος διαφήμισης 2% υπέρ δήμων (ΤΠΔ) — χρήση {period}",
+         "Τέλος διαφήμισης 2% (άρθρο 15 Β.Δ. 24.9/20.10.1958) για διαφημίσεις με έντυπα, δώρα, ημερολόγια κ.λπ.: "
+         "πληρώνεται ηλεκτρονικά στο Ταμείο Παρακαταθηκών και Δανείων (e-services.tpd.gr, «Πληρωμή τελών διαφήμισης») "
+         "έως τη λήξη της προθεσμίας της δήλωσης φορολογίας εισοδήματος. Η εφαρμογή το εντοπίζει από τον χαρακτηρισμό "
+         "E3_585_015 (διαφήμιση) στο myDATA της χρήσης.",
+         "https://www.taxheaven.gr/news/59145/telos-diafhmishs-yper-dhmwn-kai-koinothtwn-pws-oa-ginetai-h-katabolh-toy-hlektronika-sto-tameio-parakataohkwn-kai-daneiwn",
+         "annual", lambda y, m: date(y, 7, 15), due_months=(7,), applies=_conditional,
+         hide_if_feed_terms=("τελος διαφημισης", "τελων διαφημισης"), period=lambda y, m: str(y - 1), ref_offset=7),
     Rule("ergani_e4", "ΕΡΓΑΝΗ — Ετήσιος Πίνακας Προσωπικού (Ε4)",
          "Υποβολή του Ε4 από 1 έως 31 Οκτωβρίου κάθε έτους· η προθεσμία παρατείνεται συχνά με υπουργική απόφαση. "
          "Μόνο για εργοδότες.",
@@ -298,7 +314,8 @@ RULES_BY_ID = {r.id: r for r in RULES}
 #: κανόνες που αφορούν ΜΟΝΟ όποιον ασκεί επιχειρηματική δραστηριότητα (όχι ιδιώτη / όχι μετά τη διακοπή)
 _BUSINESS_ONLY = {"vat_monthly", "vat_quarterly", "vies", "intrastat", "oss", "ioss", "apd", "ergani_e4",
                   "withholding_fees", "fmy_wages", "climate_fee", "digital_fee"}
-_BUSINESS_ONLY |= {"vat_quarter_option", "apd_teka", "plastic_bag_fee", "plastics_fee", "parepid_fee"}
+_BUSINESS_ONLY |= {"vat_quarter_option", "apd_teka", "plastic_bag_fee", "plastics_fee", "parepid_fee",
+                   "internet_contribution", "advertising_fee"}
 _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές συναλλαγές στην περίοδο",
                  "vat_quarter_option": "μόνο Β΄ κατηγορίας σε μηνιαίο ΦΠΑ που συμπλήρωσαν 24 μήνες από την έναρξη",
                  "intrastat": "μόνο αν ξεπερνά τα στατιστικά κατώφλια",
@@ -346,6 +363,8 @@ RULE_CHECKS: dict[str, tuple[str, ...]] = {
     "plastics_fee": ("ΠΛΑΣΤΙΚΑ",),         # εφαρμογή «Plastic» — βλ. fee_portals.py
     "parepid_fee": ("ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ",),   # dae.govapp.gr — βλ. fee_portals.py
     "intrastat": ("INTRASTAT",),           # ΕΛ.ΣΤΑΤ «Αρχείο Δηλώσεων» (κωδικοί γραφείου) — βλ. intrastat.py
+    "internet_contribution": ("ΑΚΕΕΔ",),   # ΕΔΟΕΑΠ e-ΑΚΕΕΔ — βλ. advertising.py
+    "advertising_fee": ("ΤΕΛΟΣ_ΔΙΑΦΗΜΙΣΗΣ",),   # ΤΠΔ e-services — βλ. advertising.py
 }
 #: Έλεγχοι που μπορεί να έρθουν ανά ΤΡΙΜΗΝΟ ενώ ο κανόνας είναι μηνιαίος (dae.govapp.gr: όπως η περίοδος ΦΠΑ).
 _QUARTER_FALLBACK = {"parepid_fee"}
@@ -538,6 +557,10 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
                 info = (business.get("mydata") or {}).get(ref_month) or {}
                 yes = f"Intrastat {info.get('intrastat_flows') or ''} — {info.get('intrastat_reason') or yes}".replace(
                     "Intrastat  — ", "Intrastat — ")
+            if rule_id == "intrastat" and not value:
+                info = (business.get("mydata") or {}).get(ref_month) or {}
+                if "καμία κίνηση" in (info.get("intrastat_reason") or ""):
+                    no = "υπόχρεος Intrastat, αλλά " + info["intrastat_reason"].split("; ")[-1]
             if rule_id == "vies" and value:
                 forms, known = vies_forms(business, ref_month)
                 if known:
@@ -552,6 +575,24 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             return "no", "δεν έχει εντοπιστεί ποτέ στα έσοδα του myDATA"
     # Σημαίες από την εισαγωγή Excel (db v11): «Μισθοδοσία» = εργοδότης· στοιχεία Intrastat = υποβάλλει Intrastat.
     # NULL = άγνωστο -> μένει «υπό προϋποθέσεις». Ποτέ «όχι» για Intrastat από απουσία στοιχείων.
+    if rule_id == "internet_contribution":
+        # Την ορίζει ο ΧΡΗΣΤΗΣ (Προφίλ)· η εφαρμογή μόνο την ΠΡΟΤΕΙΝΕΙ όταν βρει 14.3 από Google τον μήνα
+        if business.get("internet_contribution"):
+            return "yes", "επιλογή «Ειδική εισφορά διαδικτύου» στο Προφίλ"
+        info = (business.get("mydata") or {}).get(ref_month or "") or {}
+        if info.get("google_ads"):
+            return "maybe", ("14.3 από Google (Ads) στο myDATA — αν είναι διαφήμιση, ενεργοποιήστε «Ειδική εισφορά "
+                             "διαδικτύου» στο Προφίλ")
+        return "no", "δεν έχει επιλεγεί στο Προφίλ"
+    if rule_id == "advertising_fee":
+        # ετήσιο: οποιοσδήποτε μήνας της χρήσης με χαρακτηρισμό E3_585_015
+        year = (ref_month or "")[:4]
+        months = {ym: f for ym, f in (business.get("mydata") or {}).items() if ym.startswith(year)}
+        if any(f.get("advert") for f in months.values()):
+            return "yes", "χαρακτηρισμός E3_585_015 (διαφήμιση) στο myDATA της χρήσης"
+        if len(months) == 12:
+            return "no", "κανένας χαρακτηρισμός E3_585_015 στο myDATA της χρήσης"
+        return "maybe", "μόνο αν είχε δαπάνες διαφήμισης (χαρακτηρισμός E3_585_015 στο myDATA)"
     if rule_id == "apd_teka":
         if business.get("employer") == 0:
             return "no", "χωρίς μισθοδοσία"

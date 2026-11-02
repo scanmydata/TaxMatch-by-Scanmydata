@@ -4,7 +4,7 @@ Intrastat, τέλος ανθεκτικότητας (8.2), ψηφιακό τέλ�
 
 Οι λήψεις τρέχουν στην ουρά εργασιών του κύριου παραθύρου (`MainWindow.run_mydata_sync`): με διακοπή, και αν κλείσει η
 καρτέλα το μήνυμα προόδου περνά στο κύριο παράθυρο. Η προεπισκόπηση PDF στο πλάι αφαιρέθηκε (ρητό αίτημα χρήστη
-2026-10-22) — διπλό κλικ / «Άνοιγμα PDF» το ανοίγει στον προεπιλεγμένο προβολέα."""
+2026-10-22) — «Άνοιγμα PDF» το ανοίγει στον προεπιλεγμένο προβολέα· διπλό κλικ = καρτέλα παραστατικού (ανάλυση + PDF)."""
 from __future__ import annotations
 
 import html
@@ -14,22 +14,197 @@ from typing import Any
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
+import json
+
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget, QVBoxLayout,
-    QWidget,
+    QAbstractItemView, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
 from .. import deadlines, obligations, office
-from ..mydata import analysis, credentials as mydata_creds, names, pdfs, store
+from ..mydata import analysis, credentials as mydata_creds, labels, names, pdfs, store
 from .icons import icon
 from .table_kit import SortItem, TableKit
 from .theme import CURRENT
 from .toast import toast
+from .widgets import fit_to_screen
 from .workers import run_task
 
 _COLS = ["Ημ/νία", "Τύπος", "Έσοδο/Έξοδο", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
 HISTORY_MONTHS = 24                     # για Intrastat χρειάζεται όλο το προηγούμενο έτος + το τρέχον
+
+
+def _detail(d: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(d.get("detail_json") or "{}")
+    except ValueError:
+        return {}
+
+
+def classification_lines(d: dict[str, Any]) -> list[str]:
+    """Χαρακτηρισμοί του παραστατικού (σύνολα, αλλιώς ανά γραμμή) σε κείμενο — για hover και καρτέλα."""
+    det = _detail(d)
+    items = det.get("summary_classifications") or [c for line in det.get("lines", []) for c in line.get("classifications", [])]
+    merged: dict[tuple, float] = {}
+    for c in items:
+        key = (c.get("kind"), c.get("category"), c.get("type"), c.get("vat_type"))
+        merged[key] = round(merged.get(key, 0.0) + (c.get("amount") or 0.0), 2)
+    out = []
+    for (kind, cat, typ, vat_type), amount in merged.items():
+        text = labels.classification({"category": cat, "type": typ})
+        out.append(f"{'Έσοδο' if kind == 'income' else 'Έξοδο'}: {text}" + (f" · {vat_type}" if vat_type else "")
+                   + f" · {office.money(amount)}")
+    return out
+
+
+class InvoiceCard(QDialog):
+    """«Καρτέλα παραστατικού» (διπλό κλικ — ίδιο ύφος με την καρτέλα οφειλής, ρητό αίτημα 2026-10-29): στοιχεία,
+    αντισυμβαλλόμενος, ποσά, χαρακτηρισμοί, γραμμές, τρόποι πληρωμής, και «Λήψη PDF» / «Άνοιγμα PDF» / πάροχος."""
+
+    def __init__(self, tab: "MydataTab", d: dict[str, Any], other_name: str, other_vat: str) -> None:
+        super().__init__(tab.window_)
+        self.tab, self.d = tab, d
+        self._tasks: list[Any] = []
+        self.setWindowTitle("Καρτέλα παραστατικού myDATA")
+        root = QVBoxLayout(self)
+        det = _detail(d)
+        income = analysis.is_income(d)
+        title = QLabel(f"{labels.invoice_type(d['invoice_type'])} — {d['series']} {d['aa']}".strip())
+        title.setObjectName("h2")
+        title.setWordWrap(True)
+        root.addWidget(title)
+        grid = QGridLayout()
+        facts = [("Ημερομηνία", d["issue_date"][8:10] + "/" + d["issue_date"][5:7] + "/" + d["issue_date"][:4]),
+                 ("Κατεύθυνση", ("Λήψη από" if d["direction"] == "incoming" else "Έκδοση προς")
+                  + f" {other_name or '—'} · ΑΦΜ {other_vat or '—'}"),
+                 ("Έσοδο / Έξοδο", "Έσοδο" if income else "Έξοδο"),
+                 ("Καθαρή αξία", office.money(d["net"])), ("ΦΠΑ", office.money(d["vat"])),
+                 ("Σύνολο", office.money(d["total"]) + (f" ({det['currency']})" if det.get("currency") not in (None, "EUR") else ""))]
+        if d["withheld"]:
+            facts.append(("Παρακρατήσεις", office.money(d["withheld"])))
+        if d.get("stamp"):
+            facts.append(("Ψηφιακό τέλος", office.money(d["stamp"])))
+        for key, label in (("total_fees", "Τέλη"), ("total_other_taxes", "Λοιποί φόροι"), ("total_deductions", "Κρατήσεις")):
+            if det.get(key):
+                facts.append((label, office.money(det[key])))
+        address = det.get("counter_address") if d["direction"] == "outgoing" else det.get("issuer_address")
+        if address:
+            facts.append(("Διεύθυνση αντισυμβαλλόμενου", address))
+        if det.get("payments"):
+            facts.append(("Τρόπος πληρωμής", " · ".join(
+                f"{labels.PAYMENT_METHODS.get(pm['type'], pm['type'])} {office.money(pm['amount'])}" for pm in det["payments"])))
+        facts.append(("MARK", d["mark"]))
+        if d["cancelled"]:
+            facts.append(("Κατάσταση", "ΑΚΥΡΩΜΕΝΟ"))
+        for row, (label, value) in enumerate(facts):
+            k = QLabel(label + ":")
+            k.setStyleSheet(f"color:{CURRENT.muted}")
+            v = QLabel(f"<b>{html.escape(value)}</b>")
+            v.setWordWrap(True)
+            v.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(k, row, 0)
+            grid.addWidget(v, row, 1)
+        grid.setColumnStretch(1, 1)
+        root.addLayout(grid)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        head = QLabel("Χαρακτηρισμοί")
+        head.setObjectName("h2")
+        lay.addWidget(head)
+        cls = classification_lines(d)
+        note = QLabel("<br>".join(html.escape(x) for x in cls) if cls else
+                      ("Χωρίς χαρακτηρισμούς στο myDATA." if det else
+                       "Δεν υπάρχουν λεπτομέρειες — ξανακάντε «Λήψη μήνα» για να κατέβει η ανάλυση του παραστατικού."))
+        note.setWordWrap(True)
+        note.setObjectName("card")
+        lay.addWidget(note)
+        if det.get("lines"):
+            lhead = QLabel(f"Γραμμές ({len(det['lines'])})")
+            lhead.setObjectName("h2")
+            lay.addWidget(lhead)
+            t = QTableWidget(len(det["lines"]), 5)
+            t.setHorizontalHeaderLabels(["#", "Καθαρή", "ΦΠΑ", "Κατηγορία ΦΠΑ", "Χαρακτηρισμός"])
+            t.verticalHeader().setVisible(False)
+            t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            for i, line in enumerate(det["lines"]):
+                cells = [line.get("n", ""), office.money(line.get("net", 0)), office.money(line.get("vat", 0)),
+                         labels.VAT_CATEGORIES.get(line.get("vat_category", ""), line.get("vat_category", "")),
+                         " | ".join(labels.classification(c) for c in line.get("classifications", []))]
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    item.setToolTip(text)
+                    t.setItem(i, col, item)
+            for col, width in enumerate((40, 100, 90, 120)):
+                t.setColumnWidth(col, width)
+            t.horizontalHeader().setStretchLastSection(True)
+            t.setMinimumHeight(min(260, 40 + 30 * len(det["lines"])))
+            lay.addWidget(t)
+        lay.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+        buttons = QHBoxLayout()
+        self.fetch_btn = QPushButton(icon("download", CURRENT.txt, 16), "  Λήψη PDF")
+        self.fetch_btn.setToolTip("Κατεβάζει το PDF από τον πάροχο του παραστατικού")
+        self.fetch_btn.clicked.connect(self._fetch)
+        buttons.addWidget(self.fetch_btn)
+        self.open_btn = QPushButton(icon("pdf", CURRENT.accent, 16), "  Άνοιγμα PDF")
+        self.open_btn.clicked.connect(self._open)
+        buttons.addWidget(self.open_btn)
+        self.provider_btn = QPushButton(icon("network", CURRENT.txt, 16), "  Στον πάροχο")
+        self.provider_btn.setToolTip("Ανοίγει το παραστατικό στη σελίδα του παρόχου (π.χ. όταν είναι «μόνο online»)")
+        self.provider_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(pdfs.openable_url(self.d["url"]))))
+        buttons.addWidget(self.provider_btn)
+        buttons.addStretch()
+        close = QPushButton("Κλείσιμο")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        root.addLayout(buttons)
+        self._sync()
+        fit_to_screen(self, 760, 640)
+
+    def _sync(self) -> None:
+        have = bool(self.d["pdf_path"]) and Path(self.d["pdf_path"]).exists()
+        self.open_btn.setEnabled(have)
+        self.fetch_btn.setEnabled(bool(self.d["url"]) and not have)
+        self.provider_btn.setEnabled(bool(self.d["url"]))
+
+    def _open(self) -> None:
+        if self.d["pdf_path"] and Path(self.d["pdf_path"]).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.d["pdf_path"]))
+
+    def _fetch(self) -> None:
+        afm, mark, ym = self.tab.afm, self.d["mark"], self.d["issue_date"][:7]
+        self.fetch_btn.setEnabled(False)
+
+        def work(_p):
+            conn = dbmod.connect()                      # δικό του thread — ποτέ η σύνδεση του UI
+            try:
+                pdfs.download_month(conn, afm, ym, marks=[mark])
+                row = conn.execute("SELECT pdf_status, pdf_path FROM mydata_docs WHERE afm=? AND mark=?",
+                                   (afm, mark)).fetchone()
+                return dict(row) if row else {}
+            finally:
+                conn.close()
+
+        def done(res: dict[str, Any]) -> None:
+            self.d = {**self.d, **res}
+            self._sync()
+            if res.get("pdf_status") == "ok":
+                toast(self, "Το PDF κατέβηκε.", "ok")
+                self._open()
+            elif res.get("pdf_status") == "viewer":
+                toast(self, "Ο πάροχος δείχνει το παραστατικό μόνο online — «Στον πάροχο».", "warn")
+            else:
+                toast(self, "Η λήψη του PDF απέτυχε.", "danger")
+            self.tab.reload()
+        toast(self, "Λήψη PDF από τον πάροχο…", "info")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger")))
 
 
 def _months(n: int = 36) -> list[str]:
@@ -142,7 +317,7 @@ class MydataTab(QWidget):
         provider.clicked.connect(self._open_provider)
         actions.addWidget(provider)
         open_btn = QPushButton(icon("pdf", CURRENT.txt, 16), "  Άνοιγμα PDF")
-        open_btn.clicked.connect(self._open_selected)
+        open_btn.clicked.connect(self._open_pdf_selected)
         actions.addWidget(open_btn)
         zip_btn = QPushButton(icon("folder", CURRENT.txt, 16), "  Εξαγωγή ZIP")
         zip_btn.setToolTip("Τα PDF του μήνα (ή μόνο των επιλεγμένων) σε ένα ZIP, χωρισμένα σε «Λήψεις» / «Εκδοθέντα»")
@@ -299,15 +474,18 @@ class MydataTab(QWidget):
             incoming = d["direction"] == "incoming"
             income = analysis.is_income(d)
             other_name, other_vat = names.display_name(d, party, self.afm)
-            cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], d["invoice_type"], "Έσοδο" if income else "Έξοδο",
+            cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], labels.invoice_type(d["invoice_type"], short=True),
+                     "Έσοδο" if income else "Έξοδο",
                      other_name or "—", other_vat or "—", office.money(d["net"]), office.money(d["vat"]),
                      office.money(d["total"]), office.money(d["withheld"]) if d["withheld"] else "",
                      pdfs.STATUS_LABEL.get(d["pdf_status"], "—")]
             keys = {0: d["issue_date"] + d["mark"], 5: d["net"], 6: d["vat"], 7: d["total"], 8: d["withheld"] or 0.0}
             tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other_name or '—'} · ΑΦΜ {other_vat or '—'}\n"
-                   f"{d['series']} {d['aa']} · {d['issue_date']} · τύπος {d['invoice_type']} · MARK {d['mark']}\n"
+                   f"{d['series']} {d['aa']} · {d['issue_date']} · {labels.invoice_type(d['invoice_type'])} · MARK {d['mark']}\n"
                    f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}"
-                   + (f" · ψηφιακό τέλος {office.money(d['stamp'])}" if d.get("stamp") else ""))
+                   + (f" · ψηφιακό τέλος {office.money(d['stamp'])}" if d.get("stamp") else "")
+                   + "".join("\n" + c for c in classification_lines(d))
+                   + "\n(διπλό κλικ: καρτέλα παραστατικού)")
             for col, text in enumerate(cells):
                 item = SortItem(text, keys[col]) if col in keys else SortItem(text)
                 item.setToolTip(tip)
@@ -517,6 +695,13 @@ class MydataTab(QWidget):
                 d["pdf_status"], "Δεν έχει κατέβει PDF — «Λήψη μήνα»."))
 
     def _open_selected(self) -> None:
+        """Διπλό κλικ: καρτέλα παραστατικού (ανάλυση + PDF) — ρητό αίτημα 2026-10-29."""
+        party = names.name_map(self.conn)
+        for d in self._selected_docs()[:1]:
+            other_name, other_vat = names.display_name(d, party, self.afm)
+            InvoiceCard(self, d, other_name, other_vat).exec()
+
+    def _open_pdf_selected(self) -> None:
         for d in self._selected_docs()[:1]:
             if d["pdf_path"] and Path(d["pdf_path"]).exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(d["pdf_path"]))

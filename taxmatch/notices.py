@@ -149,6 +149,16 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "afms": afms,
                     "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}): "
                             f"{_names(conn, afms)} — καρτέλα πελάτη → «Αιτήματα ΑΑΔΕ»."})
+    # ---- πρόταση ΑΚΕΕΔ: 14.3 από Google στο myDATA χωρίς απόφαση για την ειδική εισφορά διαδικτύου (2026-11-02)
+    from .advertising import google_candidates
+    google = google_candidates(conn)
+    if google and settings_store.get(conn, "notice_google_read") != ",".join(google):
+        n = len(google)
+        out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες", "afms": google,
+                    "dismiss": "google",
+                    "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με 14.3 από Google (Ads) στο myDATA — πιθανή "
+                            f"ειδική εισφορά διαδικτύου 2% ΕΔΟΕΑΠ (ΑΚΕΕΔ): ενεργοποιήστε την στο Προφίλ αν ισχύει: "
+                            f"{_names(conn, google)}."})
     # ---- πιθανοί υπόχρεοι τέλους παρεπιδημούντων/ακαθαρίστων από τον ΚΑΔ (ίδιο μοτίβο με το τρίμηνο ΦΠΑ)
     parepid_afms = parepid_candidates(conn)
     if parepid_afms and settings_store.get(conn, "notice_parepid_read") != ",".join(parepid_afms):

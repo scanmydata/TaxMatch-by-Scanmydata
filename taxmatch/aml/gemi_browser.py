@@ -231,9 +231,13 @@ def login_expression(user: str, password: str) -> str:
 
 def login_in_page(cdp: Any, user: str, password: str) -> dict[str, Any]:
     raw = cdp.evaluate(login_expression(user, password), await_promise=True)
+    # Ζωντανά (2026-10-29): η σελίδα του businessportal επέστρεψε ΑΝΤΙΚΕΙΜΕΝΟ αντί για το string του JSON.stringify
+    # («the JSON object must be str… not dict») — δεχόμαστε και τα δύο.
     try:
-        res = json.loads(raw or "{}")
-    except ValueError:
+        res = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "PageError"}
+    if not isinstance(res, dict):
         return {"ok": False, "reason": "PageError"}
     if res.get("reason"):
         return {"ok": False, "reason": res["reason"]}

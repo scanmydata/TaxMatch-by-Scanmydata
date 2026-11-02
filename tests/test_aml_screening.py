@@ -118,3 +118,11 @@ def test_gemi_login_in_page_success_and_failure():
 def test_gemi_open_without_browser(monkeypatch):
     monkeypatch.setattr(gemi_browser, "find_browser", lambda: None)
     assert gemi_browser.open_logged_in("u", "p")["reason"] == "NoBrowser"
+
+
+def test_gemi_login_accepts_object_result_from_page():
+    """Ζωντανά η σελίδα επέστρεψε αντικείμενο αντί για JSON string («the JSON object must be str… not dict»)."""
+    class ObjCdp(FakeCdp):
+        def evaluate(self, expression, await_promise=False):
+            return dict(self.result)
+    assert gemi_browser.login_in_page(ObjCdp({"status": 200, "username": "u1"}), "u1", "p") == {"ok": True, "reason": ""}

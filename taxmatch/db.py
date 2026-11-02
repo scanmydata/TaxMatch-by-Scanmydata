@@ -609,6 +609,15 @@ MIGRATIONS: list[str] = [
     UPDATE businesses SET teka=1 WHERE afm IN (SELECT afm FROM obligation_checks
         WHERE obligation LIKE 'ΑΠΔ_ΤΕΚΑ%' AND status IN ('submitted', 'not_submitted', 'pending'));
     """,
+    # v21 — ανάλυση παραστατικού myDATA (γραμμές, χαρακτηρισμοί, τρόποι πληρωμής) για την καρτέλα myDATA (ρητό αίτημα
+    # 2026-10-29). Τα ήδη κατεβασμένα μένουν '{}' ώσπου να ξανακατέβουν.
+    """
+    ALTER TABLE mydata_docs ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}';
+    """,
+    # v22 — ειδική εισφορά διαδικτύου ΕΔΟΕΑΠ (ΑΚΕΕΔ): υποχρέωση που ενεργοποιεί ο χρήστης στο Προφίλ (2026-11-02)
+    """
+    ALTER TABLE businesses ADD COLUMN internet_contribution INTEGER;
+    """,
 ]
 
 

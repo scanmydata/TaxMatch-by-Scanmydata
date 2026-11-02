@@ -139,6 +139,57 @@ def is_rent(inv: ET.Element, invoice_type: str) -> bool:
     return any(_t(det, "stampDutyPercentCategory") == RENT_STAMP_CATEGORY for det in inv.iter(NS + "invoiceDetails"))
 
 
+def _local(elem: ET.Element) -> str:
+    return elem.tag.split("}", 1)[-1]
+
+
+def _child(elem: ET.Element, name: str) -> str:
+    """Τιμή παιδιού ΑΝΕΞΑΡΤΗΤΑ από namespace — οι χαρακτηρισμοί έχουν δικά τους (icls/ecls)."""
+    for c in elem:
+        if _local(c) == name:
+            return (c.text or "").strip()
+    return ""
+
+
+def _classifications(elem: ET.Element) -> list[dict[str, Any]]:
+    out = []
+    for c in elem:
+        kind = {"incomeClassification": "income", "expensesClassification": "expense"}.get(_local(c))
+        if kind:
+            out.append({"kind": kind, "type": _child(c, "classificationType"),
+                        "category": _child(c, "classificationCategory"), "amount": round(_f(_child(c, "amount")), 2),
+                        "vat_type": _child(c, "vatClassificationType") if kind == "expense" else ""})
+    return out
+
+
+def invoice_detail(inv: ET.Element) -> dict[str, Any]:
+    """Ανάλυση παραστατικού για την καρτέλα myDATA (ρητό αίτημα 2026-10-29): γραμμές (καθαρή, ΦΠΑ, κατηγορία,
+    χαρακτηρισμοί), σύνολα χαρακτηρισμών, τρόποι πληρωμής, νόμισμα, διευθύνσεις. Ό,τι επιστρέφει το myDATA για το
+    παραστατικό — στα ληφθέντα συνήθως ΜΟΝΟ οι χαρακτηρισμοί εσόδων του εκδότη."""
+    lines = []
+    for det in inv.iter(NS + "invoiceDetails"):
+        lines.append({"n": _t(det, "lineNumber"), "net": round(_f(_t(det, "netValue")), 2),
+                      "vat": round(_f(_t(det, "vatAmount")), 2), "vat_category": _t(det, "vatCategory"),
+                      "vat_exemption": _t(det, "vatExemptionCategory"), "quantity": _t(det, "quantity"),
+                      "classifications": _classifications(det)})
+    summary = inv.find(NS + "invoiceSummary")
+    payments = [{"type": _t(pm, "type"), "amount": round(_f(_t(pm, "amount")), 2)}
+                for pm in inv.iter(NS + "paymentMethodDetails")]
+    header = inv.find(NS + "invoiceHeader")
+    issuer, counter = inv.find(NS + "issuer"), inv.find(NS + "counterpart")
+
+    def address(node: ET.Element | None) -> str:
+        a = node.find(NS + "address") if node is not None else None
+        return " ".join(x for x in (_t(a, "street"), _t(a, "number"), _t(a, "postalCode"), _t(a, "city")) if x)
+    return {"lines": lines, "summary_classifications": _classifications(summary) if summary is not None else [],
+            "payments": payments, "currency": _t(header, "currency") or "EUR",
+            "issuer_address": address(issuer), "counter_address": address(counter),
+            "issuer_branch": _t(issuer, "branch"), "correlated": [c.text for c in inv.iter(NS + "correlatedInvoices") if c.text],
+            "total_fees": round(_f(_t(summary, "totalFeesAmount")), 2),
+            "total_other_taxes": round(_f(_t(summary, "totalOtherTaxesAmount")), 2),
+            "total_deductions": round(_f(_t(summary, "totalDeductionsAmount")), 2)}
+
+
 def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
     header = inv.find(NS + "invoiceHeader")
     summary = inv.find(NS + "invoiceSummary")
@@ -159,6 +210,7 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
         "stamp": round(_f(_t(summary, "totalStampDutyAmount")), 2), "vat_class": carries_vat(inv, direction),
         "rent": is_rent(inv, _t(header, "invoiceType")),
         "taxes": tax_lines(inv),
+        "detail": invoice_detail(inv),
     }
 
 

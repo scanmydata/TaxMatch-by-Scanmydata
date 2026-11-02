@@ -23,11 +23,12 @@ import html as _html
 import logging
 import re
 import sqlite3
+from pathlib import Path
 from datetime import date
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin
 
-from . import crypto, db
+from . import config, crypto, db
 from .business_profiles import credentials as taxis_credentials
 from .business_profiles.lookup_aade import _HyperHttp  # noqa: PLC2701 — ίδιος http client με το Μητρώο ΑΑΔΕ
 
@@ -624,8 +625,8 @@ def retrieve_ame(conn: sqlite3.Connection, afm: str,
     ΕΠΑΛΗΘΕΥΤΗΚΕ ζωντανά 2026-10-22 με TAXISnet (καρτέλα eAccess `gsisTabView_activeIndex=1`). Η είσοδος με κωδικούς
     ΙΚΑ εργοδότη (`j_security_check`) δεν έχει δοκιμαστεί ζωντανά."""
     try:
-        include_oikodomotexnika = (searches_oikodomotexnika(conn, afm) if include_oikodomotexnika is None
-                                   else include_oikodomotexnika)
+        # πάντα και «Οικοδομοτεχνικών Έργων» (ρητό αίτημα 2026-10-29 — καταργήθηκε η επιλογή στην καρτέλα)
+        include_oikodomotexnika = True if include_oikodomotexnika is None else include_oikodomotexnika
         ika = ika_credentials(conn, afm)
         taxis = taxis_credentials.get(conn, afm)
         attempts: list[tuple[str, tuple[str, str]]] = []
@@ -799,16 +800,54 @@ def parse_submissions(page: str) -> dict[str, Any]:
             if ym not in yms:
                 yms.append(ym)
         # το κελί του αριθμού περιέχει και το script του PrimeFaces («82624495 $(function(){…») — μόνο ο αριθμός
+        links = {strip_tags(a.group(2)): a.group(1)
+                 for a in re.finditer(r'<a id="([^"]+)"[^>]*>(.*?)</a>', tr.group(1), re.S | re.I)}
         rows.append({"id": (cells[0].split() or [""])[0], "kind": cells[1], "period": cells[2], "yms": yms,
-                     "status": cells[3]})
+                     "status": cells[3], "receipt_link": links.get("Επανέκδοση Αποδεικτικού", ""),
+                     "print_link": links.get("Εκτύπωση Αναλυτικών Εγγραφών", "")})
     to = re.search(r'id="resultTpte"[^>]*>(.*?)</', page, re.S)
     pages = re.search(r"Σελίδα\s*\d+\s*από\s*(\d+)", strip_tags(page))
     return {"rows": rows, "payment_id": strip_tags(to.group(1)) if to else "",
             "pages": int(pages.group(1)) if pages else 1}
 
 
-def apd_submissions(http: _HyperHttp, url: str, year: int, max_pages: int = 30) -> Optional[dict[str, Any]]:
-    """Όλες οι υποβολές ΑΠΔ (με σελιδοποίηση) ώσπου να περάσουμε σε παλαιότερο έτος. None = δεν φόρτωσε ο πίνακας."""
+def apd_row_pdfs(http: _HyperHttp, url: str, vs: str, prefix: str, row: dict[str, Any], folder: Path,
+                 base: str) -> list[str]:
+    """PDF μιας υποβολής ΑΠΔ (ζωντανά ✓ 2026-11-02): «Επανέκδοση Αποδεικτικού» (αντίγραφο αποδεικτικού υποβολής με την
+    ταυτότητα πληρωμής RF και τα σύνολα εισφορών — ajax για τον διάλογο `dapyFilea5a`, μετά υποβολή του) και «Εκτύπωση
+    Αναλυτικών Εγγραφών» (η αναλυτική περιοδική δήλωση). Μία φορά ανά υποβολή· μόνο ανάγνωση (η «επανέκδοση» βγάζει
+    ΑΝΤΙΓΡΑΦΟ, δεν υποβάλλει τίποτα)."""
+    out = []
+    receipt, detail = folder / f"{base}_ΑΠΟΔΕΙΚΤΙΚΟ.pdf", folder / f"{base}_ΑΝΑΛΥΤΙΚΗ.pdf"
+    if row.get("receipt_link") and not receipt.exists():
+        link = row["receipt_link"]
+        dlg = http.follow("POST", url, {f"{prefix}.faces.partial.ajax": "true", f"{prefix}.faces.source": link,
+                                        f"{prefix}.faces.partial.execute": "@all",
+                                        f"{prefix}.faces.partial.render": "dapyFilea5a:display5a", link: link,
+                                        "submissionShow": "submissionShow", f"{prefix}.faces.ViewState": vs})
+        period = re.search(r'name="dapyFilea5a:submissionPeriod5a"[^>]*value="([^"]*)"', dlg["text"])
+        code = re.search(r'name="dapyFilea5a:contractCode5a"[^>]*value="([^"]*)"', dlg["text"])
+        res = http.follow("POST", url, {"dapyFilea5a": "dapyFilea5a",
+                                        "dapyFilea5a:submissionPeriod5a": period.group(1) if period else "",
+                                        "dapyFilea5a:contractCode5a": code.group(1) if code else row["id"],
+                                        "dapyFilea5a:cmndButtonReSubmit": "",
+                                        f"{prefix}.faces.ViewState": view_state(dlg["text"]) or vs})
+        if res.get("is_pdf"):
+            folder.mkdir(parents=True, exist_ok=True)
+            receipt.write_bytes(res["content"])
+    if row.get("print_link") and not detail.exists():
+        res = http.follow("POST", url, {"submissionShow": "submissionShow", row["print_link"]: row["print_link"],
+                                        f"{prefix}.faces.ViewState": vs})
+        if res.get("is_pdf"):
+            folder.mkdir(parents=True, exist_ok=True)
+            detail.write_bytes(res["content"])
+    return [str(f) for f in (receipt, detail) if f.exists()]
+
+
+def apd_submissions(http: _HyperHttp, url: str, year: int, max_pages: int = 30,
+                    pdf_folder: Optional[Path] = None, pdf_base: str = "") -> Optional[dict[str, Any]]:
+    """Όλες οι υποβολές ΑΠΔ (με σελιδοποίηση) ώσπου να περάσουμε σε παλαιότερο έτος. None = δεν φόρτωσε ο πίνακας.
+    `pdf_folder`: και τα PDF (αποδεικτικό + αναλυτική) κάθε υποβολής της χρήσης → `row["pdfs"]`."""
     page = http.follow("GET", url)
     text = page["text"]
     if 'id="submissionTable' not in text:
@@ -817,6 +856,17 @@ def apd_submissions(http: _HyperHttp, url: str, year: int, max_pages: int = 30) 
     rows, vs = list(first["rows"]), view_state(text)
     prefix = "jakarta" if "jakarta.faces.ViewState" in text else "javax"
     size = len(first["rows"]) or 10
+
+    def with_pdfs(page_rows: list[dict[str, Any]]) -> None:
+        if pdf_folder is None:
+            return
+        for r in page_rows:
+            if "ΥΠΟΒΟΛΗ" in _upper(r["status"]) and any(ym.startswith(str(year)) for ym in r["yms"]):
+                try:
+                    r["pdfs"] = apd_row_pdfs(http, page["url"], vs, prefix, r, pdf_folder, f"{pdf_base}_{r['id']}")
+                except Exception as exc:               # noqa: BLE001 — τα PDF είναι επιπλέον
+                    log.warning("apd pdf %s: %s", r["id"], exc)
+    with_pdfs(first["rows"])
     for i in range(1, min(first["pages"], max_pages)):
         if rows and all(ym < f"{year}-01" for r in rows[-size:] for ym in (r["yms"] or ["9999"])):
             break                                     # η σελίδα είναι ήδη σε παλαιότερο έτος (TaxSystem: MinYearCnt)
@@ -830,8 +880,9 @@ def apd_submissions(http: _HyperHttp, url: str, year: int, max_pages: int = 30) 
         more = parse_submissions(resp["text"])
         if not more["rows"]:
             break
-        rows += more["rows"]
         vs = view_state(resp["text"]) or vs
+        with_pdfs(more["rows"])
+        rows += more["rows"]
     return {"rows": rows, "payment_id": first["payment_id"]}
 
 
@@ -859,7 +910,12 @@ def submissions_entry(key: str, ame: str, rows: list[dict[str, Any]], year: int,
         base = {"period": f"{MONTHS_NOM[m - 1]} {year}", "period_end": month_end(year, m).isoformat(),
                 "period_type": "month"}
         if found:
-            periods.append({**base, "status": "submitted", "amounts": {"payment_id": payment_id} if payment_id else {},
+            amounts: dict[str, Any] = {"payment_id": payment_id} if payment_id else {}
+            pdfs = [f for x in found for f in x.get("pdfs", [])]
+            if pdfs:
+                amounts.update(submission_pdf=next((f for f in pdfs if f.endswith("_ΑΠΟΔΕΙΚΤΙΚΟ.pdf")), pdfs[0]),
+                               submission_pdfs=pdfs)
+            periods.append({**base, "status": "submitted", "amounts": amounts,
                             "detail": "Υποβολή " + ", ".join(f"{x['id']} ({x['kind']})" for x in found)})
         elif due < today:
             detail = "Καμία υποβολή ΑΠΔ για τον μήνα"
@@ -907,7 +963,7 @@ def _login_for_ame(conn: sqlite3.Connection, afm: str, ame: str,
 
 
 def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Optional[date] = None,
-                      http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> list[dict[str, Any]]:
+                      http_factory: Callable[[], _HyperHttp] = _HyperHttp, want_pdf: bool = False) -> list[dict[str, Any]]:
     """ΑΠΔ e-ΕΦΚΑ ΚΑΙ ΑΠΔ ΤΕΚΑ για ΚΑΘΕ ενεργό ΑΜΕ του εργοδότη → `obligation_checks` ως «ΑΠΔ#<ΑΜΕ>» /
     «ΑΠΔ_ΤΕΚΑ#<ΑΜΕ>» (το Ημερολόγιο τα ενώνει ανά κανόνα: deadlines._merge_per_ame). Χωρίς ΑΜΕ: ανάκτηση από την
     «Πιστοποίηση Εργοδοτών»· αν δεν φορτώσει η σελίδα υποβολών ΑΠΔ, η παλιά μέθοδος (οικονομική καρτέλα εργοδότη)."""
@@ -941,7 +997,9 @@ def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Opti
             if key == "ΑΠΔ_ΤΕΚΑ" and not (teka and teka["teka"]):
                 continue                               # ΤΕΚΑ μόνο αν έχει επιλεγεί στο Προφίλ
             try:
-                found = apd_submissions(login["http"], new_url if login["portal"] == "new" else old_url, year)
+                found = apd_submissions(login["http"], new_url if login["portal"] == "new" else old_url, year,
+                                        pdf_folder=(config.data_dir() / "submissions" / afm / str(year)) if want_pdf
+                                        else None, pdf_base=f"{key}_{afm}_{ame}")
             except Exception as exc:                   # noqa: BLE001
                 log.warning("apd %s %s/%s: %s", key, afm, ame, exc)
                 found = None

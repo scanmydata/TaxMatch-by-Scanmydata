@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -30,6 +30,7 @@ from ..aml.content import (
 from ..business_profiles import credentials as client_creds, service as clients
 from .busy import BusyOverlay
 from .table_kit import interactive
+from .icons import icon
 from .theme import CURRENT
 from .toast import toast
 from .widgets import GrDateEdit, add_reveal
@@ -64,6 +65,11 @@ class AmlAssessmentDialog(QDialog):
         self.afm = afm
         self.saved_id: Optional[int] = None
         self.business = clients.get(conn, afm) or {"afm": afm, "name": "", "kads": [], "legal_form": ""}
+        try:                                            # εκπρόσωπος από τα μέλη της ανάκτησης στοιχείων (μόνο τοπικά)
+            from .. import members as members_mod
+            members_mod.sync_aml_rep(conn, afm)
+        except Exception:                               # noqa: BLE001 — ποτέ εμπόδιο στο άνοιγμα του φακέλου
+            pass
         self.profile = store.get_profile(conn, afm)
         self.previous = store.latest(conn, afm)
         self.office_model = store.office_model(conn)
@@ -229,8 +235,14 @@ class AmlAssessmentDialog(QDialog):
         auto.addStretch()
         dl.addLayout(auto)
         self.files_list = QListWidget()
-        self.files_list.setMaximumHeight(110)
-        self.files_list.itemActivated.connect(self._open_file)
+        self.files_list.setMaximumHeight(190)
+        # PDF πιο εμφανή (ρητό αίτημα 2026-10-29): εικονίδιο, έντονο χρώμα, ένα κλικ = άνοιγμα
+        self.files_list.setIconSize(QSize(20, 20))
+        self.files_list.setSpacing(2)
+        self.files_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.files_list.setStyleSheet(f"QListWidget::item {{ padding:6px; border:1px solid {CURRENT.line}; "
+                                      f"border-radius:6px; color:{CURRENT.accent}; }}")
+        self.files_list.itemClicked.connect(self._open_file)
         dl.addWidget(self.files_list)
         box.addWidget(docs)
         self.client_kind.currentIndexChanged.connect(self._build_docs)
@@ -277,8 +289,15 @@ class AmlAssessmentDialog(QDialog):
         self.ubo_table.setHorizontalHeaderLabels([c[1] for c in _UBO_COLUMNS])
         self.ubo_table.verticalHeader().setVisible(False)
         self.ubo_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.ubo_table.setMinimumHeight(150)
+        self.ubo_table.setMinimumHeight(190)
         interactive(self.ubo_table)
+        # Πλάτη ανά στήλη ώστε να διαβάζονται επικεφαλίδες και τιμές (πριν όλες στριμωγμένες στο πλάτος του διαλόγου —
+        # «κομμένα», αναφορά χρήστη 2026-10-29)· ό,τι περισσεύει = οριζόντια κύλιση
+        self.ubo_table.horizontalHeader().setStretchLastSection(False)
+        self.ubo_table.verticalHeader().setDefaultSectionSize(34)
+        self.ubo_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        for col, width in enumerate((200, 110, 130, 105, 160, 150, 220, 60, 160, 150)):
+            self.ubo_table.setColumnWidth(col, width)
         ubox.addWidget(self.ubo_table)
         urow = QHBoxLayout()
         uadd = QPushButton("+ Δικαιούχος")
@@ -722,7 +741,8 @@ class AmlAssessmentDialog(QDialog):
     def _reload_files(self) -> None:
         self.files_list.clear()
         for f in retrieval.list_files(self.conn, self.afm):
-            item = QListWidgetItem(f"{f['retrieved_at'][:10]}  ·  {f['filename']}")
+            size = f" · {f['bytes'] / 1_048_576:.1f} MB" if (f.get("bytes") or 0) >= 1_048_576 else ""
+            item = QListWidgetItem(icon("pdf", CURRENT.accent, 20), f"{f['filename']}   ({f['retrieved_at'][:10]}{size})")
             item.setData(Qt.ItemDataRole.UserRole, f["path"])
             item.setToolTip(f["path"])
             self.files_list.addItem(item)

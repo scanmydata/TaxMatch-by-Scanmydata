@@ -135,7 +135,10 @@ def fetch_income_n(http: Any, reference_year: int) -> Optional[bytes]:
         re.search(r'<form[^>]*action="([^"]*)"[^>]*name="gotoincomeN"', types, re.I)
     if not m:
         return None
-    dtype = (re.search(r'name="declarationType"[^>]*value="([^"]*)"', types, re.I) or [None, "incomeN"])[1]
+    # Το declarationType ΤΗΣ φόρμας «gotoincomeN» — το πρώτο της σελίδας ανήκει σε άλλη φόρμα και είναι κενό (ζωντανά
+    # 2026-10-29: γι' αυτό το Έντυπο Ν δεν ερχόταν ποτέ — «δεν βρέθηκε υποβληθείσα δήλωση»)
+    form = types[m.start():types.find("</form>", m.start())] if types.find("</form>", m.start()) > 0 else types[m.start():]
+    dtype = (re.search(r'name="declarationType"[^>]*value="([^"]+)"', form, re.I) or [None, "incomeN"])[1]
     landing = http.follow("GET", urljoin(p(""), html.unescape(m.group(1))) + "?" +
                           urlencode({"declarationType": dtype, "year": str(reference_year)}))["text"]
     params = fenp_list_params(landing, reference_year)
@@ -279,10 +282,13 @@ def fetch_kmpd(user: str, password: str, afm: str, http_factory: Callable[[], An
 
 # ------------------------------------------------------------------ κωδικοί νόμιμου εκπροσώπου
 def get_rep_credentials(conn: sqlite3.Connection, afm: str) -> Optional[tuple[str, str]]:
+    """Κωδικοί του νόμιμου εκπροσώπου για το ΚΜΠΔ: όσοι δόθηκαν ρητά στον φάκελο — αλλιώς, αν ο εκπρόσωπος είναι και
+    πελάτης του γραφείου με κωδικούς TAXISnet, οι δικοί του (σύνδεση φακέλου ↔ πελατών, 2026-10-29)."""
     row = conn.execute("SELECT taxis_user, taxis_pass FROM aml_rep_credentials WHERE afm=?", (afm,)).fetchone()
-    if not row or not row["taxis_user"] or not row["taxis_pass"]:
-        return None
-    return crypto.dec(row["taxis_user"]), crypto.dec(row["taxis_pass"])
+    if row and row["taxis_user"] and row["taxis_pass"]:
+        return crypto.dec(row["taxis_user"]), crypto.dec(row["taxis_pass"])
+    rep_afm = (store.get_profile(conn, afm)["rep"] or {}).get("afm", "")
+    return credentials.get(conn, rep_afm) if rep_afm and rep_afm != afm else None
 
 
 def set_rep_credentials(conn: sqlite3.Connection, afm: str, user: str, password: str) -> bool:
@@ -326,6 +332,8 @@ def save_file(conn: sqlite3.Connection, afm: str, kind: str, data: bytes, client
     path = folder / fname
     path.write_bytes(data)
     doc_key = DOC_KEY_BY_KIND.get(kind, "")
+    # ίδιο αρχείο (ίδιο όνομα) = αντικαθίσταται στον δίσκο — και στη λίστα μία γραμμή, όχι μία ανά λήψη (αναφορά 2026-10-29)
+    conn.execute("DELETE FROM aml_files WHERE afm=? AND path=?", (afm, str(path)))
     conn.execute("INSERT INTO aml_files(afm, doc_key, kind, filename, path, bytes, source, retrieved_at) "
                  "VALUES (?,?,?,?,?,?,?,?)", (afm, doc_key, kind, fname, str(path), len(data), source, db.utcnow()))
     profile = store.get_profile(conn, afm)
@@ -375,8 +383,13 @@ def import_kmpd_owners(conn: sqlite3.Connection, afm: str, data: bytes) -> dict[
 
 
 def list_files(conn: sqlite3.Connection, afm: str) -> list[dict[str, Any]]:
-    return [dict(r) for r in conn.execute(
-        "SELECT * FROM aml_files WHERE afm=? ORDER BY retrieved_at DESC, id DESC", (afm,))]
+    """Ένα αρχείο μία φορά (η πιο πρόσφατη λήψη) — παλιές βάσεις έχουν διπλές γραμμές για το ίδιο αρχείο."""
+    out, seen = [], set()
+    for r in conn.execute("SELECT * FROM aml_files WHERE afm=? ORDER BY retrieved_at DESC, id DESC", (afm,)):
+        if r["path"] not in seen:
+            seen.add(r["path"])
+            out.append(dict(r))
+    return out
 
 
 # ------------------------------------------------------------------ ορχήστρωση
