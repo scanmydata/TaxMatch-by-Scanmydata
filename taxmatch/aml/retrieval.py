@@ -35,9 +35,10 @@ KMPD_APP = "https://webapps.gsis.gr/dsae/boregistry"
 
 #: kind -> κλειδί της λίστας εγγράφων (content.DOCUMENTS_BY_KIND)
 DOC_KEY_BY_KIND = {"registry": "aade", "income_n": "tax_return", "income_e1": "tax_return", "income_e3": "tax_return",
-                   "kmpd": "ubo_registry", "kmpd_cert": "ubo_registry"}
+                   "income_e2": "tax_return", "income_ekk": "tax_return", "kmpd": "ubo_registry", "kmpd_cert": "ubo_registry"}
 KIND_LABEL = {"registry": "Στοιχεία Μητρώου ΑΑΔΕ", "income_n": "Έντυπο Ν", "income_e1": "Ε1", "income_e3": "Ε3",
-              "kmpd": "ΚΜΠΔ - Δικαιούχοι", "kmpd_cert": "ΚΜΠΔ - Βεβαίωση οριστικοποίησης"}
+              "income_e2": "Ε2", "income_ekk": "Εκκαθαριστικό φόρου εισοδήματος", "kmpd": "ΚΜΠΔ - Δικαιούχοι",
+              "kmpd_cert": "ΚΜΠΔ - Βεβαίωση οριστικοποίησης"}
 
 _ROW = re.compile(r'<tr\b[^>]*class="tblRow[12]"[^>]*>(.*?)</tr>', re.S | re.I)
 _TD = re.compile(r"<td\b[^>]*>(.*?)</td>", re.S | re.I)
@@ -151,7 +152,10 @@ def fetch_income_n(http: Any, reference_year: int) -> Optional[bytes]:
 
 # ------------------------------------------------------------------ Ε1 / Ε3 (φυσικά πρόσωπα)
 _INCOME_FORMS = {"E1": ("e1_print", "e1_print", "PBE1_PRINT_PDF", "PRINT_CODE"),
-                 "E3": ("e3_print", "e3_print", "PBE3_PRINT_PDF", "PRINT_CODE_E3")}
+                 "E2": ("print_e2_ypo", "print_e2_ypo", "PBE2_PRINT_PDF", "PRINT_CODE_E2"),
+                 "E3": ("e3_print", "e3_print", "PBE3_PRINT_PDF", "PRINT_CODE_E3"),
+                 # εκκαθαριστικό (πράξη διοικητικού προσδιορισμού) — μόνο έτη ≥ 2024 με αυτόν τον μηχανισμό
+                 "EKK": ("print_e0_ypo", "print_e0_ypo", "PB_EKKATH_PDF", "PRINT_CODE")}
 
 
 def income_form_available(menu: str, button: str, code: str) -> bool:
@@ -171,9 +175,12 @@ def fetch_income_fp(http: Any, year: int, forms: tuple[str, ...] = ("E1", "E3"))
     out = []
     for form in forms:
         flag_key, flag_val, button, code_name = _INCOME_FORMS[form]
+        if form == "EKK" and year < 2024:
+            continue
         if not income_form_available(menu, button, code(code_name)):
             continue
-        base: dict[str, str] = {"YEAR": str(year), "e1_print": "", "e3_print": "", "print_e2_ypo": "", "print_e2_syz": ""}
+        base: dict[str, str] = {"YEAR": str(year), "e1_print": "", "e3_print": "", "print_e2_ypo": "", "print_e2_syz": "",
+                                **({"print_e0_ypo": ""} if form == "EKK" else {})}
         if year == 2023:
             base.update({"PRINT_CODE": code("PRINT_CODE"), "PRINT_CODE_SYZ": code("PRINT_CODE_SYZ"),
                          "PRINT_CODE_E2": code("PRINT_CODE_E2"), "PRINT_CODE_E2_SYZYGOY": code("PRINT_CODE_E2_SYZYGOY"),
@@ -450,7 +457,7 @@ def retrieve_for_client(conn: sqlite3.Connection, afm: str, targets: tuple[str, 
                                     break
                         else:
                             for year in (today.year - 1, today.year - 2):
-                                for form, data in fetch_income_fp(http, year):
+                                for form, data in fetch_income_fp(http, year, ("E1", "E2", "E3", "EKK")):
                                     files.append(save_file(conn, afm, f"income_{form.lower()}", data, name, str(year)))
                                     got = True
                                 if got:

@@ -306,6 +306,12 @@ RULES: list[Rule] = [
          "https://www.aade.gr/", "monthly", lambda y, m: last_business_day(y, m),
          due_months=(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2), applies=_conditional, hide_if_feed_terms=("ενφια",),
          period=_period_enfia),
+    Rule("traffic_fees", "Τέλη κυκλοφορίας {period}",
+         "Τα τέλη κυκλοφορίας του επόμενου έτους πληρώνονται έως 31 Δεκεμβρίου (ειδοποιητήριο στο myCAR της ΑΑΔΕ). "
+         "Μόνο για όσους έχουν οχήματα σε κυκλοφορία.",
+         "https://www.aade.gr/polites/ohimata/teli-kykloforias", "annual", lambda y, m: date(y, 12, 31),
+         due_months=(12,), applies=_conditional, hide_if_feed_terms=("τελη κυκλοφοριας", "τελων κυκλοφοριας"),
+         period=lambda y, m: str(y + 1)),
 ]
 
 RULES_BY_ID = {r.id: r for r in RULES}
@@ -330,7 +336,8 @@ _MAYBE_REASON = {"vies": "μόνο αν είχε ενδοκοινοτικές σ
                  "plastics_fee": "μόνο αν τιμολογεί εισφορά πλαστικών προϊόντων — λείπουν στοιχεία myDATA",
                  "parepid_fee": "μόνο αν τιμολογεί τέλος παρεπιδημούντων/ακαθαρίστων — λείπουν στοιχεία myDATA",
                  "income_tax_instalment": "μόνο αν η εκκαθάριση του Ε1/Ε3 είναι χρεωστική και πληρώνεται σε δόσεις",
-                 "enfia": "μόνο αν έχει ακίνητα (εκκαθαριστικό ΕΝΦΙΑ) και πληρώνει σε δόσεις"}
+                 "enfia": "μόνο αν έχει ακίνητα (εκκαθαριστικό ΕΝΦΙΑ) και πληρώνει σε δόσεις",
+                 "traffic_fees": "μόνο αν έχει οχήματα σε κυκλοφορία"}
 #: Κανόνες που απαντώνται ανά μήνα αναφοράς από τα παραστατικά myDATA (mydata/analysis.month_flags).
 _MYDATA_FLAG = {"vies": "vies", "intrastat": "intrastat", "withholding_fees": "withholding", "climate_fee": "climate",
                 "digital_fee": "digital_fee", "plastic_bag_fee": "plastic_bag", "plastics_fee": "plastics",
@@ -365,7 +372,14 @@ RULE_CHECKS: dict[str, tuple[str, ...]] = {
     "intrastat": ("INTRASTAT",),           # ΕΛ.ΣΤΑΤ «Αρχείο Δηλώσεων» (κωδικοί γραφείου) — βλ. intrastat.py
     "internet_contribution": ("ΑΚΕΕΔ",),   # ΕΔΟΕΑΠ e-ΑΚΕΕΔ — βλ. advertising.py
     "advertising_fee": ("ΤΕΛΟΣ_ΔΙΑΦΗΜΙΣΗΣ",),   # ΤΠΔ e-services — βλ. advertising.py
+    "traffic_fees": ("ΤΕΛΗ_ΚΥΚΛΟΦΟΡΙΑΣ",),       # myCAR — βλ. personal.py
+    "enfia": ("ΕΝΦΙΑ",),                         # ETAK εκκαθαριστικό — βλ. personal.py
 }
+#: Πληρωμές (όχι δηλώσεις): ο έλεγχος ξέρει ότι εκδόθηκε ειδοποιητήριο/εκκαθαριστικό, όχι αν εξοφλήθηκε.
+PAYMENT_RULES = {"traffic_fees", "enfia", "income_tax_instalment"}
+#: Λέξεις στον τίτλο οφειλής ΑΑΔΕ (`aade_debts.title`) που δείχνουν ότι η πληρωμή του κανόνα εκκρεμεί.
+_DEBT_TERMS = {"traffic_fees": ("ΚΥΚΛΟΦΟΡ",), "enfia": ("ΕΝΦΙΑ", "ΕΝΙΑΙΟΣ ΦΟΡΟΣ ΙΔΙΟΚΤΗΣΙΑΣ"),
+               "income_tax_instalment": ("ΦΟΡΟΣ ΕΙΣΟΔΗΜΑΤΟΣ", "ΦΟΡ.ΕΙΣΟΔ", "ΦΟΡΟΥ ΕΙΣΟΔΗΜΑΤΟΣ")}
 #: Έλεγχοι που μπορεί να έρθουν ανά ΤΡΙΜΗΝΟ ενώ ο κανόνας είναι μηνιαίος (dae.govapp.gr: όπως η περίοδος ΦΠΑ).
 _QUARTER_FALLBACK = {"parepid_fee"}
 #: Κανόνες που ολοκληρώνονται ΜΟΝΟ χειροκίνητα (δεν υπάρχει ακόμη μέθοδος ελέγχου υποβολής).
@@ -522,6 +536,10 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
         if ref_month and opt["eligible_from"] > date(int(ref_month[:4]), int(ref_month[5:7]), 1):
             return "no", f"συμπληρώνει 24 μήνες από την έναρξη — επιλογή από {opt['eligible_from'].strftime('%m/%Y')}"
         return "yes", "μηνιαίος ΦΠΑ (Β΄ κατηγορία) — μπορεί να επανέλθει στο τρίμηνο"
+    if rule_id in PAYMENT_RULES:
+        answer = _payment_liability(rule_id, business, ref_month)
+        if answer:
+            return answer
     if _check_says_not_obligated(rule_id, business, ref_month):
         return "no", "ΑΑΔΕ: δεν έχει υποχρέωση υποβολής (έλεγχος υποβολών)"
     if rule_id in ("vat_monthly", "vat_quarterly"):
@@ -621,6 +639,34 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     return "yes", ""
 
 
+def _debt_hit(rule_id: str, business: dict[str, Any]) -> bool:
+    titles = strip_accents(business.get("debt_titles") or "").upper()
+    return bool(titles) and any(t in titles for t in _DEBT_TERMS.get(rule_id, ()))
+
+
+def _payment_liability(rule_id: str, business: dict[str, Any], ref_month: str) -> Optional[tuple[str, str]]:
+    """Τέλη κυκλοφορίας / ΕΝΦΙΑ / φόρος εισοδήματος: από το ειδοποιητήριο (myCAR), το εκκαθαριστικό (ETAK) ή ανοιχτή
+    οφειλή στις οφειλές ΑΑΔΕ. None = δεν ξέρουμε (συνεχίζει ο γενικός κανόνας)."""
+    years = (business.get("checks") or {}).get("years") or {}
+    y = int(ref_month[:4]) if ref_month else date.today().year
+    if rule_id == "traffic_fees":
+        st = years.get(("ΤΕΛΗ_ΚΥΚΛΟΦΟΡΙΑΣ", y))
+        if st == "pending":
+            return "yes", f"ειδοποιητήριο τελών κυκλοφορίας {y + 1} στο myCAR"
+        if st == "not_obligated":
+            return "no", "χωρίς οχήματα / τέλη κυκλοφορίας στο myCAR"
+    if rule_id == "enfia":
+        m = int(ref_month[5:7]) if ref_month else 3
+        st = years.get(("ΕΝΦΙΑ", y if m >= 3 else y - 1))
+        if st == "pending":
+            return "yes", "εκκαθαριστικό ΕΝΦΙΑ στην ΑΑΔΕ"
+        if st == "not_obligated":
+            return "no", "χωρίς εκκαθαριστικό ΕΝΦΙΑ στην ΑΑΔΕ"
+    if _debt_hit(rule_id, business):
+        return "yes", "ανοιχτή οφειλή στις οφειλές ΑΑΔΕ"
+    return None
+
+
 SUBMISSION_LABEL = {"submitted": "Υποβλήθηκε", "pending": "Σε εκκρεμότητα", "not_submitted": "ΔΕΝ υποβλήθηκε",
                     "done": "Ολοκληρώθηκε (χειροκίνητα)", "": "Δεν έχει ελεγχθεί"}
 
@@ -665,6 +711,8 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str)
         status = "not_submitted" if "not_submitted" in statuses else "pending"
     amounts = next((f["amounts"] for f in found if f.get("amounts")), {})
     out.update(status=status, label=SUBMISSION_LABEL[status], amounts=amounts)
+    if rule_id in PAYMENT_RULES and status == "pending":
+        out["label"] = "Εκδόθηκε — η εξόφληση στις οφειλές ΑΑΔΕ"
     return out
 
 

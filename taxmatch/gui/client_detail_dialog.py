@@ -197,7 +197,7 @@ class ClientDetailDialog(QDialog):
 
     def refresh_member_shortcut(self) -> None:
         row = self.conn.execute("SELECT legal_form FROM businesses WHERE afm=?", (self.afm,)).fetchone()
-        count = self.conn.execute("SELECT COUNT(*) FROM company_members WHERE company_afm=?", (self.afm,)).fetchone()[0]
+        count = self.conn.execute("SELECT COUNT(*) FROM company_members WHERE company_afm=? AND until=''", (self.afm,)).fetchone()[0]
         self.show_members_btn.setVisible(bool(row and obligations.is_legal_entity(row["legal_form"] or "") and count))
 
     def _show_company_members(self) -> None:

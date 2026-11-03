@@ -618,6 +618,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE businesses ADD COLUMN internet_contribution INTEGER;
     """,
+    # v23 — μέλη με διάρκεια (Μητρώο ΑΑΔΕ `hmenarxhs`/`hmdiakophs`): όσοι αποχώρησαν ΔΕΝ σβήνονται, και το μητρώο ανά
+    # χρήση χτίζεται από τις ημερομηνίες — ποιος μπήκε / βγήκε (ρητό αίτημα 2026-11-03). `until` κενό = ενεργό μέλος.
+    """
+    ALTER TABLE company_members ADD COLUMN until TEXT NOT NULL DEFAULT '';
+    ALTER TABLE company_members ADD COLUMN spans_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE company_member_history ADD COLUMN until TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 

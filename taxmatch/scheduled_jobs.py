@@ -122,7 +122,7 @@ def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int]
     πύλες τελών (Plastic, dae.govapp.gr), Intrastat ΕΛ.ΣΤΑΤ με τους κωδικούς του γραφείου, ειδική εισφορά διαδικτύου
     ΕΔΟΕΑΠ (ΑΚΕΕΔ — `ask_captcha` για τον κωδικό ασφαλείας) και τέλος διαφήμισης ΤΠΔ (της ΠΡΟΗΓΟΥΜΕΝΗΣ χρήσης,
     πληρώνεται τον Ιούλιο)."""
-    from . import advertising, easycheck, efka, fee_portals, intrastat
+    from . import advertising, easycheck, efka, fee_portals, intrastat, obligations, personal
     result: dict[str, Any] = {"ok": True, "entries": []}
     for y in years:
         r = easycheck.check_client(conn, afm, y, want_pdf=want_pdf)
@@ -139,7 +139,17 @@ def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int]
         if tpd:
             easycheck.store_results(conn, afm, y - 1, tpd)
             result["entries"] += tpd
+        # φυσικά πρόσωπα: τέλη κυκλοφορίας και ΕΝΦΙΑ (πληρωμές — myCAR / ETAK) με τους δικούς τους κωδικούς
+        if not obligations.is_legal_entity(_legal_form(conn, afm)):
+            for store_year, entries in personal.check_entries(conn, afm, y, want_pdf=want_pdf).items():
+                easycheck.store_results(conn, afm, store_year, entries)
+                result["entries"] += entries
     return result
+
+
+def _legal_form(conn: sqlite3.Connection, afm: str) -> str:
+    row = conn.execute("SELECT legal_form FROM businesses WHERE afm=?", (afm,)).fetchone()
+    return (row["legal_form"] if row else "") or ""
 
 
 # ---------------------------------------------------------------- εκτελέσεις (headless — δική τους σύνδεση όπου χρειάζεται)

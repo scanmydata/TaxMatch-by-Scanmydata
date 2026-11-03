@@ -40,45 +40,105 @@ def _s(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
+def _year(value: str) -> Optional[int]:
+    """«10/05/1997» ή «1997-05-10» → 1997."""
+    m = re.search(r"(\d{4})", value or "")
+    return int(m.group(1)) if m else None
+
+
+def _iso(value: str) -> str:
+    m = re.match(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})", value or "")
+    return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}" if m else (value or "")
+
+
+def _span_in_year(span: dict[str, str], year: int) -> bool:
+    start, end = _year(span.get("since", "")), _year(span.get("until", ""))
+    return (start is None or start <= year) and (end is None or end >= year)
+
+
 def snapshot(conn: sqlite3.Connection, company: str, tax_year: Optional[int] = None) -> None:
-    """Αντικαθιστά το στιγμιότυπο των μελών της εταιρείας για τη συγκεκριμένη χρήση."""
-    year = tax_year or date.today().year
+    """Μητρώο μελών ανά χρήση. Μέλη ΜΕ ημερομηνίες (Μητρώο ΑΑΔΕ) μπαίνουν σε ΚΑΘΕ χρήση όπου ήταν ενεργά, με τους
+    ρόλους που είχαν τότε· μέλη χωρίς ημερομηνίες (Excel/χειροκίνητα/παλιές αντλήσεις) γράφονται μόνο στην τρέχουσα
+    χρήση (στιγμιότυπο), οπότε τα παλιότερα έτη τους δεν αλλάζουν."""
+    this_year = date.today().year
     now = db.utcnow()
-    conn.execute("DELETE FROM company_member_history WHERE company_afm=? AND tax_year=?", (company, year))
-    conn.execute("INSERT INTO company_member_history(company_afm, tax_year, member_afm, name, role, share, since, source, "
-                 "snapshot_at) SELECT company_afm, ?, member_afm, name, role, share, since, source, ? "
-                 "FROM company_members WHERE company_afm=?", (year, now, company))
+    rows = [dict(r) for r in conn.execute("SELECT * FROM company_members WHERE company_afm=?", (company,))]
+    dated = [r for r in rows if _rows(r.get("spans_json") or "[]")]
+    undated = [r for r in rows if not _rows(r.get("spans_json") or "[]")]
+    if dated:
+        marks = ",".join("?" * len(dated))
+        conn.execute(f"DELETE FROM company_member_history WHERE company_afm=? AND member_afm IN ({marks})",
+                     (company, *[r["member_afm"] for r in dated]))
+    for r in dated:
+        spans = _rows(r["spans_json"])
+        first = min((_year(s.get("since", "")) or this_year) for s in spans)
+        for y in range(min(first, this_year), this_year + 1):
+            live = [s for s in spans if _span_in_year(s, y)]
+            if not live:
+                continue
+            roles = " · ".join(dict.fromkeys(s["role"] for s in live if s.get("role")))
+            since = min((s.get("since", "") for s in live), key=lambda v: _iso(v) or "9999")
+            ends = [s.get("until", "") for s in live]
+            until = "" if any(not e for e in ends) else max(ends, key=_iso)
+            share = next((s.get("share", "") for s in live if s.get("share")), "") or r["share"]
+            conn.execute("INSERT OR REPLACE INTO company_member_history(company_afm, tax_year, member_afm, name, role, "
+                         "share, since, until, source, snapshot_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (company, y, r["member_afm"], r["name"], roles or r["role"], share, since, until, r["source"], now))
+    if tax_year is None or tax_year == this_year:
+        conn.execute("DELETE FROM company_member_history WHERE company_afm=? AND tax_year=? AND member_afm NOT IN "
+                     "(SELECT member_afm FROM company_members WHERE company_afm=? AND spans_json<>'[]')",
+                     (company, this_year, company))
+        for r in undated:
+            if r["until"]:
+                continue                                # αποχώρησε — μένει μόνο στα παλιότερα στιγμιότυπα
+            conn.execute("INSERT OR REPLACE INTO company_member_history(company_afm, tax_year, member_afm, name, role, "
+                         "share, since, until, source, snapshot_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (company, this_year, r["member_afm"], r["name"], r["role"], r["share"], r["since"], "",
+                          r["source"], now))
+    elif tax_year:
+        # ρητό στιγμιότυπο παλιότερης χρήσης (π.χ. από tests/μετάβαση): τα μέλη χωρίς ημερομηνίες όπως είναι τώρα
+        for r in undated:
+            if not r["until"]:
+                conn.execute("INSERT OR REPLACE INTO company_member_history(company_afm, tax_year, member_afm, name, "
+                             "role, share, since, until, source, snapshot_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                             (company, tax_year, r["member_afm"], r["name"], r["role"], r["share"], r["since"], "",
+                              r["source"], now))
 
 
 def member_years(conn: sqlite3.Connection, company: str) -> list[int]:
-    """Χρήσεις με διαθέσιμο ιστορικό· δημιουργεί το τρέχον στιγμιότυπο από την ενεργή λίστα."""
+    """Χρήσεις με διαθέσιμο μητρώο μελών (ενημερώνει πρώτα το τρέχον)."""
     snapshot(conn, company)
     return [r[0] for r in conn.execute("SELECT DISTINCT tax_year FROM company_member_history "
                                        "WHERE company_afm=? ORDER BY tax_year DESC", (company,))]
 
 
-def parse_members(melh: str, sxeseis: str) -> list[dict[str, str]]:
-    """Ενεργά μέλη + σχέσεις → [{afm, name, role, share, since}] (ένα ανά ΑΦΜ· οι ιδιότητες ενώνονται)."""
-    out: dict[str, dict[str, str]] = {}
+def parse_members(melh: str, sxeseis: str) -> list[dict[str, Any]]:
+    """Μέλη + σχέσεις του Μητρώου → ένα ανά ΑΦΜ: {afm, name, role, share, since, until, spans}. ΚΡΑΤΑ και όσους
+    αποχώρησαν (`hmdiakophs`) — χρειάζονται για το μητρώο παλιότερων χρήσεων· `until` κενό = ενεργό σήμερα, και τότε
+    `role`/`share` είναι μόνο οι τρέχουσες ιδιότητες."""
+    out: dict[str, dict[str, Any]] = {}
     for r, afm_key, role_key in [(r, "afmmelous", "eidossymmetoxhs") for r in _rows(melh)] + \
                                 [(r, "afmsxeshs", "eidossxeshs") for r in _rows(sxeseis)]:
-        if _s(r.get("hmdiakophs")):
-            continue
         afm = normalize_afm(_s(r.get(afm_key)))
         if not afm:
             continue
-        m = out.setdefault(afm, {"afm": afm, "name": _s(r.get("epwnymia")), "role": "", "share": "", "since": ""})
-        role = _s(r.get(role_key))
-        if role and role not in m["role"]:
-            m["role"] = " · ".join(x for x in (m["role"], role) if x)
-        if _s(r.get("percentage")) and not m["share"]:
-            m["share"] = _s(r.get("percentage")).replace(".", ",") + "%"
-        m["since"] = m["since"] or _s(r.get("hmenarxhs"))
+        m = out.setdefault(afm, {"afm": afm, "name": _s(r.get("epwnymia")), "spans": []})
+        share = _s(r.get("percentage"))
+        m["spans"].append({"role": _s(r.get(role_key)), "since": _s(r.get("hmenarxhs")),
+                           "until": _s(r.get("hmdiakophs")), "share": share.replace(".", ",") + "%" if share else ""})
         m["name"] = m["name"] or _s(r.get("epwnymia"))
+    for m in out.values():
+        spans = m["spans"]
+        live = [s for s in spans if not s["until"]]
+        use = live or spans
+        m["role"] = " · ".join(dict.fromkeys(s["role"] for s in use if s["role"]))
+        m["share"] = next((s["share"] for s in use if s["share"]), "")
+        m["since"] = min((s["since"] for s in spans if s["since"]), key=_iso, default="")
+        m["until"] = "" if live else max((s["until"] for s in spans), key=_iso, default="")
     return list(out.values())
 
 
-def fetch_from_registry(http, afm: str) -> list[dict[str, str]]:
+def fetch_from_registry(http, afm: str) -> list[dict[str, Any]]:
     """Με ήδη συνδεδεμένο http (aade_login της εταιρείας)."""
     reg = urljoin(lookup_aade.AADE, "/saadeapps3/comregistry")
     w = reg + "/webresources/infomytaxisnet"
@@ -87,28 +147,37 @@ def fetch_from_registry(http, afm: str) -> list[dict[str, str]]:
                          http.follow("GET", f"{w}/getSxeseisEpixeirhshs/{afm}")["text"])
 
 
-def store(conn: sqlite3.Connection, company: str, members: Iterable[dict[str, str]], source: str) -> int:
-    """Αποθηκεύει (ή ενημερώνει) μέλη. Από ΑΑΔΕ: όσα δεν εμφανίζονται πια (αποχώρησαν) σβήνονται — εκτός αν ήρθαν από
-    Excel/χειροκίνητα. Επιστρέφει πλήθος."""
+def store(conn: sqlite3.Connection, company: str, members: Iterable[dict[str, Any]], source: str) -> int:
+    """Αποθηκεύει (ή ενημερώνει) μέλη και ξαναχτίζει το μητρώο ανά χρήση. ΤΙΠΟΤΑ δεν σβήνεται: όσοι αποχώρησαν
+    κρατούν ημερομηνία λήξης. Από ΑΑΔΕ: κενή απάντηση = πιθανή αστοχία, δεν αλλάζει τίποτα· μέλος της ΑΑΔΕ που δεν
+    εμφανίζεται πια σημειώνεται ως αποχωρήσαν σήμερα. Επιστρέφει πλήθος ΕΝΕΡΓΩΝ μελών."""
     members = [m for m in members if m.get("afm") and m["afm"] != company]
     now = db.utcnow()
     if source == "aade":
-        marks = ",".join("?" * len(members)) or "''"
-        conn.execute(f"DELETE FROM company_members WHERE company_afm=? AND source='aade' AND member_afm NOT IN ({marks})",
-                     (company, *[m["afm"] for m in members]))
+        if not members:
+            snapshot(conn, company)
+            return 0
+        marks = ",".join("?" * len(members))
+        conn.execute(f"UPDATE company_members SET until=?, updated_at=? WHERE company_afm=? AND source='aade' "
+                     f"AND until='' AND member_afm NOT IN ({marks})",
+                     (date.today().strftime("%d/%m/%Y"), now, company, *[m["afm"] for m in members]))
     for m in members:
-        conn.execute("INSERT INTO company_members(company_afm, member_afm, name, role, share, since, source, updated_at) "
-                     "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(company_afm, member_afm) DO UPDATE SET "
+        spans = json.dumps(m.get("spans") or [], ensure_ascii=False)
+        conn.execute("INSERT INTO company_members(company_afm, member_afm, name, role, share, since, until, spans_json, "
+                     "source, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(company_afm, member_afm) DO UPDATE SET "
                      "name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE company_members.name END, "
                      "role=CASE WHEN excluded.role<>'' THEN excluded.role ELSE company_members.role END, "
                      "share=CASE WHEN excluded.share<>'' THEN excluded.share ELSE company_members.share END, "
                      "since=CASE WHEN excluded.since<>'' THEN excluded.since ELSE company_members.since END, "
+                     "until=CASE WHEN excluded.source='aade' THEN excluded.until ELSE company_members.until END, "
+                     "spans_json=CASE WHEN excluded.spans_json<>'[]' THEN excluded.spans_json "
+                     "ELSE company_members.spans_json END, "
                      "source=CASE WHEN company_members.source IN ('excel','manual') THEN company_members.source "
                      "ELSE excluded.source END, updated_at=excluded.updated_at",
                      (company, m["afm"], m.get("name", ""), m.get("role", ""), m.get("share", ""), m.get("since", ""),
-                      source, now))
+                      m.get("until", ""), spans, source, now))
     snapshot(conn, company)
-    return len(members)
+    return sum(1 for m in members if not m.get("until"))
 
 
 def fetch_for_company(conn: sqlite3.Connection, afm: str,
@@ -120,7 +189,10 @@ def fetch_for_company(conn: sqlite3.Connection, afm: str,
     if not login.get("ok"):
         return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης."), "n": 0}
     found = fetch_from_registry(login["http"], afm)
-    return {"ok": True, "reason": "", "n": store(conn, afm, found, "aade")}
+    if not found:
+        return {"ok": False, "n": 0, "reason": "Το Μητρώο ΑΑΔΕ δεν επέστρεψε μέλη — τα αποθηκευμένα δεν άλλαξαν."}
+    return {"ok": True, "reason": "", "n": store(conn, afm, found, "aade"),
+            "left": sum(1 for m in found if m.get("until"))}
 
 
 def company_members(conn: sqlite3.Connection, company: str, tax_year: Optional[int] = None) -> list[dict[str, Any]]:
@@ -137,6 +209,9 @@ def company_members(conn: sqlite3.Connection, company: str, tax_year: Optional[i
                           (company, year)):
         d = dict(r)
         d["is_client"] = bool(r["client_afm"])
+        since_y, until_y = _year(d.get("since") or ""), _year(d.get("until") or "")
+        d["movement"] = ("Αποχώρησε " + d["until"] if until_y == year else
+                         "Εισήλθε " + d["since"] if since_y == year else "")
         d["has_creds"] = credentials.get(conn, r["member_afm"]) is not None if d["is_client"] else False
         state, legal_form = r["activity_state"] or "", r["member_legal_form"] or ""
         if not d["is_client"]:
@@ -166,7 +241,7 @@ def company_members(conn: sqlite3.Connection, company: str, tax_year: Optional[i
 
 def companies_of(conn: sqlite3.Connection, member: str) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute("SELECT m.company_afm, m.role, b.name FROM company_members m LEFT JOIN "
-                                          "businesses b ON b.afm=m.company_afm WHERE m.member_afm=?", (member,))]
+                                          "businesses b ON b.afm=m.company_afm WHERE m.member_afm=? AND m.until=''", (member,))]
 
 
 def add_as_client(conn: sqlite3.Connection, company: str, member_afm: str) -> bool:
@@ -185,7 +260,8 @@ def sync_member_clients(conn: sqlite3.Connection, company: str,
     ειδικούς κωδικούς του γραφείου — το Μητρώο TAXISnet δείχνει μόνο τον ΑΦΜ του λογαριασμού. Χωρίς αυτούς: άγνωστο."""
     from .business_profiles import service
     added = []
-    rows = conn.execute("SELECT member_afm FROM company_members WHERE company_afm=?", (company,)).fetchall()
+    rows = conn.execute("SELECT member_afm FROM company_members WHERE company_afm=? AND until=''",
+                        (company,)).fetchall()
     for r in rows:
         if add_as_client(conn, company, r["member_afm"]):
             added.append(r["member_afm"])
@@ -223,7 +299,7 @@ def parent_company(conn: sqlite3.Connection) -> dict[str, str]:
     """ΑΦΜ μέλους → ΑΦΜ εταιρείας στην οποία εμφανίζεται (λίστα πελατών). Μέλος σε πολλές: η πρώτη αλφαβητικά."""
     out: dict[str, str] = {}
     for r in conn.execute("SELECT m.member_afm, m.company_afm FROM company_members m JOIN businesses b ON "
-                          "b.afm=m.member_afm JOIN businesses c ON c.afm=m.company_afm ORDER BY m.company_afm"):
+                          "b.afm=m.member_afm JOIN businesses c ON c.afm=m.company_afm ORDER BY m.until<>'', m.company_afm"):
         if r["member_afm"] != r["company_afm"]:
             out.setdefault(r["member_afm"], r["company_afm"])
     return out
@@ -232,7 +308,8 @@ def parent_company(conn: sqlite3.Connection) -> dict[str, str]:
 def member_roles(conn: sqlite3.Connection) -> dict[str, str]:
     """ΑΦΜ μέλους → ρόλος (όπως στο Μητρώο ΑΑΔΕ, π.χ. «ΜΕΛΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ · ΝΟΜΙΜΟΣ ΕΚΠΡΟΣΩΠΟΣ»)."""
     out: dict[str, str] = {}
-    for r in conn.execute("SELECT member_afm, role FROM company_members WHERE coalesce(role,'')<>'' ORDER BY company_afm"):
+    for r in conn.execute("SELECT member_afm, role FROM company_members WHERE coalesce(role,'')<>'' AND until='' "
+                          "ORDER BY company_afm"):
         out.setdefault(r["member_afm"], r["role"])
     return out
 
@@ -255,7 +332,8 @@ def short_role(role: str) -> str:
 
 def legal_representative(conn: sqlite3.Connection, company: str) -> Optional[dict[str, Any]]:
     """Ο νόμιμος εκπρόσωπος της εταιρείας από τα (ενεργά) μέλη του Μητρώου — αλλιώς ο διαχειριστής."""
-    rows = [dict(r) for r in conn.execute("SELECT * FROM company_members WHERE company_afm=?", (company,))]
+    rows = [dict(r) for r in conn.execute("SELECT * FROM company_members WHERE company_afm=? AND until=''",
+                                          (company,))]
     for wanted in ("Νόμιμος εκπρόσωπος", "Διαχειριστής"):
         hit = next((r for r in rows if short_role(r.get("role", "")) == wanted), None)
         if hit:
@@ -296,6 +374,8 @@ def sync_aml_rep(conn: sqlite3.Connection, company: str) -> bool:
 
 def remove(conn: sqlite3.Connection, company: str, member_afm: str) -> None:
     conn.execute("DELETE FROM company_members WHERE company_afm=? AND member_afm=?", (company, member_afm))
+    conn.execute("DELETE FROM company_member_history WHERE company_afm=? AND member_afm=? AND tax_year=?",
+                 (company, member_afm, date.today().year))
     snapshot(conn, company)
 
 

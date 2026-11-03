@@ -1439,13 +1439,13 @@ def test_client_card_has_requests_and_members_tabs(window, conn, monkeypatch):
     mt = dlg.members_tab
     assert all(mt.table.horizontalHeader().sectionResizeMode(column).name == "Interactive"
                for column in range(mt.table.columnCount()))
-    assert mt.table.rowCount() == 1 and mt.table.item(0, 9).text() == "όχι" and "Μέλη/εκπρόσωποι" in mt.hint.text()
+    assert mt.table.rowCount() == 1 and mt.table.item(0, 12).text() == "όχι" and "Μέλη/εκπρόσωποι" in mt.hint.text()
     opened = []
     monkeypatch.setattr(window, "open_client_detail", lambda member_afm: opened.append(member_afm))
     mt.table.selectRow(0)
     mt._open_client()                                               # noqa: SLF001 — διπλό κλικ στο μέλος
     assert service.get(conn, "123456783") is not None
-    assert mt.table.item(0, 9).text() == "ναι, χωρίς κωδικούς" and opened == ["123456783"]
+    assert mt.table.item(0, 12).text() == "ναι, χωρίς κωδικούς" and opened == ["123456783"]
     dlg.deleteLater()
 
 

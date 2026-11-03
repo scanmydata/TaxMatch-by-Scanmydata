@@ -2,6 +2,7 @@
 KeaoCard.kt), τρέχουσες εισφορές e-ΕΦΚΑ (efka-notices.js), «Τα Αιτήματά μου» ΑΑΔΕ (easynotify/aade-request.js +
 AadeRequests.kt), μέλη εταιρειών (Μητρώο ΑΑΔΕ / Excel), στοιχεία επικοινωνίας με την πηγή τους. Χωρίς δίκτυο."""
 import json
+from datetime import date
 
 from taxmatch import debts, efka, keao, members, requests_aade as req
 from taxmatch.business_profiles import credentials, import_excel, service
@@ -179,23 +180,53 @@ def test_requests_first_fetch_is_quiet_then_changes_are_flagged(conn, tmp_path):
 
 
 # ---------------------------------------------------------------- μέλη εταιρειών
-def test_members_from_registry_only_active_and_merged_roles(conn):
+def test_members_from_registry_keep_departed_and_merged_roles(conn):
     melh = json.dumps([{"epwnymia": "ΠΑΠΑΣ ΓΙΩΡΓΟΣ", "afmmelous": MEMBER, "eidossymmetoxhs": "ΕΤΑΙΡΟΣ", "percentage": "50.5",
                         "hmenarxhs": "01/01/2020"},
                        {"epwnymia": "ΠΑΛΙΟΣ", "afmmelous": "094259216", "eidossymmetoxhs": "ΕΤΑΙΡΟΣ",
                         "hmdiakophs": "01/01/2024"}])
     sxeseis = json.dumps([{"epwnymia": "ΠΑΠΑΣ ΓΙΩΡΓΟΣ", "afmsxeshs": MEMBER, "eidossxeshs": "ΔΙΑΧΕΙΡΙΣΤΗΣ"}])
     found = members.parse_members(melh, sxeseis)
-    assert found == [{"afm": MEMBER, "name": "ΠΑΠΑΣ ΓΙΩΡΓΟΣ", "role": "ΕΤΑΙΡΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ", "share": "50,5%",
-                      "since": "01/01/2020"}]
+    active = next(m for m in found if m["afm"] == MEMBER)
+    assert (active["name"], active["role"], active["share"], active["since"], active["until"]) == (
+        "ΠΑΠΑΣ ΓΙΩΡΓΟΣ", "ΕΤΑΙΡΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ", "50,5%", "01/01/2020", "")
+    assert next(m for m in found if m["afm"] == "094259216")["until"] == "01/01/2024"
     service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
-    members.store(conn, AFM, found, "aade")
-    (m,) = members.company_members(conn, AFM)
+    assert members.store(conn, AFM, found, "aade") == 1
+    (m,) = members.company_members(conn, AFM)                                  # τρέχουσα χρήση: μόνο το ενεργό
     assert not m["is_client"] and m["role"] == "ΕΤΑΙΡΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ"
     assert members.add_as_client(conn, AFM, MEMBER)
     assert members.company_members(conn, AFM)[0]["is_client"]
-    members.store(conn, AFM, [], "aade")                                       # αποχώρησε: σβήνεται (πηγή ΑΑΔΕ)
-    assert members.company_members(conn, AFM) == []
+    members.store(conn, AFM, [], "aade")                     # κενή απάντηση = αστοχία: τίποτα δεν σβήνεται
+    assert [m["member_afm"] for m in members.company_members(conn, AFM)] == [MEMBER]
+
+
+def test_member_register_per_year_from_registry_dates(conn):
+    """Ρητό αίτημα 2026-11-03: η άντληση δεν σβήνει μέλη και χτίζει το μητρώο κάθε χρήσης — ποιος μπήκε / βγήκε."""
+    this = date.today().year
+    OLD, NEW = "010101016", "020202024"
+    melh = json.dumps([
+        {"epwnymia": "ΙΔΡΥΤΗΣ", "afmmelous": MEMBER, "eidossymmetoxhs": "ΕΤΑΙΡΟΣ", "hmenarxhs": f"01/03/{this - 3}"},
+        {"epwnymia": "ΠΑΛΙΟΣ", "afmmelous": OLD, "eidossymmetoxhs": "ΕΤΑΙΡΟΣ",
+         "hmenarxhs": f"01/03/{this - 3}", "hmdiakophs": f"30/06/{this - 1}"},
+        {"epwnymia": "ΝΕΟΣ", "afmmelous": NEW, "eidossymmetoxhs": "ΕΤΑΙΡΟΣ", "hmenarxhs": f"01/07/{this - 1}"}])
+    sxeseis = json.dumps([{"epwnymia": "ΙΔΡΥΤΗΣ", "afmsxeshs": MEMBER, "eidossxeshs": "ΔΙΑΧΕΙΡΙΣΤΗΣ",
+                           "hmenarxhs": f"01/03/{this - 3}", "hmdiakophs": f"31/12/{this - 2}"}])
+    service.add(conn, AFM, "ΑΛΦΑ ΙΚΕ")
+    members.store(conn, AFM, members.parse_members(melh, sxeseis), "aade")
+    assert members.member_years(conn, AFM) == [this, this - 1, this - 2, this - 3]
+
+    def year(y):
+        return {m["member_afm"]: m for m in members.company_members(conn, AFM, y)}
+    assert set(year(this)) == {MEMBER, NEW}
+    prev = year(this - 1)
+    assert set(prev) == {MEMBER, OLD, NEW}
+    assert prev[OLD]["movement"].startswith("Αποχώρησε") and prev[NEW]["movement"].startswith("Εισήλθε")
+    assert year(this - 2)[MEMBER]["role"] == "ΕΤΑΙΡΟΣ · ΔΙΑΧΕΙΡΙΣΤΗΣ" and year(this)[MEMBER]["role"] == "ΕΤΑΙΡΟΣ"
+    # νέα άντληση χωρίς τον «ΠΑΛΙΟ» στην απάντηση: δεν σβήνεται από τα έτη του
+    members.store(conn, AFM, [m for m in members.parse_members(melh, sxeseis) if m["afm"] != OLD], "aade")
+    assert OLD in year(this - 1) and OLD not in year(this)
+    assert members.member_roles(conn).get(OLD) is None                 # όχι πια ενεργός ρόλος
 
 
 def test_members_and_amka_from_excel(conn):

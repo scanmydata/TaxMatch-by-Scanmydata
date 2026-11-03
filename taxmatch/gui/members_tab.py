@@ -22,8 +22,8 @@ from .theme import CURRENT
 from .toast import toast
 from .workers import run_task
 
-_COLS = ["", "Χρήση", "ΑΦΜ", "Ονοματεπώνυμο / επωνυμία", "Ιδιότητα", "Ποσοστό", "Ατομική επιχείρηση",
-         "Άλλες εταιρείες", "Πηγή", "Πελάτης", "Οφειλές"]
+_COLS = ["", "Χρήση", "ΑΦΜ", "Ονοματεπώνυμο / επωνυμία", "Ιδιότητα", "Ποσοστό", "Από", "Έως", "Κίνηση στη χρήση",
+         "Ατομική επιχείρηση", "Άλλες εταιρείες", "Πηγή", "Πελάτης", "Οφειλές"]
 _SOURCE = {"aade": "Μητρώο ΑΑΔΕ", "excel": "Excel", "manual": "Χειροκίνητα"}
 
 
@@ -40,7 +40,8 @@ class MembersTab(QWidget):
         root.addWidget(self.hint)
         bar = QHBoxLayout()
         fetch = QPushButton(icon("download", CURRENT.txt, 16), "  Άντληση μελών (ΑΑΔΕ)")
-        fetch.setToolTip("Μέλη και εκπρόσωποι από το Μητρώο ΑΑΔΕ, με τους κωδικούς TAXISnet της εταιρείας — μόνο ενεργά")
+        fetch.setToolTip("Μέλη και εκπρόσωποι από το Μητρώο ΑΑΔΕ, με τους κωδικούς TAXISnet της εταιρείας — και όσοι αποχώρησαν, "
+                         "ώστε να χτιστεί το μητρώο κάθε χρήσης")
         fetch.clicked.connect(self._fetch)
         bar.addWidget(fetch)
         bar.addWidget(QLabel("Χρήση"))
@@ -60,10 +61,11 @@ class MembersTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.kit = TableKit(self.table, list(zip(_COLS, (28, 75, 95, 0, 150, 70, 145, 210, 110, 145, 150))), "client_members",
+        self.kit = TableKit(self.table, list(zip(_COLS, (28, 60, 95, 0, 150, 70, 85, 85, 150, 145, 210, 110, 145, 150))), "client_members2",
                     filterable=range(1, len(_COLS)), placeholder="Αναζήτηση μέλους (χρήση, ΑΦΜ, όνομα, ιδιότητα…)")
-        self.table.horizontalHeaderItem(6).setToolTip("Επιχείρηση του μέλους από την τελευταία διαθέσιμη ανάκτηση.")
-        self.table.horizontalHeaderItem(7).setToolTip("Άλλες εταιρείες που έχουν ήδη αντληθεί και καταχωριστεί στο TaxMatch.")
+        self.table.horizontalHeaderItem(8).setToolTip("Εισήλθε ή αποχώρησε μέσα στη χρήση που βλέπετε.")
+        self.table.horizontalHeaderItem(9).setToolTip("Επιχείρηση του μέλους από την τελευταία διαθέσιμη ανάκτηση.")
+        self.table.horizontalHeaderItem(10).setToolTip("Άλλες εταιρείες που έχουν ήδη αντληθεί και καταχωριστεί στο TaxMatch.")
         root.addWidget(self.kit.bar)
         self.table.doubleClicked.connect(lambda *_: self._open_client())
         root.addWidget(self.table, 1)
@@ -115,7 +117,8 @@ class MembersTab(QWidget):
             + "Πηγές: Μητρώο ΑΑΔΕ (με τους κωδικούς της εταιρείας — και αυτόματα με την ανάκτηση στοιχείων αν είναι "
               "ενεργή η ρύθμιση «Άντληση μελών εταιρειών») ή Excel (στήλες «ΑΦΜ εταιρείας» / «Μέλη»). Οφειλές και έντυπα "
               "μέλους αντλούνται με τους δικούς του κωδικούς — γι' αυτό πρέπει να είναι πελάτης. Κάθε χρήση κρατά "
-              "ξεχωριστό στιγμιότυπο, ώστε οι αποχωρήσεις και προσθήκες να μην αλλάζουν παλιότερα έτη.")
+              "ξεχωριστό μητρώο: από το Μητρώο ΑΑΔΕ χτίζεται με τις ημερομηνίες έναρξης/λήξης κάθε ιδιότητας, οπότε "
+              "φαίνεται ποιος μπήκε και ποιος βγήκε σε κάθε έτος — όσοι αποχώρησαν δεν σβήνονται.")
         self._rows = members.company_members(self.conn, self.afm, selected_year)
         self.remove_button.setEnabled(selected_year == date.today().year)
         t = self.table
@@ -126,6 +129,7 @@ class MembersTab(QWidget):
                                    for k, v in m["debts"].items() if v["status"] == "ok") or "—"
             client = ("ναι, με κωδικούς" if m["has_creds"] else "ναι, χωρίς κωδικούς") if m["is_client"] else "όχι"
             cells = ["", str(m["tax_year"]), m["member_afm"], m["name"] or "—", m["role"], m["share"],
+                     m.get("since") or "", m.get("until") or "", m.get("movement") or "",
                      m["own_business"], m["other_companies"], _SOURCE.get(m["source"], m["source"]), client, debt_text]
             for col, text in enumerate(cells):
                 item = SortItem(text)
@@ -133,7 +137,9 @@ class MembersTab(QWidget):
                     item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                     item.setCheckState(Qt.CheckState.Unchecked)
                     item.setData(Qt.ItemDataRole.UserRole, i)
-                if col == 9:
+                if col == 8 and m.get("movement"):
+                    item.setForeground(QColor(CURRENT.warn if m["movement"].startswith("Αποχ") else CURRENT.ok))
+                if col == 12:
                     item.setForeground(QColor(CURRENT.ok if m["has_creds"] else (CURRENT.warn if m["is_client"]
                                                                                  else CURRENT.muted)))
                 t.setItem(i, col, item)
@@ -159,7 +165,9 @@ class MembersTab(QWidget):
                 conn.close()
 
         def done(res):
-            toast(self.window_, f"Βρέθηκαν {res['n']} ενεργά μέλη/εκπρόσωποι." if res["ok"] else res["reason"],
+            toast(self.window_, (f"Βρέθηκαν {res['n']} ενεργά μέλη/εκπρόσωποι"
+                                 + (f" και {res['left']} που αποχώρησαν (μένουν στο μητρώο των ετών τους)."
+                                    if res.get("left") else ".")) if res["ok"] else res["reason"],
                   "ok" if res["ok"] else "danger")
             self.reload()
             if hasattr(self.window_, "refresh_member_shortcut"):
