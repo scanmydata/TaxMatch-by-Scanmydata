@@ -303,6 +303,9 @@ def wanted(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
     for r in conn.execute("SELECT DISTINCT obligation FROM obligation_checks WHERE afm=? AND obligation IN "
                           "('ΠΛΑΣΤΙΚΑ','ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ') AND status<>'not_obligated'", (afm,)):
         out.add(r["obligation"])
+    flag = conn.execute("SELECT parepid FROM businesses WHERE afm=?", (afm,)).fetchone()
+    if flag and flag[0] is not None:                    # ρητή επιλογή στο Προφίλ υπερισχύει
+        (out.add if flag[0] else out.discard)("ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ")
     return out
 
 

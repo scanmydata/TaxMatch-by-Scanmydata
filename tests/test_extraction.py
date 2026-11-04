@@ -137,7 +137,7 @@ def test_very_long_article_is_summarized_by_llm_instead_of_character_truncated(c
 
 
 def test_summarize_falls_back_to_smart_truncate_on_invalid_json(conn):
-    long_text = "Κείμενο άρθρου. " * 500
+    long_text = "Κείμενο άρθρου. " * 1000
     calls = {"n": 0}
 
     def route(url, **kw):
@@ -159,7 +159,7 @@ def test_summarize_falls_back_to_smart_truncate_on_invalid_json(conn):
 
 
 def test_summarize_error_propagates_like_a_normal_llm_error(conn):
-    long_text = "Κείμενο άρθρου. " * 500
+    long_text = "Κείμενο άρθρου. " * 1000
 
     def route(url, **kw):
         system = kw["json"]["messages"][0]["content"]

@@ -107,7 +107,16 @@ _CLIENT_SHOW = [("Όλοι οι πελάτες", ""), ("Με κωδικούς TA
                 ("Με ελλιπή στοιχεία", "incomplete"), ("Με υποβολές που λείπουν", "missing"),
                 ("Εταιρείες (νομικά πρόσωπα)", "company"), ("Ατομικές επιχειρήσεις", "sole"),
                 ("Ιδιώτες", "private"), ("Με διακοπή εργασιών", "ceased"), ("Μέλη εταιρειών", "member"),
-                ("Πιθανοί υπόχρεοι τέλους παρεπιδημούντων", "parepid")]
+                ("Πιθανοί υπόχρεοι τέλους παρεπιδημούντων", "parepid"),
+                ("Υπόχρεοι τέλους παρεπιδημούντων (Προφίλ)", "parepid_on"),
+                ("Πρόταση ειδικής εισφοράς διαδικτύου (Google / Meta)", "google"),
+                ("Με ειδική εισφορά διαδικτύου (ΑΚΕΕΔ)", "internet"),
+                ("Δυνατότητα επιστροφής σε τριμηνιαίο ΦΠΑ", "vat_quarter"),
+                ("ΦΠΑ σε παραστατικά μη υπόχρεου", "vat_mismatch"),
+                ("Τέλος πλαστικής σακούλας (myDATA)", "plastic_bag"),
+                ("Εισφορά πλαστικών προϊόντων (myDATA)", "plastics"),
+                ("Εισφορές πλαστικών χωρίς υποβολή τριμήνου", "plastic_late"),
+                ("Με ΑΠΔ ΤΕΚΑ", "teka")]
 _C_CHK, _C_AFM, _C_NAME, _C_KIND, _C_STATE, _C_KAD, _C_BOOKS, _C_VAT, _C_LOOKUP, _C_CREDS, _C_MATCHES, _C_FEE, _C_CHECKS = range(13)
 
 _NEWS_COLS = [("Πηγή", 130, ""), ("Ημερομηνία", 90, ""), ("Τίτλος", 0, "Διπλό κλικ για προεπισκόπηση"),
@@ -388,9 +397,37 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QKeySequence, QShortcut
         QShortcut(QKeySequence("Ctrl+K"), self, activated=lambda: (self.quick_search.setFocus(), self.quick_search.selectAll()))
 
-        self.notices_box = QVBoxLayout()
+        # Κέντρο ειδοποιήσεων (ρητό αίτημα 2026-11-04): αντί για banner που «έτρωγαν» την οθόνη, ένα κουμπί 🔔 με
+        # μετρητή στην πάνω μπάρα ανοίγει/κλείνει πάνελ με όλες τις ειδοποιήσεις και τις ενέργειές τους.
+        self.notice_btn = QPushButton("🔔")
+        self.notice_btn.setCheckable(True)
+        self.notice_btn.setToolTip("Κέντρο ειδοποιήσεων")
+        self.notice_btn.toggled.connect(lambda on: self.notice_panel.setVisible(on))
+        quick_row.insertWidget(quick_row.count() - 1, self.notice_btn)
+        self.notice_panel = QFrame()
+        self.notice_panel.setObjectName("noticeCenter")
+        panel = QVBoxLayout(self.notice_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        self.notice_title = QLabel("<b>Κέντρο ειδοποιήσεων</b>")
+        head.addWidget(self.notice_title)
+        head.addStretch()
+        close_panel = QPushButton("Κλείσιμο")
+        close_panel.clicked.connect(lambda: self.notice_btn.setChecked(False))
+        head.addWidget(close_panel)
+        panel.addLayout(head)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMaximumHeight(340)
+        holder = QWidget()
+        self.notices_box = QVBoxLayout(holder)
+        self.notices_box.setContentsMargins(0, 0, 0, 0)
         self.notices_box.setSpacing(6)
-        root.addLayout(self.notices_box)
+        scroll.setWidget(holder)
+        panel.addWidget(scroll)
+        self.notice_panel.hide()
+        root.addWidget(self.notice_panel)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -473,7 +510,24 @@ class MainWindow(QMainWindow):
             item = self.notices_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        for n in notices_mod.collect(self.conn) + self._aml_notices():
+        found = notices_mod.collect(self.conn) + self._aml_notices()
+        n_all = len(found)
+        worst = next((lvl for lvl in ("danger", "warn", "info") if any(x["level"] == lvl for x in found)), "")
+        colour_of = {"danger": CURRENT.bad, "warn": CURRENT.warn, "info": CURRENT.accent}
+        self.notice_btn.setText(f"🔔 {n_all}" if n_all else "🔔")
+        self.notice_btn.setStyleSheet(f"color:{colour_of[worst]}; font-weight:700;" if worst else "")
+        self.notice_btn.setToolTip(f"Κέντρο ειδοποιήσεων — {n_all} ειδοποιήσεις" if n_all else
+                                   "Κέντρο ειδοποιήσεων — καμία ειδοποίηση")
+        self.notice_title.setText(f"<b>Κέντρο ειδοποιήσεων</b> ({n_all})" if n_all else
+                                  "<b>Κέντρο ειδοποιήσεων</b> — καμία ειδοποίηση")
+        # νέο σφάλμα (λάθος κωδικοί, LLM…): το πάνελ ανοίγει μόνο του μία φορά, για να μη χαθεί
+        fresh = {x["text"] for x in found if x["level"] == "danger"} - getattr(self, "_danger_seen", set())
+        self._danger_seen = getattr(self, "_danger_seen", set()) | fresh
+        if fresh:
+            self.notice_btn.setChecked(True)
+        if not n_all:
+            self.notice_btn.setChecked(False)
+        for n in found:
             frame = QFrame()
             frame.setObjectName("banner")
             row = QHBoxLayout(frame)
@@ -530,6 +584,15 @@ class MainWindow(QMainWindow):
             from .. import advertising
             settings_store.set_value(self.conn, "notice_google_read", ",".join(advertising.google_candidates(self.conn)))
             toast(self, "Η πρόταση κρύφτηκε — η επιλογή «Ειδική εισφορά διαδικτύου» μένει στο Προφίλ κάθε πελάτη.", "ok")
+        if key == "vat_mismatch":
+            stamp = ",".join(f"{a}:{n}" for a, n in sorted(notices_mod.vat_mismatch_clients(self.conn).items()))
+            settings_store.set_value(self.conn, "notice_vat_mismatch_read", stamp)
+            toast(self, "Η ειδοποίηση κρύφτηκε — οι πελάτες βρίσκονται με το φίλτρο «ΦΠΑ σε παραστατικά μη υπόχρεου» "
+                        "και ξαναεμφανίζεται αν προκύψουν νέα τέτοια παραστατικά.", "ok")
+        if key == "plastic":
+            notices_mod.mark_plastic_read(self.conn)
+            toast(self, "Η ειδοποίηση κρύφτηκε — οι πελάτες βρίσκονται με τα φίλτρα «Τέλος πλαστικής σακούλας» / "
+                        "«Εισφορά πλαστικών προϊόντων» και ξαναεμφανίζεται σε νέο τρίμηνο ή νέο πελάτη.", "ok")
         if key == "vat_quarter":
             notices_mod.mark_vat_quarter_read(self.conn)
             toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη ΦΠΑ ώσπου να ανοίξετε την "
@@ -793,8 +856,16 @@ class MainWindow(QMainWindow):
         parents = members_mod.parent_company(self.conn)             # μέλος → εταιρεία (εμφανίζεται κάτω της)
         roles = members_mod.member_roles(self.conn)
         parepid_afms = set(notices_mod.parepid_candidates(self.conn))
+        from .. import advertising
+        google_afms = set(advertising.google_candidates(self.conn))
+        mismatch_afms = set(notices_mod.vat_mismatch_clients(self.conn, self._fiscal_year))
+        plastic = notices_mod.plastic_clients(self.conn, self._fiscal_year)
+        plastic_late = notices_mod.plastic_unsubmitted(self.conn, self._fiscal_year)
+        extra_flags = {x["afm"]: x for x in self.conn.execute(
+            "SELECT afm, parepid, internet_contribution, teka FROM businesses")}
         with_children = set(parents.values())
         vat_option, vat_deadline = notices_mod.vat_quarter_eligible(self.conn)
+        vat_all = set(vat_option)
         if vat_option and notices_mod.vat_quarter_read(self.conn):
             vat_option = sorted(set(vat_option) & notices_mod.marks(self.conn, "vat"))
         parepid_marked = (parepid_afms & notices_mod.marks(self.conn, "parepid")
@@ -884,6 +955,22 @@ class MainWindow(QMainWindow):
                 flags.add("missing")
             if r["afm"] in parepid_afms:
                 flags.add("parepid")
+            ex = extra_flags.get(r["afm"])
+            if ex is not None:
+                for key, col in (("parepid_on", "parepid"), ("internet", "internet_contribution"), ("teka", "teka")):
+                    if ex[col]:
+                        flags.add(key)
+            if r["afm"] in google_afms:
+                flags.add("google")
+            if r["afm"] in mismatch_afms:
+                flags.add("vat_mismatch")
+            if r["afm"] in vat_all:
+                flags.add("vat_quarter")
+            for key in notices_mod.PLASTIC_FEES:
+                if r["afm"] in plastic[key]:
+                    flags.add(key)
+                    if r["afm"] in plastic_late[key]:
+                        flags.add("plastic_late")
             self._client_flags[r["afm"]] = flags
             fee = fees.get(r["afm"])
             fee_item = _ClientItem(office.money(fee) if fee else "—", (0, fee or 0.0))
@@ -1166,7 +1253,7 @@ class MainWindow(QMainWindow):
             self.offer_handoffs([h for h in handoff.pending(since=started) if h["afm"] in afms], window)
             return msg, "warn" if state["missing"] or state["failed"] else "ok"
 
-        self.jobs.submit(title, work, total=total, window=window, on_done=done)
+        self.jobs.submit(title, work, total=total, window=window, on_done=done, afms=afms)
 
     def ask_submission_pdf(self, parent: QWidget) -> Optional[bool]:
         """Popup πριν τον έλεγχο υποβολών (ρητό αίτημα 2026-10-27): και PDF των υποβληθεισών δηλώσεων; None = άκυρο."""
@@ -1328,7 +1415,7 @@ class MainWindow(QMainWindow):
             return msg, "warn" if state["failed"] else "ok"
 
         self.jobs.submit(f"{'έντυπα' if want_pdf else 'ενημέρωση'} οφειλών — {total} "
-                         f"{'πελάτης' if total == 1 else 'πελάτες'}", work, total=total, window=window, on_done=done)
+                         f"{'πελάτης' if total == 1 else 'πελάτες'}", work, total=total, window=window, on_done=done, afms=afms)
 
     def on_fetch_requests(self) -> None:
         with_creds = {a for a, c in client_creds.status_map(self.conn).items() if c["complete"]}
@@ -1380,7 +1467,7 @@ class MainWindow(QMainWindow):
             return msg, "warn" if state["failed"] else "ok"
 
         self.jobs.submit(f"αιτήματα ΑΑΔΕ — {total} {'πελάτης' if total == 1 else 'πελάτες'}", work, total=total,
-                         window=window, on_done=done)
+                         window=window, on_done=done, afms=afms)
 
     def on_fetch_mydata(self) -> None:
         """Μαζική λήψη myDATA (στοιχεία, όχι PDF): οι μήνες που χρειάζονται (τρέχων + προηγούμενος + όσοι λείπουν)."""
@@ -1441,7 +1528,7 @@ class MainWindow(QMainWindow):
             msg += f" — {state['failed']} πελάτες απέτυχαν (κωδικοί/σύνδεση)." if state["failed"] else "."
             return msg, "warn" if state["failed"] else "ok"
 
-        self.jobs.submit(title, work, total=total, window=window, on_done=done)
+        self.jobs.submit(title, work, total=total, window=window, on_done=done, afms=afms)
 
     def _client_names(self, afms: list[str]) -> dict[str, str]:
         if not afms:
@@ -1513,7 +1600,7 @@ class MainWindow(QMainWindow):
         stop = threading.Event()
         started = time.monotonic()
         bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…",
-                            on_cancel=stop.set)
+                            on_cancel=stop.set, afm=afms[0] if total == 1 else "")
         state = {"done": 0}
 
         def work(progress):
@@ -1569,6 +1656,8 @@ class MainWindow(QMainWindow):
         notices_mod.clear_marks(self.conn, afm)            # ο χρήστης είδε τον πελάτη: οι αστερίσκοι του σβήνουν
         try:
             dlg = ClientDetailDialog(self, afm, tab=tab)
+            from . import toast as toast_mod
+            QTimer.singleShot(0, lambda: toast_mod.claim_for(dlg, afm))     # πρόοδος εργασιών του πελάτη → στην καρτέλα
             dlg.exec()
         finally:
             self._client_detail_open = False

@@ -51,11 +51,13 @@ class JobQueue:
         return ([self._running] if self._running else []) + list(self._pending)
 
     def submit(self, title: str, work, *, total: int = 0, window: Optional[QWidget] = None, on_done=None,
-               on_error=None) -> Job:
+               on_error=None, afms: Optional[list[str]] = None) -> Job:
         job = Job(title, work, on_done, on_error, total)
         waiting = self._running is not None
+        # εργασία ΕΝΟΣ πελάτη: η πρόοδος περνά στην καρτέλα του όταν ανοίξει (και πίσω όταν κλείσει)
+        one = afms[0] if afms and len(afms) == 1 else getattr(window, "afm", "") or ""
         job.toast = ProgressToast(window or self._main, ("Σε αναμονή: " if waiting else "Ξεκίνησε: ") + title,
-                                  on_cancel=lambda j=job: self._cancel(j))
+                                  on_cancel=lambda j=job: self._cancel(j), afm=one)
         self._pending.append(job)
         self._next()
         return job

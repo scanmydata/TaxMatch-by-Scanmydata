@@ -169,6 +169,13 @@ def ingest(conn: sqlite3.Connection, sources: list[Source], session: Optional[re
             items = fetch_feed(src, s)
             new = store_obligations(conn, items) if src.kind == "calendar" else store_articles(conn, src.id, items, keywords=src.keywords)
             stats[src.id] = {"fetched": len(items), "new": new}
+            if src.id == "taxheaven_new":                       # το feed κρατά μόνο 15 — συμπλήρωση κενών αρίθμησης
+                from . import taxheaven_backfill
+                try:
+                    stats["taxheaven_backfill"] = taxheaven_backfill.backfill(conn, s)
+                except Exception as exc:                        # noqa: BLE001 — ποτέ δεν σταματά τα υπόλοιπα feeds
+                    log.warning("taxheaven backfill: %s", exc)
+                    stats["taxheaven_backfill"] = {"error": str(exc)[:300]}
         except Exception as exc:  # δίκτυο, XML, κ.λπ.
             log.warning("Αποτυχία πηγής %s: %s", src.id, exc)
             stats[src.id] = {"error": str(exc)[:300]}

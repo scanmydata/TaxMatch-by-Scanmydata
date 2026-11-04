@@ -227,7 +227,11 @@ class MydataTab(QWidget):
         self._docs: list[dict[str, Any]] = []
         root = QVBoxLayout(self)
 
-        creds = QHBoxLayout()
+        # Κλειδιά: ορατά μόνο όσο λείπουν· με αποθηκευμένα, popup «Κλειδιά myDATA…» (ρητό αίτημα 2026-11-04 — να
+        # μεγαλώσει ο πίνακας παραστατικών).
+        self.creds_widget = QWidget()
+        creds = QHBoxLayout(self.creds_widget)
+        creds.setContentsMargins(0, 0, 0, 0)
         self.user = QLineEdit()
         self.user.setPlaceholderText("Όνομα χρήστη myDATA")
         self.key = QLineEdit()
@@ -243,7 +247,7 @@ class MydataTab(QWidget):
         test.setToolTip("Μικρό αίτημα στο myDATA (σύνολα εξόδων) — επιβεβαιώνει ότι οι κωδικοί γίνονται δεκτοί")
         test.clicked.connect(self._check_creds)
         creds.addWidget(test)
-        root.addLayout(creds)
+        root.addWidget(self.creds_widget)
         self.creds_status = QLabel("")
         self.creds_status.setObjectName("muted")
         root.addWidget(self.creds_status)
@@ -277,6 +281,13 @@ class MydataTab(QWidget):
         history.clicked.connect(lambda: self._fetch(_months(HISTORY_MONTHS), pdf=False, only_missing=True))
         bar.addWidget(history)
         bar.addStretch()
+        self.summary_btn = QPushButton(icon("calendar", CURRENT.txt, 16), "  Υποχρεώσεις μήνα…")
+        self.summary_btn.setToolTip("Παρακρατήσεις, τέλη, VIES, Intrastat και ΦΠΑ της περιόδου, με την κατάσταση υποβολής")
+        self.summary_btn.clicked.connect(self._show_summary)
+        bar.addWidget(self.summary_btn)
+        self.keys_btn = QPushButton(icon("lock", CURRENT.txt, 16), "  Κλειδιά myDATA…")
+        self.keys_btn.clicked.connect(self._show_keys)
+        bar.addWidget(self.keys_btn)
         root.addLayout(bar)
 
         self.warning = QLabel("")
@@ -292,7 +303,7 @@ class MydataTab(QWidget):
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setObjectName("card")
         self.summary.linkActivated.connect(self._on_link)
-        root.addWidget(self.summary)
+        self.summary.hide()                            # εμφανίζεται στο popup «Υποχρεώσεις μήνα…»
 
         self.table = QTableWidget(0, len(_COLS))
         self.table.verticalHeader().setVisible(False)
@@ -418,6 +429,57 @@ class MydataTab(QWidget):
             row["check_status"] if row else "", "Δεν έχουν ελεγχθεί." if has_key else
             "Χωρίς κωδικούς myDATA — ορίστε τους εδώ ή εισάγετέ τους από Excel (στήλη «Api myData»).")
         self.creds_status.setText(status)
+        stored = bool(row and row["mydata_key"])
+        if self.creds_widget.parent() is self:         # όχι όσο είναι μέσα στο popup
+            self.creds_widget.setVisible(not stored)
+            self.creds_status.setVisible(not stored or (row["check_status"] if row else "") == "invalid")
+        self.keys_btn.setVisible(stored)
+        self.keys_btn.setText("  Κλειδιά myDATA…" + (" ⚠" if row and row["check_status"] == "invalid" else ""))
+
+    def _popup(self, title: str, widget: QWidget, width: int = 760) -> None:
+        """Δείχνει ένα υπάρχον widget της καρτέλας σε popup και το επιστρέφει κρυμμένο στη θέση του."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QScrollArea
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(width, 460)
+        lay = QVBoxLayout(dlg)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        holder = QWidget()
+        inner = QVBoxLayout(holder)
+        index = self.layout().indexOf(widget)
+        inner.addWidget(widget)
+        widget.show()
+        inner.addStretch()
+        scroll.setWidget(holder)
+        lay.addWidget(scroll, 1)
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        box.rejected.connect(dlg.reject)
+        lay.addWidget(box)
+        dlg.exec()
+        widget.setParent(self)
+        if index >= 0:
+            self.layout().insertWidget(index, widget)
+        widget.hide()
+
+    def _show_summary(self) -> None:
+        self._popup(f"Υποχρεώσεις — {self.month.currentText() or self.year.currentText()}", self.summary)
+
+    def _show_keys(self) -> None:
+        holder = QWidget()
+        lay = QVBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        index = self.layout().indexOf(self.creds_widget)
+        lay.addWidget(self.creds_widget)
+        self.creds_widget.show()
+        status_index = self.layout().indexOf(self.creds_status)
+        lay.addWidget(self.creds_status)
+        self.creds_status.show()
+        self._popup("Κλειδιά myDATA", holder, 820)
+        for w, i in ((self.creds_widget, index), (self.creds_status, status_index)):
+            w.setParent(self)
+            self.layout().insertWidget(i, w)
+        self._reload_creds()
 
     # ------------------------------------------------------------------ λήψη (ουρά εργασιών του κύριου παραθύρου)
     def _fetch(self, months: list[str], pdf: bool, only_missing: bool = False) -> None:
@@ -508,6 +570,10 @@ class MydataTab(QWidget):
         self.kit.end()
         self._render_warning()
         self._render_summary(ym)
+        pending = self.summary.text().count(f"color:{CURRENT.warn}'>")
+        self.summary_btn.setText(("  Υποχρεώσεις χρήσης…" if len(ym) == 4 else "  Υποχρεώσεις μήνα…")
+                                 + (f" ({pending} εκκρεμούν)" if pending else ""))
+        self.summary_btn.setStyleSheet(f"color:{CURRENT.warn}; font-weight:700;" if pending else "")
         self.preview_note.setText(f"{len(self._docs)} παραστατικά" if self._docs else "")
 
     def _non_vat(self) -> bool:
@@ -561,6 +627,9 @@ class MydataTab(QWidget):
                 lines.append(f"<b>{office.money(w['amount'])}</b> — {html.escape(w['label'])} ({w['n_docs']} παραστατικά, "
                              f"βάση {office.money(w['base'])}) → <b>{html.escape(w['declaration'])}</b> έως "
                              f"<b>{date.fromisoformat(w['due']).strftime('%d/%m/%Y')}</b> · {status}")
+                cross = self._cross_check(w, ym, business)
+                if cross:
+                    lines[-1] += f"<br>&nbsp;&nbsp;↳ {cross}"
             rows.append(self._row("Παρακρατούμενοι φόροι", "<br>".join(lines), "done" if all(states) else "open"))
         else:
             rows.append(self._row("Παρακρατούμενοι φόροι", "κανένα παραστατικό λήψης με παρακράτηση", ""))
@@ -601,6 +670,22 @@ class MydataTab(QWidget):
                                                         if intr["any"] else ""), "open" if intr["any"] else ""))
         rows.append(self._vat_row(ym, business))
         self.summary.setText(self._table(rows))
+
+    def _cross_check(self, w: dict[str, Any], ym: str, business: dict[str, Any]) -> str:
+        """Διασταύρωση του PDF της δήλωσης (ΦΜΥ_ΕΠΙΧ 20% / ΕΡΓΟΛΑΒΩΝ 3%) με τα παραστατικά του μήνα — HTML ή ''."""
+        from .. import withholding_check
+        key = w.get("easycheck") or ""
+        if key not in withholding_check.CATEGORY:
+            return ""
+        period = ((business.get("checks") or {}).get("periods") or {}).get((key, ym)) or {}
+        pdf = (period.get("amounts") or {}).get("submission_pdf") or ""
+        if not pdf or not Path(pdf).exists():
+            return (f"<span style='color:{CURRENT.muted}'>διασταύρωση με τη δήλωση: χρειάζεται το PDF της (Έλεγχος "
+                    "υποβολών «και λήψη PDF»)</span>") if period.get("status") == "submitted" else ""
+        res = withholding_check.reconcile(self.conn, self.afm, ym, key, pdf)
+        text = html.escape(withholding_check.summary_text(res, names.name_map(self.conn)))
+        colour = CURRENT.ok if res["ok"] else (CURRENT.muted if res["ok"] is None else CURRENT.bad)
+        return f"<span style='color:{colour}'>{text}</span>"
 
     def _vat_row(self, ym: str, business: dict[str, Any]) -> str:
         """ΦΠΑ: περίοδος (μηνιαία/τριμηνιαία — διακριτά), ενδεικτικό υπόλοιπο myDATA και η Φ2 της περιόδου από την ΑΑΔΕ."""

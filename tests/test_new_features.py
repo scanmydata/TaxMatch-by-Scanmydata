@@ -509,7 +509,7 @@ def test_import_result_saves_gemi_credentials_encrypted(conn):
     out = service.import_result(conn, res)
     assert out["gemi"] == 1 and gemi_browser.get_credentials(conn, AFM) == ("gu", "gp")
     raw = conn.execute("SELECT gemi_pass FROM aml_gemi_credentials WHERE afm=?", (AFM,)).fetchone()[0]
-    assert raw.startswith("enc:1:") and "gp" not in raw
+    assert raw.startswith("enc:1:") and raw[len("enc:1:"):] != "gp"   # το ciphertext μπορεί τυχαία να περιέχει «gp»
 
 
 def test_mydata_columns_like_timologio_never_etimologio_or_web_password(conn):

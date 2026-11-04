@@ -187,7 +187,7 @@ def test_ames_with_own_credentials_are_encrypted(conn):
     service.add(conn, AFM, "ΑΛΦΑ")
     efka.upsert_ame(conn, AFM, "20000009", kind="oikodom", name="ΕΡΓΟ Α", user="ergo1", password="p1")
     raw = conn.execute("SELECT ika_user, ika_pass FROM efka_ames WHERE afm=?", (AFM,)).fetchone()
-    assert raw["ika_pass"].startswith("enc:1:") and "p1" not in raw["ika_pass"]
+    assert raw["ika_pass"].startswith("enc:1:") and raw["ika_pass"][len("enc:1:"):] != "p1"   # το ciphertext μπορεί τυχαία να περιέχει «p1»
     assert efka.ame_credentials(conn, AFM, "0020000009") == ("ergo1", "p1")
     a = efka.list_ames(conn, AFM)[0]
     assert a["ame"] == "0020000009" and a["has_pass"] and "ika_pass" not in a

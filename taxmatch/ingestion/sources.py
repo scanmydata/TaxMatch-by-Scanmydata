@@ -26,6 +26,13 @@ class Source:
 SOURCES: list[Source] = [
     Source("taxheaven_new", "Taxheaven — Νέα", f"{TAXHEAVEN}/soft_new.xml", publisher="taxheaven.gr"),
     Source("taxheaven_law", "Taxheaven — Νέες αποφάσεις/εγκύκλιοι", f"{TAXHEAVEN}/soft_law.xml", publisher="taxheaven.gr"),
+    # 2026-11-04 (ρητό αίτημα «καλύτερη ανάκτηση από το taxheaven»): νόμοι και ΣΣΕ — feeds που υπήρχαν στη σελίδα RSS
+    # τους (taxheaven.gr/rss) αλλά δεν τα διαβάζαμε. Τα νέα (`soft_new`, μόνο 15) συμπληρώνονται από την αρίθμηση
+    # (ingestion/taxheaven_backfill.py).
+    Source("taxheaven_laws", "Taxheaven — Νέοι νόμοι", f"{TAXHEAVEN}/soft_lawl.xml", publisher="taxheaven.gr",
+           note="Μόνο ο αριθμός του νόμου στο feed — το περιεχόμενο διαβάζεται από τη σελίδα του νόμου."),
+    Source("taxheaven_sse", "Taxheaven — Συλλογικές συμβάσεις εργασίας", f"{TAXHEAVEN}/soft_sse.xml",
+           publisher="taxheaven.gr", note="ΣΣΕ ανά κλάδο — αντιστοιχίζονται σε εργοδότες του κλάδου (ΚΑΔ)."),
     # ΟΧΙ το soft_dat.xml: επαληθεύτηκε (2026-09-22) ότι είναι κυλιόμενο παράθυρο ~6 εβδομάδων — για τον Ιούλιο 2026
     # π.χ. δεν έχει ΚΑΜΙΑ εγγραφή, ενώ η ίδια η σελίδα δείχνει 90. Διαβάζουμε απευθείας τη σελίδα ημερολογίου
     # (taxheaven_calendar.py): «κοντινοί» μήνες φρεσκάρονται σε κάθε έλεγχο, μακρινοί μία φορά όταν ζητηθούν.

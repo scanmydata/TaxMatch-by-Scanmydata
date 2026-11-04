@@ -9,7 +9,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -53,9 +53,22 @@ def is_free_model(provider: str, model_id: str) -> bool:
     """Groq: όλος ο κατάλογος είναι δωρεάν βαθμίδα. OpenRouter: μόνο όσα λήγουν σε ':free' (πραγματικά χωρίς χρέωση)."""
     return provider == "groq" or model_id.endswith(":free")
 MAX_TRIES = 3
-FULL_TEXT_MAX = 5000          # χαρακτήρες προς το LLM (τα ελληνικά «κοστίζουν» πολλά tokens)
+# 2026-11-04: ίσο με το αποθηκευμένο κείμενο. Με 5000 σχεδόν ΚΑΘΕ άρθρο (το αποθηκευμένο είναι συνήθως 8000) περνούσε
+# πρώτα από περίληψη — δύο κλήσεις LLM ανά άρθρο, ενώ το αποθηκευμένο είναι ήδη έξυπνα περικομμένο (αρχή + τέλος). Η
+# περίληψη μένει για κείμενα πάνω από αυτό το όριο.
+FULL_TEXT_MAX = 8000          # χαρακτήρες προς το LLM (τα ελληνικά «κοστίζουν» πολλά tokens)
 STORED_TEXT_MAX = 8000
 MIN_SECONDS_BETWEEN_CALLS = 2.0
+#: Άρθρο που θέλει περισσότερο από τόσο (μέσος όρος των πρώτων `SLOW_SAMPLE`) = αργό μοντέλο: μία αυτόματη αλλαγή σε
+#: άλλο δωρεάν ανά εκτέλεση. Ζωντανά (2026-11-04) ένα δωρεάν «preview» μοντέλο ανέλυε 6–12 άρθρα στα 25′ του
+#: προγραμματισμένου ελέγχου, ενώ έρχονται ~50 σχετικά την ημέρα — η ουρά μεγάλωνε κάθε μέρα (163).
+SLOW_SECONDS = 45.0
+SLOW_SAMPLE = 3
+#: Σειρά ανάλυσης: πρωτογενείς/εξειδικευμένες πηγές πρώτα, γενικά portals μετά, δικαστικές αποφάσεις στο τέλος (το
+#: prompt τις θεωρεί συνήθως άσχετες — μεμονωμένες υποθέσεις).
+PRIMARY_SOURCES = ("taxheaven_new", "taxheaven_law", "taxheaven_laws", "taxheaven_sse", "eforologia_7", "eforologia_1",
+                   "eforologia_4", "eforologia_8", "eforologia_9", "enomothesia", "ot_forologia")
+_COURT_RE = re.compile(r"^\s*(ΣτΕ|ΣΤΕ|ΑΠ|Α\.Π\.|ΔΕφ|ΔΠρ|ΔΕΕ|ΓενΔΕΕ|Υπόθεση\s+[CT][‑-]|Απόφαση\s+ΔΕΕ|ΕλΣυν)(?![Α-Ωα-ωA-Za-z])")
 
 
 class LLMError(Exception):
@@ -399,6 +412,32 @@ def extract_article(conn: sqlite3.Connection, article: sqlite3.Row, client: LLMC
     return status
 
 
+#: Αλλάζει όταν αλλάζει ουσιαστικά το prompt εξαγωγής. 2 (2026-11-04): αυστηρότερο «all», `entity_types`,
+#: `employers_only` — τα πρόσφατα «για όλους» άρθρα ξαναναλύονται μία φορά (`reanalyze_for_prompt`).
+PROMPT_VERSION = 2
+REANALYZE_DAYS = 21
+
+
+def reanalyze_for_prompt(conn: sqlite3.Connection) -> int:
+    """Μία φορά ανά νέα έκδοση prompt: τα άρθρα των τελευταίων `REANALYZE_DAYS` με scope «all» ξαναμπαίνουν στην ουρά
+    (με το παλιό prompt σχεδόν όλα έβγαιναν «all» → κάθε άρθρο σε όλους τους πελάτες). Επιστρέφει πόσα."""
+    if settings_store.get_int(conn, "llm_prompt_version", 1) >= PROMPT_VERSION:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=REANALYZE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    n = conn.execute("UPDATE articles SET extraction_status='pending', extraction_tries=0 WHERE extraction_status='done' "
+                     "AND extracted_json LIKE '%\"type\": \"all\"%' AND COALESCE(published_at, fetched_at) >= ?",
+                     (cutoff,)).rowcount
+    settings_store.set_value(conn, "llm_prompt_version", str(PROMPT_VERSION))
+    return n
+
+
+def priority(article: Any) -> int:
+    """0 = πρωτογενής/εξειδικευμένη πηγή, 1 = γενικό portal, 2 = δικαστική απόφαση (σειρά ανάλυσης)."""
+    if _COURT_RE.match(article["title"] or ""):
+        return 2
+    return 0 if article["source"] in PRIMARY_SOURCES else 1
+
+
 def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, lookback_days: int,
                     session: Optional[requests.Session] = None, use_full_text: bool = True,
                     on_progress: Optional[Callable[[str], None]] = None,
@@ -406,17 +445,21 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     """Επεξεργάζεται εκκρεμή άρθρα (νεότερα πρώτα). Σταματά νωρίς σε auth/rate-limit/δίκτυο — και στο `deadline`
     (`time.monotonic()`), αν δοθεί: τα υπόλοιπα μένουν για την επόμενη φορά (ΔΕΝ μετρά ως σφάλμα)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reanalyze_for_prompt(conn)
     rows = conn.execute(
         "SELECT * FROM articles WHERE extraction_status IN ('pending','failed') AND extraction_tries < ? "
         # ml_score (matching/ml.py): πρώτα όσα είναι πιθανότερο να αφορούν πελάτες — τα matches φαίνονται νωρίτερα.
         "AND COALESCE(published_at, fetched_at) >= ? "
-        "ORDER BY COALESCE(ml_score, 0.5) DESC, COALESCE(published_at, fetched_at) DESC LIMIT ?",
-        (MAX_TRIES, cutoff, limit),
+        "ORDER BY COALESCE(ml_score, 0.5) DESC, COALESCE(published_at, fetched_at) DESC",
+        (MAX_TRIES, cutoff),
     ).fetchall()
+    rows = sorted(rows, key=priority)[:limit]           # σταθερή ταξινόμηση: μέσα σε κάθε βαθμίδα μένει η σειρά του ML
     system = system_prompt()
     stats = {"processed": 0, "done": 0, "irrelevant": 0, "failed": 0, "remaining": 0, "stopped": "", "model": client.model}
     consecutive_network = 0
     recovered = False
+    durations: list[float] = []
+    switched_slow = False
     for i, art in enumerate(rows, 1):
         if deadline is not None and time.monotonic() >= deadline:
             stats["time_limit"] = True
@@ -427,10 +470,23 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
         while True:
             attempts += 1
             try:
+                started = time.monotonic()
                 status = extract_article(conn, art, client, system, session, use_full_text, sleep=sleep)
+                took = time.monotonic() - started
+                log.info("LLM %s: άρθρο %s σε %.0f\"", client.model, art["id"], took)
                 stats[status] += 1
                 stats["processed"] += 1
                 consecutive_network = 0
+                durations.append(took)
+                if (not switched_slow and len(durations) == SLOW_SAMPLE
+                        and sum(durations) / len(durations) > SLOW_SECONDS):
+                    switched_slow = True
+                    new = _switch_model(conn, client)
+                    if new:
+                        stats["model"] = new
+                        durations.clear()
+                        if on_progress:
+                            on_progress(f"Αργό μοντέλο — αυτόματη αλλαγή σε {new}")
                 break
             except LLMError as exc:
                 if exc.kind == "model":
@@ -496,6 +552,20 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
             break
         sleep(MIN_SECONDS_BETWEEN_CALLS)
     return _finish(conn, stats, cutoff)
+
+
+def _switch_model(conn: sqlite3.Connection, client: LLMClient) -> str:
+    """Άλλο δωρεάν μοντέλο του ίδιου παρόχου (ποτέ πληρωμένο) — "" αν δεν βρεθεί."""
+    try:
+        new = pick_model(client.provider, list_models(client), avoid=client.model, free_only=True)
+    except LLMError:
+        return ""
+    if new and new != client.model:
+        log.info("LLM: αργό μοντέλο %s — αλλαγή σε %s", client.model, new)
+        client.model = new
+        settings_store.set_value(conn, PROVIDERS[client.provider]["model"], new)
+        return new
+    return ""
 
 
 def _finish(conn: sqlite3.Connection, stats: dict, cutoff: str) -> dict:

@@ -255,6 +255,21 @@ class _Follow(QObject):
         return False
 
 
+#: Εργασίες σε εξέλιξη (για τη μεταφορά τους σε καρτέλα πελάτη που ανοίγει).
+_LIVE: list["ProgressToast"] = []
+
+
+def claim_for(window: QWidget, afm: str) -> int:
+    """Ανοίγει η καρτέλα του πελάτη `afm`: η πρόοδος των εργασιών του (που ξεκίνησαν αλλού ή μεταφέρθηκαν στο κύριο
+    παράθυρο όταν έκλεισε η καρτέλα) εμφανίζεται εκεί — το αντίστροφο του `follow_main` (ρητό αίτημα 2026-11-04)."""
+    moved = 0
+    for t in list(_LIVE):
+        if t.afm and t.afm == afm and not t._finished and t.window is not window:  # noqa: SLF001
+            t.move_to(window)
+            moved += 1
+    return moved
+
+
 class ProgressToast:
     """Μόνιμο toast με μπάρα προόδου: ποσοστό + σε ποιο στοιχείο βρίσκεται η εργασία (ρητό αίτημα χρήστη,
     2026-10-22, για την ανάκτηση στοιχείων). Μένει όσο τρέχει η εργασία· το `finish()` το κάνει κανονικό toast που
@@ -263,7 +278,9 @@ class ProgressToast:
     `on_cancel`: κουμπί «Διακοπή» — η εργασία σταματά ΜΕΤΑ τον πελάτη που τρέχει (όχι στη μέση του). `move_to()`: το
     toast περνά σε άλλο παράθυρο (π.χ. από την καρτέλα πελάτη που κλείνει στο κύριο), με την ίδια πρόοδο."""
 
-    def __init__(self, window: QWidget, message: str, on_cancel=None) -> None:
+    def __init__(self, window: QWidget, message: str, on_cancel=None, afm: str = "") -> None:
+        self.afm = afm                                   # πελάτης της εργασίας (αν είναι ένας) — βλ. `claim_for`
+        _LIVE.append(self)
         self._window = window
         self._message, self._done, self._total = message, None, None
         self._on_cancel, self._cancelled = on_cancel, False
@@ -350,7 +367,11 @@ class ProgressToast:
         if self._alive():
             self._host._remove(self._item)  # noqa: SLF001
         self._window, self._host = window, _host_for(window)
+        if window is not main_window():
+            self._title = ""
         self._item = self._build()
+        if isinstance(window.window(), QDialog):         # ξανά πίσω στο κύριο όταν κλείσει κι αυτός ο διάλογος
+            self._follow = _Follow(self, window.window())
 
     def update(self, message: str, done: int | None = None, total: int | None = None) -> None:
         self._message = message
@@ -365,6 +386,8 @@ class ProgressToast:
 
     def finish(self, message: str, level: str = "ok") -> None:
         self._finished = True
+        if self in _LIVE:
+            _LIVE.remove(self)
         self._clock.stop()
         message = f"{message}\n⏱ σε {self._elapsed()}"
         if not self._alive():

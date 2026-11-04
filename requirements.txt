@@ -14,3 +14,6 @@ tzdata>=2024.1
 Flask>=3.0,<4
 # Αυτόματη λύση captcha (ΑΚΕΕΔ ΕΔΟΕΑΠ — advertising.py): onnxruntime + OpenCV, ~200 MB στο πακέτο
 ddddocr>=1.6
+# PDF παραστατικών πίσω από Cloudflare Turnstile (mydata/stealth.py, όπως το timologio)
+undetected-chromedriver>=3.5.5
+selenium>=4.5

@@ -285,8 +285,10 @@ def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]
 
 #: Χαρακτηρισμός Ε3 «Διαφήμιση» — από αυτόν προκύπτει το τέλος διαφήμισης 2% υπέρ δήμων (ρητό αίτημα 2026-11-02)
 ADVERT_E3 = "E3_585_015"
-#: Google Ireland Ltd (ΑΦΜ ΦΠΑ IE6388047V) — 14.3 από αυτήν ⇒ πρόταση «ειδική εισφορά διαδικτύου ΕΔΟΕΑΠ» (ΑΚΕΕΔ)
+#: Google Ireland Ltd (ΑΦΜ ΦΠΑ IE6388047V) και Meta Platforms Ireland (IE9692928F) — 14.3 από αυτές ⇒ πρόταση «ειδική
+#: εισφορά διαδικτύου ΕΔΟΕΑΠ» (ΑΚΕΕΔ). Meta: ρητό αίτημα 2026-11-04.
 GOOGLE_VAT = "6388047V"
+AD_PLATFORM_VATS = {"6388047V": "Google", "9692928F": "Meta"}
 GOOGLE_TYPE = "14.3"
 
 
@@ -313,11 +315,11 @@ def advert_docs(conn: sqlite3.Connection, afm: str, ym: str) -> list[dict[str, A
 
 
 def google_ads_docs(conn: sqlite3.Connection, afm: str, ym: str) -> int:
-    """Πλήθος 14.3 (ενδοκοινοτική λήψη υπηρεσιών) από τη Google τον μήνα."""
+    """Πλήθος 14.3 (ενδοκοινοτική λήψη υπηρεσιών) από Google / Meta τον μήνα."""
     n = 0
     for r in conn.execute("SELECT issuer_vat, counter_vat FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
                           "substr(issue_date,1,7)=? AND invoice_type=?", (afm, ym, GOOGLE_TYPE)):
-        if GOOGLE_VAT in (_vat_digits(r["issuer_vat"]), _vat_digits(r["counter_vat"])):
+        if {_vat_digits(r["issuer_vat"]), _vat_digits(r["counter_vat"])} & set(AD_PLATFORM_VATS):
             n += 1
     return n
 

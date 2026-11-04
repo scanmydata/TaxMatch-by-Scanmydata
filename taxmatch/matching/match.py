@@ -1,7 +1,8 @@
 """Matching engine: scope άρθρου × προφίλ επιχείρησης. Καθαρές συναρτήσεις, χωρίς I/O.
 
 Κανόνες:
-* scope "all"            -> ταιριάζει σε όλους (confidence 1.0).
+* scope "all"            -> ταιριάζει σε όλες τις ΕΝΕΡΓΕΣ επιχειρήσεις (confidence 1.0) — ΟΧΙ σε ιδιώτες ή σε πελάτες
+                            με διακοπή (2026-11-04: πριν κάθε «γενικό» άρθρο έπεφτε σε όλους τους 250 πελάτες).
 * scope "targeted"       -> ΚΑΘΕ κριτήριο που δηλώνεται πρέπει να ικανοποιείται (AND)·
                             μέσα σε κριτήριο, ταιριάζει οποιαδήποτε τιμή (OR).
 * κριτήριο χωρίς στοιχεία στην επιχείρηση (π.χ. λείπει η κατηγορία βιβλίων) είναι «άγνωστο»:
@@ -91,6 +92,24 @@ def _criterion_form(forms: list[str], business: dict[str, Any]) -> tuple[Optiona
     return False, "νομική μορφή"
 
 
+_ENTITY_LABEL = {"private": "Ιδιώτης", "sole": "Ατομική επιχείρηση", "company": "Νομικό πρόσωπο"}
+_ENTITY_KIND = {"ΙΔΙΩΤΕΣ": "private", "ΑΤΟΜΙΚΕΣ": "sole", "ΝΟΜΙΚΑ_ΠΡΟΣΩΠΑ": "company"}
+
+
+def _criterion_entity(types: list[str], business: dict[str, Any]) -> tuple[Optional[bool], str]:
+    kind = business.get("kind")
+    if not kind:
+        return None, "είδος πελάτη"
+    return (kind in {_ENTITY_KIND.get(t) for t in types}), _ENTITY_LABEL.get(kind, kind)
+
+
+def _criterion_employer(business: dict[str, Any]) -> tuple[Optional[bool], str]:
+    v = business.get("employer")
+    if v is None:
+        return None, "εργοδότης"
+    return bool(v), "Εργοδότης"
+
+
 #: Λόγος match για άρθρο «για όλους» — τα στοχευμένα matches (ΚΑΔ/βιβλία/ΦΠΑ/νομική μορφή) έχουν άλλον λόγο.
 ALL_SCOPE_REASON = "Αφορά όλες τις επιχειρήσεις"
 
@@ -102,6 +121,8 @@ def match_business(extracted: dict[str, Any], business: dict[str, Any]) -> Optio
         return None
     scope = extracted.get("scope") or {}
     if scope.get("type", "all") == "all":
+        if business.get("kind") == "private" or business.get("ceased"):
+            return None                                 # «όλες οι επιχειρήσεις» — όχι ιδιώτες / διακοπή εργασιών
         return Match(ALL_SCOPE_REASON, 1.0)
 
     results: list[tuple[Optional[bool], str]] = []
@@ -113,6 +134,12 @@ def match_business(extracted: dict[str, Any], business: dict[str, Any]) -> Optio
         results.append(_criterion_vat(scope["vat_subject"], business))
     if scope.get("legal_forms"):
         results.append(_criterion_form(scope["legal_forms"], business))
+    if scope.get("entity_types"):
+        results.append(_criterion_entity(scope["entity_types"], business))
+    if scope.get("employers_only"):
+        results.append(_criterion_employer(business))
+    if business.get("ceased") and not (scope.get("entity_types") and business.get("kind") == "private"):
+        return None
 
     if not results or any(r is False for r, _ in results):
         return None

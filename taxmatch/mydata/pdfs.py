@@ -13,6 +13,7 @@ browser — δεν μεταφέρθηκε εδώ).
 from __future__ import annotations
 
 import io
+import logging
 import re
 import sqlite3
 import zipfile
@@ -25,6 +26,7 @@ import requests
 from .. import config
 
 PDF_MAGIC = b"%PDF"
+log = logging.getLogger(__name__)
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -107,11 +109,15 @@ def file_name(doc: dict) -> str:
 def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optional[Callable[[int, int], None]] = None,
                    fetch: Callable[[str], bytes] = None,
                    should_cancel: Optional[Callable[[], bool]] = None,
-                   marks: Optional[list[str]] = None) -> dict[str, int]:
+                   marks: Optional[list[str]] = None,
+                   render: Optional[Callable[[list[str]], dict[str, bytes]]] = None) -> dict[str, int]:
     """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει
     (`marks`: μόνο αυτά — π.χ. «Λήψη PDF» από την καρτέλα παραστατικού).
-    Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) δεν ξαναζητούνται."""
+    Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) περνούν ΜΙΑ φορά από αόρατο
+    browser (`headless.py`, όπως το timologio)· όσα δεν στοιχειοθετούνται μένουν «μόνο online» και δεν ξαναζητούνται."""
     session = requests.Session()
+    if render is None and fetch is None:
+        render = _headless_render
     fetch = fetch or (lambda u: fetch_pdf(u, session))
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))
@@ -150,9 +156,75 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
                          (status, path, afm, doc["mark"]))
             if on_each:
                 on_each(i, len(rows))
+        # δεύτερο πέρασμα: αόρατος browser για τα «μόνο online» που δεν έχουν δοκιμαστεί
+        todo = [dict(r) for r in conn.execute(
+            "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? AND pdf_status='viewer' AND url<>'' "
+            "AND render_tried=0", (afm, len(ym), ym)) if marks is None or r["mark"] in marks]
+        if render is not None and todo and not (should_cancel and should_cancel()):
+            got = render([openable_url(d["url"]) for d in todo])
+            for doc in todo:
+                payload = got.get(openable_url(doc["url"]))
+                if payload:
+                    folder = month_dir(afm, doc["issue_date"][:7])
+                    folder.mkdir(parents=True, exist_ok=True)
+                    target = folder / file_name(doc)
+                    if target.exists() and target.read_bytes() != payload:
+                        target = target.with_name(target.stem + f"_{doc['mark']}.pdf")
+                    target.write_bytes(payload)
+                    conn.execute("UPDATE mydata_docs SET pdf_status='ok', pdf_path=?, render_tried=1 WHERE afm=? AND "
+                                 "mark=?", (str(target), afm, doc["mark"]))
+                    counts["viewer"] -= 1
+                    counts["ok"] += 1
+                else:
+                    conn.execute("UPDATE mydata_docs SET render_tried=1 WHERE afm=? AND mark=?", (afm, doc["mark"]))
     finally:
         session.close()
     return counts
+
+
+def _headless_render(urls: list[str]) -> dict[str, bytes]:
+    """Όσα από τα URL γίνονται PDF στον αόρατο browser (ένας browser για όλα). {} αν δεν υπάρχει Edge/Chrome."""
+    from . import headless
+    out: dict[str, bytes] = {}
+    if not urls or not headless.available():
+        return out
+    try:
+        with headless.HeadlessRenderer() as renderer:
+            for url in dict.fromkeys(urls):
+                try:
+                    out[url] = renderer.render(url)
+                except (headless.RenderError, OSError, ValueError, KeyError) as exc:
+                    log.info("headless %s: %s", urlparse(url).netloc, exc)
+    except (headless.RenderError, OSError) as exc:
+        log.warning("headless browser: %s", exc)
+    # τρίτο πέρασμα (όπως το timologio): πραγματικός Chrome εκτός οθόνης μέσω undetected-chromedriver, για τα
+    # παραστατικά πίσω από Cloudflare Turnstile (Epsilon DocViewer) που δεν στοιχειοθετούνται σε headless
+    rest = [u for u in dict.fromkeys(urls) if u not in out]
+    if rest:
+        out.update(_stealth_render(rest))
+    return out
+
+
+def _stealth_render(urls: list[str]) -> dict[str, bytes]:
+    from . import stealth
+    out: dict[str, bytes] = {}
+    if not stealth.available():
+        return out
+    try:
+        with stealth.StealthRenderer() as renderer:
+            for url in urls:
+                try:
+                    data = renderer.render_pdf(url)
+                except stealth.HeadlessCancelled:
+                    break
+                except Exception as exc:                # noqa: BLE001 — κάθε παραστατικό ανεξάρτητο
+                    log.info("stealth %s: %s", urlparse(url).netloc, exc)
+                    continue
+                if data:
+                    out[url] = data
+    except Exception as exc:                            # noqa: BLE001 — χωρίς Chrome/driver: μένουν «μόνο online»
+        log.warning("stealth browser: %s", exc)
+    return out
 
 
 def zip_month(conn: sqlite3.Connection, afm: str, ym: str, marks: Optional[list[str]] = None) -> bytes:

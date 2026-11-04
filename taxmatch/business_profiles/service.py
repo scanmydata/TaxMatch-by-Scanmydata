@@ -122,9 +122,27 @@ def for_matching(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     kads: dict[str, list[str]] = {}
     for r in conn.execute("SELECT afm, code FROM business_kad"):
         kads.setdefault(r["afm"], []).append(r["code"])
-    return [{"afm": r["afm"], "name": r["name"], "legal_form": r["legal_form"], "books_category": r["books_category"],
-             "vat_subject": r["vat_subject"], "kads": kads.get(r["afm"], [])}
-            for r in conn.execute("SELECT afm,name,legal_form,books_category,vat_subject FROM businesses")]
+    from ..obligations import is_legal_entity
+    ames = {r[0] for r in conn.execute("SELECT afm FROM efka_ames UNION SELECT afm FROM efka_credentials WHERE ame<>''")}
+    out = []
+    for r in conn.execute("SELECT afm,name,legal_form,books_category,vat_subject,activity_state,employer FROM businesses"):
+        form, state = r["legal_form"] or "", r["activity_state"] or ""
+        # είδος πελάτη για τα `entity_types` του scope: ιδιώτης / ατομική / νομικό πρόσωπο (None = άγνωστο)
+        if is_legal_entity(form):
+            kind = "company"
+        elif state == "none" or "ΙΔΙΩΤ" in strip_accents(form).upper():
+            kind = "private"
+        elif state in ("active", "ceased") or form:
+            kind = "sole"
+        else:
+            kind = None
+        employer = r["employer"]
+        if employer is None and r["afm"] in ames:
+            employer = 1                                # έχει ΑΜΕ = εργοδότης
+        out.append({"afm": r["afm"], "name": r["name"], "legal_form": form, "books_category": r["books_category"],
+                    "vat_subject": r["vat_subject"], "kads": kads.get(r["afm"], []), "kind": kind,
+                    "ceased": state == "ceased", "employer": employer})
+    return out
 
 
 def _is_better_name(current: str, new: str) -> bool:

@@ -353,8 +353,11 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
     if o.key not in AMOUNT_KEYS:
         amounts: dict[str, Any] = {}
     elif known and known.get("registration_no") == effective["db_id"] and (
-            known.get("pdf_checked") or known.get("result") != "Χρεωστική" or not ctx.afm):
-        amounts = dict(known)                           # χρεωστική χωρίς PDF ταυτότητας: ξαναδιαβάζεται μία φορά
+            known.get("result") != "Χρεωστική" or not ctx.afm
+            or (known.get("pdf") and Path(known["pdf"]).exists())
+            or (known.get("pdf_checked") and not ctx.want_pdf)):
+        # χρεωστική χωρίς (υπαρκτό) PDF ταυτότητας οφειλής: ξαναζητείται σε κάθε έλεγχο «και λήψη PDF»
+        amounts = dict(known)
     else:
         amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
         amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
@@ -427,7 +430,8 @@ def check_obligation(ctx: _Ctx, key: str, year: int, cache: Optional[dict] = Non
         args = decl_list_args(cells[o.button_col] if o.button_col < len(cells) else "")
         end, ptype = period_end(args, year, period)
         amounts: dict[str, Any] = {}
-        if args and status != "not_submitted" and (o.search_type or o.key in AMOUNT_KEYS):
+        # και Φ4/Φ5 κ.λπ. όταν ζητήθηκαν PDF — πριν μόνο Φ2/ΦΜΥ/τέλη, οπότε οι ανακεφαλαιωτικοί VIES δεν είχαν ποτέ PDF
+        if args and status != "not_submitted" and (o.search_type or o.key in AMOUNT_KEYS or ctx.want_pdf):
             submitted, amounts = _period_details(ctx, o, args, (known or {}).get(period))
             if submitted is False:
                 status = "not_submitted"

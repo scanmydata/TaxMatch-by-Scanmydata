@@ -625,6 +625,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE company_members ADD COLUMN spans_json TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE company_member_history ADD COLUMN until TEXT NOT NULL DEFAULT '';
     """,
+    # v24 — τέλος παρεπιδημούντων/ακαθαρίστων με ρητή επιλογή στο Προφίλ (2026-11-04): NULL = αυτόματα (myDATA/ΚΑΔ),
+    # 1 = υπόχρεος (υποχρέωση + έλεγχος dae.govapp.gr), 0 = ρητά όχι.
+    """
+    ALTER TABLE businesses ADD COLUMN parepid INTEGER;
+    ALTER TABLE mydata_docs ADD COLUMN render_tried INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 

@@ -29,6 +29,9 @@ hiddenimports = (
     collect_submodules("feedparser")
     + ["openpyxl.cell._writer", "PySide6.QtSvg", "PySide6.QtNetwork"]
     + collect_submodules("ddddocr")
+    # «stealth» λήψη PDF παραστατικών πίσω από Cloudflare (mydata/stealth.py — port του timologio, 2026-11-04)
+    + collect_submodules("undetected_chromedriver")
+    + collect_submodules("selenium")
 )
 
 a = Analysis(
@@ -45,6 +48,11 @@ a = Analysis(
              "webview", "clr_loader", "pythonnet"],
     noarchive=False,
 )
+# selenium-manager (εκτελέσιμα linux/macos/windows): ΔΕΝ χρειάζεται — το undetected-chromedriver δίνει δικό του driver.
+# Το antivirus του μηχανήματος ακύρωνε τη μεταγλώττιση του Inno Setup πάνω σε αυτά (2026-11-04, «contains a virus or
+# potentially unwanted software»).
+_no_manager = lambda entries: [e for e in entries if "selenium-manager" not in e[0].replace("\\", "/")]  # noqa: E731
+a.datas, a.binaries = _no_manager(a.datas), _no_manager(a.binaries)
 pyz = PYZ(a.pure)
 
 exe = EXE(

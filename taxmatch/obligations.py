@@ -536,6 +536,9 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
         if ref_month and opt["eligible_from"] > date(int(ref_month[:4]), int(ref_month[5:7]), 1):
             return "no", f"συμπληρώνει 24 μήνες από την έναρξη — επιλογή από {opt['eligible_from'].strftime('%m/%Y')}"
         return "yes", "μηνιαίος ΦΠΑ (Β΄ κατηγορία) — μπορεί να επανέλθει στο τρίμηνο"
+    if rule_id == "parepid_fee" and business.get("parepid") is not None:
+        return (("yes", "επιλογή «Τέλος παρεπιδημούντων» στο Προφίλ") if business["parepid"]
+                else ("no", "ρητά όχι στο Προφίλ («Τέλος παρεπιδημούντων»)"))
     if rule_id in PAYMENT_RULES:
         answer = _payment_liability(rule_id, business, ref_month)
         if answer:
@@ -599,7 +602,7 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             return "yes", "επιλογή «Ειδική εισφορά διαδικτύου» στο Προφίλ"
         info = (business.get("mydata") or {}).get(ref_month or "") or {}
         if info.get("google_ads"):
-            return "maybe", ("14.3 από Google (Ads) στο myDATA — αν είναι διαφήμιση, ενεργοποιήστε «Ειδική εισφορά "
+            return "maybe", ("14.3 από Google / Meta στο myDATA — αν είναι διαφήμιση, ενεργοποιήστε «Ειδική εισφορά "
                              "διαδικτύου» στο Προφίλ")
         return "no", "δεν έχει επιλεγεί στο Προφίλ"
     if rule_id == "advertising_fee":

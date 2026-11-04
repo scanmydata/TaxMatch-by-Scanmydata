@@ -11,8 +11,8 @@ from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .. import db as dbmod
@@ -294,13 +294,23 @@ class ClientDetailDialog(QDialog):
         # Ειδική εισφορά διαδικτύου ΕΔΟΕΑΠ (ΑΚΕΕΔ): την ενεργοποιεί ο χρήστης — η εφαρμογή την προτείνει όταν βρει 14.3
         # από Google στο myDATA (ρητό αίτημα 2026-11-02)
         self.f_internet = QCheckBox("Ειδική εισφορά διαδικτύου 2% ΕΔΟΕΑΠ (ΑΚΕΕΔ) — υποχρέωση και έλεγχος υποβολής")
-        self.f_internet.setToolTip("Για διαφημίσεις/προβολή στο διαδίκτυο (π.χ. Google Ads): μηνιαία ΑΚΕΕΔ στην εφαρμογή "
+        self.f_internet.setToolTip("Για διαφημίσεις/προβολή στο διαδίκτυο (π.χ. Google Ads, Meta): μηνιαία ΑΚΕΕΔ στην εφαρμογή "
                                    "ΕΔΟΕΑΠ, έως το τέλος του επόμενου μήνα")
         form.addRow("", self.f_internet)
+        self.f_parepid = QCheckBox("Τέλος παρεπιδημούντων / ακαθαρίστων εσόδων (δήμος) — υποχρέωση και έλεγχος στο "
+                                   "dae.govapp.gr")
+        self.f_parepid.setToolTip("Χωρίς ρητή επιλογή η εφαρμογή το βρίσκει μόνη της από το myDATA (κατηγορίες τελών "
+                                  "18–22) ή το προτείνει από τον ΚΑΔ. Τσεκαρισμένο = πάντα υπόχρεος· ξετσεκαρισμένο "
+                                  "αφού είχε τσεκαριστεί = ρητά όχι.")
         self.f_internet_note = QLabel("")
         self.f_internet_note.setWordWrap(True)
         self.f_internet_note.setStyleSheet(f"color:{CURRENT.warn};")
         form.addRow("", self.f_internet_note)
+        form.addRow("", self.f_parepid)
+        self.f_parepid_note = QLabel("")
+        self.f_parepid_note.setWordWrap(True)
+        self.f_parepid_note.setStyleSheet(f"color:{CURRENT.warn};")
+        form.addRow("", self.f_parepid_note)
         self.f_status = QLineEdit()
         form.addRow("Κατάσταση", self.f_status)
         self.f_kads = QTextEdit()
@@ -329,6 +339,7 @@ class ClientDetailDialog(QDialog):
         self.f_email_auto.toggled.connect(self._profile_changed)
         self.f_teka.toggled.connect(self._profile_changed)
         self.f_internet.toggled.connect(self._profile_changed)
+        self.f_parepid.toggled.connect(self._profile_changed)
         return page
 
     def _profile_state(self) -> tuple:
@@ -337,7 +348,7 @@ class ClientDetailDialog(QDialog):
                 self.f_phone.text(), self.f_status.text(), self.f_books.currentIndex(), self.f_vat.currentIndex(),
                 self.f_vat_period.currentIndex(), self.f_employer.currentIndex(), self.f_intrastat.currentIndex(),
                 self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked(),
-                self.f_teka.isChecked(), self.f_internet.isChecked())
+                self.f_teka.isChecked(), self.f_internet.isChecked(), self.f_parepid.isChecked())
 
     def _profile_changed(self, *_a) -> None:
         if hasattr(self, "save_profile_btn"):
@@ -421,6 +432,10 @@ class ClientDetailDialog(QDialog):
         if self.f_internet.isChecked() or before is not None:
             self.conn.execute("UPDATE businesses SET internet_contribution=? WHERE afm=?",
                               (1 if self.f_internet.isChecked() else 0, self.afm))
+        before = self.conn.execute("SELECT parepid FROM businesses WHERE afm=?", (self.afm,)).fetchone()[0]
+        if self.f_parepid.isChecked() or before is not None:
+            self.conn.execute("UPDATE businesses SET parepid=? WHERE afm=?",
+                              (1 if self.f_parepid.isChecked() else 0, self.afm))
         kads = []
         for line in self.f_kads.toPlainText().splitlines():
             line = line.strip()
@@ -730,13 +745,30 @@ class ClientDetailDialog(QDialog):
     def _deadlines_tab(self) -> QWidget:
         page = QWidget()
         box = QVBoxLayout(page)
-        up = QLabel("Προσεχείς (45 ημέρες)")
-        up.setObjectName("h2")
-        box.addWidget(up)
+        # «Προσεχείς» ανοίγει/κλείνει (ρητό αίτημα 2026-11-04) — η επιλογή θυμάται, ώστε ο πίνακας χρήσης να μεγαλώνει
+        from .table_kit import ui_prefs
+        prefs = ui_prefs()
+        self.upcoming_toggle = QToolButton()
+        self.upcoming_toggle.setObjectName("h2")
+        self.upcoming_toggle.setCheckable(True)
+        self.upcoming_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.upcoming_toggle.setStyleSheet("QToolButton { border:none; font-weight:700; }")
         self.deadlines_list = QListWidget()
         self.deadlines_list.setMaximumHeight(110)
         self.deadlines_list.itemActivated.connect(self._open_deadline)
+
+        def _toggle(on: bool) -> None:
+            self.deadlines_list.setVisible(on)
+            self.upcoming_toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+            self.upcoming_toggle.setText(f"Προσεχείς (45 ημέρες){'' if on else f' — {self.deadlines_list.count()}'}")
+            prefs.setValue("client_upcoming_open", on)
+        self._toggle_upcoming = _toggle
+        self.upcoming_toggle.toggled.connect(_toggle)
+        box.addWidget(self.upcoming_toggle)
         box.addWidget(self.deadlines_list)
+        open_default = str(prefs.value("client_upcoming_open", "true")).lower() in ("true", "1")
+        self.upcoming_toggle.setChecked(open_default)
+        _toggle(open_default)
 
         # Ανά φορολογική χρήση: κάθε περιοδική υποχρέωση για την οποία είναι υπόχρεος (από Μητρώο, myDATA, έλεγχο
         # υποβολών), με την κατάσταση υποβολής και τα ποσά της δήλωσης (ρητό αίτημα χρήστη 2026-10-22).
@@ -1171,7 +1203,8 @@ class ClientDetailDialog(QDialog):
         self.f_phone.setText(full["phone"])
         self.f_email_auto.setChecked(bool(full["email_auto"]))
         self.f_contact_note.setText(self._contact_note(full))
-        flags = self.conn.execute("SELECT employer, intrastat, teka, internet_contribution FROM businesses WHERE afm=?",
+        flags = self.conn.execute("SELECT employer, intrastat, teka, internet_contribution, parepid FROM businesses "
+                                  "WHERE afm=?",
                                   (self.afm,)).fetchone()
         for box, value in ((self.f_employer, flags["employer"]), (self.f_intrastat, flags["intrastat"])):
             box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
@@ -1180,9 +1213,16 @@ class ClientDetailDialog(QDialog):
         self.f_internet.setChecked(bool(flags["internet_contribution"]))
         from .. import advertising
         suggest = flags["internet_contribution"] is None and self.afm in advertising.google_candidates(self.conn)
-        self.f_internet_note.setText("Βρέθηκαν 14.3 από Google (Ads) στο myDATA — αν είναι διαφήμιση, ο πελάτης οφείλει "
+        self.f_internet_note.setText("Βρέθηκαν 14.3 από Google / Meta στο myDATA — αν είναι διαφήμιση, ο πελάτης οφείλει "
                                      "την ειδική εισφορά 2% ΕΔΟΕΑΠ: τσεκάρετε την επιλογή." if suggest else "")
         self.f_internet_note.setVisible(suggest)
+        self.f_parepid.setChecked(bool(flags["parepid"]))
+        from .. import fee_portals
+        auto = flags["parepid"] is None and "ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ" in fee_portals.wanted(self.conn, self.afm, date.today().year)
+        hint = obligations.parepid_note(b) if flags["parepid"] is None else ""
+        self.f_parepid_note.setText("Ο έλεγχος στο dae.govapp.gr γίνεται ήδη αυτόματα (myDATA / ΚΑΔ / προηγούμενος "
+                                    "έλεγχος) — τσεκάρετε για να γίνει μόνιμη υποχρέωση." if auto else hint)
+        self.f_parepid_note.setVisible(bool(auto or hint))
         self.f_status.setText(b["status"])
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
         self._mark_profile_saved()
@@ -1247,6 +1287,7 @@ class ClientDetailDialog(QDialog):
                 item.setForeground(QColor(badge[1]))
             item.setData(Qt.ItemDataRole.UserRole, ev)
             self.deadlines_list.addItem(item)
+        self._toggle_upcoming(self.upcoming_toggle.isChecked())          # πλήθος στην ετικέτα όταν είναι κλειστό
 
         self._reload_aml()
 

@@ -3,8 +3,10 @@
 όταν λυθεί το πρόβλημα (π.χ. διορθωθούν οι κωδικοί και η επόμενη σύνδεση πετύχει)."""
 from __future__ import annotations
 
+import json
 import sqlite3
-from typing import Any
+from datetime import date
+from typing import Any, Optional
 
 from . import settings_store
 
@@ -78,7 +80,8 @@ def parepid_candidates(conn: sqlite3.Connection) -> list[str]:
     from . import parepid
     kads: dict[str, list[str]] = {}
     for r in conn.execute("SELECT k.afm, k.code FROM business_kad k JOIN businesses b ON b.afm=k.afm "
-                          "WHERE coalesce(b.activity_state,'')<>'ceased' AND coalesce(b.activity_state,'')<>'none'"):
+                          "WHERE coalesce(b.activity_state,'')<>'ceased' AND coalesce(b.activity_state,'')<>'none' "
+                          "AND b.parepid IS NULL"):
         kads.setdefault(r["afm"], []).append(r["code"])
     checked = {r["afm"] for r in conn.execute("SELECT DISTINCT afm FROM obligation_checks WHERE obligation='ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ'")}
     return sorted(a for a, codes in kads.items() if a not in checked and parepid.kad_matches(codes))
@@ -93,6 +96,58 @@ def mark_parepid_read(conn: sqlite3.Connection) -> None:
     afms = parepid_candidates(conn)
     settings_store.set_value(conn, "notice_parepid_read", ",".join(afms))
     _add_marks(conn, "parepid", afms)
+
+
+def vat_mismatch_clients(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, int]:
+    """ΑΦΜ → πλήθος παραστατικών της χρήσης με ΦΠΑ (ή χαρακτηρισμό ΦΠΑ) σε πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ — η ίδια
+    προειδοποίηση με την καρτέλα myDATA, και στο κέντρο ειδοποιήσεων (ρητό αίτημα 2026-11-04)."""
+    year = year or date.today().year
+    return {r["afm"]: r["n"] for r in conn.execute(
+        "SELECT d.afm, COUNT(*) AS n FROM mydata_docs d JOIN businesses b ON b.afm=d.afm WHERE b.vat_subject=0 "
+        "AND d.vat_class=1 AND d.cancelled=0 AND substr(d.issue_date,1,4)=? GROUP BY d.afm", (str(year),))}
+
+
+#: Εισφορές πλαστικών (ρητό αίτημα 2026-11-04 «και οι 2 που έχουμε»): ομάδα FEE_GROUPS → (έντυπο ελέγχου, ετικέτα)
+PLASTIC_FEES = {"plastic_bag": ("ΠΕΡΙΒΑΛΛΟΝ", "τέλος πλαστικής σακούλας (TAXISnet H7)"),
+                "plastics": ("ΠΛΑΣΤΙΚΑ", "εισφορά πλαστικών προϊόντων (ν. 4736/2020, εφαρμογή Plastic)")}
+
+
+def plastic_clients(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, dict[str, set[int]]]:
+    """{'plastic_bag'|'plastics': {ΑΦΜ: τρίμηνα}} — πελάτες που εισπράττουν την εισφορά στα έσοδα της χρήσης (myDATA,
+    κατηγορίες τελών 8 / 16). Η υποχρέωση προκύπτει ΜΟΝΟ από το myDATA (οι πύλες δείχνουν «ενεργός» για όλους)."""
+    from .mydata.analysis import FEE_GROUPS
+    year = year or date.today().year
+    out: dict[str, dict[str, set[int]]] = {k: {} for k in PLASTIC_FEES}
+    for r in conn.execute("SELECT afm, issue_date, taxes_json FROM mydata_docs WHERE direction='outgoing' AND cancelled=0 "
+                          "AND substr(issue_date,1,4)=? AND taxes_json NOT IN ('', '{}')", (str(year),)):
+        try:
+            taxes = json.loads(r["taxes_json"])
+        except ValueError:
+            continue
+        for key in PLASTIC_FEES:
+            kind, cats = FEE_GROUPS[key]
+            if any(c in (taxes.get(kind) or {}) for c in cats):
+                out[key].setdefault(r["afm"], set()).add((int(r["issue_date"][5:7]) - 1) // 3 + 1)
+    return out
+
+
+def plastic_unsubmitted(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, set[str]]:
+    """{'plastic_bag'|'plastics': ΑΦΜ} με τουλάχιστον ένα τρίμηνο «δεν υποβλήθηκε» στον έλεγχο υποβολών."""
+    year = year or date.today().year
+    out: dict[str, set[str]] = {k: set() for k in PLASTIC_FEES}
+    for key, (form, _label) in PLASTIC_FEES.items():
+        out[key] = {r[0] for r in conn.execute("SELECT DISTINCT afm FROM obligation_checks WHERE year=? AND obligation=? "
+                                               "AND status='not_submitted'", (year, form))}
+    return out
+
+
+def _plastic_stamp(found: dict[str, dict[str, set[int]]]) -> str:
+    return ";".join(f"{k}:" + ",".join(f"{a}{''.join(map(str, sorted(q)))}" for a, q in sorted(v.items()))
+                    for k, v in sorted(found.items()))
+
+
+def mark_plastic_read(conn: sqlite3.Connection) -> None:
+    settings_store.set_value(conn, "notice_plastic_read", _plastic_stamp(plastic_clients(conn)))
 
 
 def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -149,6 +204,33 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "afms": afms,
                     "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}): "
                             f"{_names(conn, afms)} — καρτέλα πελάτη → «Αιτήματα ΑΑΔΕ»."})
+    # ---- ΦΠΑ σε παραστατικά πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ (καρτέλα myDATA → και εδώ)
+    mismatch = vat_mismatch_clients(conn)
+    stamp = ",".join(f"{a}:{n}" for a, n in sorted(mismatch.items()))
+    if mismatch and settings_store.get(conn, "notice_vat_mismatch_read") != stamp:
+        afms = sorted(mismatch)
+        out.append({"level": "warn", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες", "afms": afms,
+                    "dismiss": "vat_mismatch",
+                    "text": f"{len(afms)} {'πελάτης' if len(afms) == 1 else 'πελάτες'} ΔΕΝ είναι υπόχρεοι ΦΠΑ, αλλά στο "
+                            f"myDATA της χρήσης {date.today().year} υπάρχουν {sum(mismatch.values())} παραστατικά με ΦΠΑ "
+                            f"ή χαρακτηρισμό ΦΠΑ: {_names(conn, afms)} — ελέγξτε την έκδοση/τον χαρακτηρισμό ή την "
+                            "υπαγωγή σε ΦΠΑ (καρτέλα πελάτη → myDATA)."})
+    # ---- εισφορές πλαστικών (σακούλα H7 / πλαστικά προϊόντα) από το myDATA — δήλωση ανά τρίμηνο
+    plastic = plastic_clients(conn)
+    late = plastic_unsubmitted(conn)
+    if any(plastic.values()) and settings_store.get(conn, "notice_plastic_read") != _plastic_stamp(plastic):
+        afms = sorted(set().union(*plastic.values()))
+        parts = []
+        for key, (_form, label) in PLASTIC_FEES.items():
+            if plastic[key]:
+                miss = sorted(set(plastic[key]) & late[key])
+                parts.append(f"{label}: {_names(conn, sorted(plastic[key]))}"
+                             + (f" — ΔΕΝ υποβλήθηκε τρίμηνο: {_names(conn, miss)}" if miss else ""))
+        bad = any(set(plastic[k]) & late[k] for k in PLASTIC_FEES)
+        out.append({"level": "warn" if bad else "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
+                    "afms": afms, "dismiss": "plastic",
+                    "text": f"Εισφορές πλαστικών στο myDATA της χρήσης {date.today().year} ({len(afms)} "
+                            f"{'πελάτης' if len(afms) == 1 else 'πελάτες'}) — τριμηνιαία δήλωση: " + " · ".join(parts) + "."})
     # ---- πρόταση ΑΚΕΕΔ: 14.3 από Google στο myDATA χωρίς απόφαση για την ειδική εισφορά διαδικτύου (2026-11-02)
     from .advertising import google_candidates
     google = google_candidates(conn)
@@ -156,7 +238,7 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         n = len(google)
         out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες", "afms": google,
                     "dismiss": "google",
-                    "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με 14.3 από Google (Ads) στο myDATA — πιθανή "
+                    "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με 14.3 από Google / Meta στο myDATA — πιθανή "
                             f"ειδική εισφορά διαδικτύου 2% ΕΔΟΕΑΠ (ΑΚΕΕΔ): ενεργοποιήστε την στο Προφίλ αν ισχύει: "
                             f"{_names(conn, google)}."})
     # ---- πιθανοί υπόχρεοι τέλους παρεπιδημούντων/ακαθαρίστων από τον ΚΑΔ (ίδιο μοτίβο με το τρίμηνο ΦΠΑ)

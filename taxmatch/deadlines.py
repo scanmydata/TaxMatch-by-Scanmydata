@@ -123,7 +123,7 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
 
 # ------------------------------------------------------------------ ποιους πελάτες αφορά ένα γεγονός
 _BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, vat_period_source, books_category, "
-                 "activity_state, cease_date, employer, intrastat, teka, internet_contribution, "
+                 "activity_state, cease_date, employer, intrastat, teka, internet_contribution, parepid, "
                  "(SELECT group_concat(k.code, ',') FROM business_kad k WHERE k.afm=businesses.afm) AS kad_codes, "
                  "(SELECT group_concat(d.title, ' | ') FROM aade_debts d WHERE d.afm=businesses.afm AND d.total>0) "
                  "AS debt_titles "

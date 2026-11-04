@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 import pytest
 
@@ -9,16 +11,18 @@ from taxmatch.matching import engine
 from tests.fakes import FakeResponse, FakeSession, calendar_page
 
 AFM_SHOP, AFM_CAFE, AFM_IT = "094259216", "123456783", "999999999"
+# Σχετική ημερομηνία: με σταθερή (20/9/2026) το test έσπασε όταν βγήκε από το παράθυρο αντιστοίχισης 45 ημερών.
+_PUB = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=3)
 
-NEWS_FEED = """<?xml version="1.0" encoding="utf-8"?><rss version="2.0"><channel><title>t</title>
+NEWS_FEED = f"""<?xml version="1.0" encoding="utf-8"?><rss version="2.0"><channel><title>t</title>
 <item><title>Παράταση υποβολής δηλώσεων ΦΠΑ για όλους</title><link>https://x.gr/a1</link><guid>https://x.gr/a1</guid>
-<description>Παράταση</description><pubDate>Sun, 20 Sep 2026 07:00:00 GMT</pubDate></item>
+<description>Παράταση</description><pubDate>{format_datetime(_PUB + timedelta(hours=7), usegmt=True)}</pubDate></item>
 <item><title>Νέα υποχρέωση για επιχειρήσεις εστίασης (ΚΑΔ 56)</title><link>https://x.gr/a2</link><guid>https://x.gr/a2</guid>
-<description>Εστίαση</description><pubDate>Sun, 20 Sep 2026 08:00:00 GMT</pubDate></item>
+<description>Εστίαση</description><pubDate>{format_datetime(_PUB + timedelta(hours=8), usegmt=True)}</pubDate></item>
 <item><title>Κόμιστρο ΤΑΞΙ</title><link>https://x.gr/a3</link><guid>https://x.gr/a3</guid>
-<description>Ταξί</description><pubDate>Sun, 20 Sep 2026 09:00:00 GMT</pubDate></item>
+<description>Ταξί</description><pubDate>{format_datetime(_PUB + timedelta(hours=9), usegmt=True)}</pubDate></item>
 <item><title>Αλλαγή για βιβλία κατηγορίας Γ</title><link>https://x.gr/a4</link><guid>https://x.gr/a4</guid>
-<description>Γ</description><pubDate>Sun, 20 Sep 2026 10:00:00 GMT</pubDate></item>
+<description>Γ</description><pubDate>{format_datetime(_PUB + timedelta(hours=10), usegmt=True)}</pubDate></item>
 </channel></rss>"""
 
 CAL_PAGE = calendar_page("09", "2026", [{"Title": "Υποβολή ΦΠΑ", "Date": "09/30/2026",
