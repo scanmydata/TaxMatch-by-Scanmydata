@@ -14,11 +14,16 @@ Write-Host "TaxMatch $version" -ForegroundColor Cyan
 # 1. venv (Python 3.12: το ίδιο σε όλο το έργο — βλ. CLAUDE.md)
 $py = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
-  if (Get-Command uv -ErrorAction SilentlyContinue) { uv venv --python 3.12 .venv }
-  else { py -3.12 -m venv .venv }
+  $sysPy = (Get-Command python -ErrorAction SilentlyContinue).Source
+  if ($sysPy) {
+    $py = $sysPy
+  } else {
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv venv --python 3.12 .venv }
+    else { py -3.12 -m venv .venv }
+    if (Get-Command uv -ErrorAction SilentlyContinue) { uv pip install --python $py -r requirements-dev.txt }
+    else { & $py -m pip install -r requirements-dev.txt }
+  }
 }
-if (Get-Command uv -ErrorAction SilentlyContinue) { uv pip install --python $py -r requirements-dev.txt }
-else { & $py -m pip install -r requirements-dev.txt }
 
 # 2. tests
 if (-not $SkipTests) { & $py -m pytest; if ($LASTEXITCODE -ne 0) { throw "Τα tests απέτυχαν" } }

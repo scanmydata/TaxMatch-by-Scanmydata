@@ -129,6 +129,8 @@ def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(co
         def follow(self, method, url, data=None):
             if "viewPdf.htm" in url:
                 return {"is_pdf": True, "content": b"%PDF-1.4 Fake Form Submission"}
+            if "debtCodePdf.htm" in url or "debtInfoPdf.htm" in url:
+                return {"is_pdf": True, "content": b"%PDF-1.4 Official AADE Debt Code"}
             if "displayDebtCode.htm" in url:
                 return {"ok": True, "text": debt_code_html, "content": debt_code_html.encode("utf-8")}
             return {"ok": True, "text": user_html_snippet, "content": user_html_snippet.encode("utf-8")}

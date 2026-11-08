@@ -368,7 +368,7 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str,
                 if value:
                     out[key] = value
             if ctx.afm:
-                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, d_id, out)
+                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, d_id, out, decl_type=decl_type)
                 out["pdf_checked"] = True              # δεν ξαναζητείται σε κάθε έλεγχο αν η σελίδα δεν έχει εκτύπωση
     except Exception as exc:                            # noqa: BLE001
         log.info("easycheck debtCode %s: %s", o.key, exc)
@@ -525,50 +525,61 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
         return b""
 
 
-def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None) -> str:
-    """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — κουμπί «Εκτύπωση» της σελίδας (`debts.print_form`, ίδιος
-    μηχανισμός με τις οφειλές του Tax Center). Αν η σελίδα τυπώνεται με window.print() στον client (όπως στο Φ2/παρακρατήσεις),
-    δημιουργεί απευθείας το επίσημο σημείωμα πληρωμής σε PDF."""
+def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None,
+              decl_type: str = "") -> str:
+    """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — λήψη του επίσημου PDF από την ΑΑΔΕ
+    (κουμπί «Εκτύπωση» / debtCodePdf.htm / print_form). Τα PDF των ταυτοτήτων οφειλών τα παράγει
+    η σελίδα της ΑΑΔΕ (δεν γίνεται συνθετικό render)."""
     from . import debts
     if not ctx.afm:
         return ""
-    if hasattr(ctx.http, "follow"):
-        pf = debts.print_form(page)
-        if pf:
-            res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
-            if res.get("is_pdf"):
-                return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
-
-    m = label_map(page) if page else {}
-    debt_id = (out or {}).get("debt_id") or ""
-    if not debt_id and page:
-        m_id = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
-        debt_id = m_id.group(0).strip() if m_id else ""
-    if not debt_id:
+    if not hasattr(ctx.http, "follow"):
         return ""
 
-    doy = (out or {}).get("doy") or _find(m, r"^ΔΟΥ$|Δ\.?Ο\.?Υ")
-    period = _find(m, r"Ημερολογιακή Περίοδος") or (out or {}).get("period", "")
-    tax_kind = (out or {}).get("tax_kind") or _find(m, r"Είδος Φόρου") or key
-    issued_at = (out or {}).get("issued_at") or _find(m, r"Ημ/νία Έκδοσης") or ""
-    total = (out or {}).get("total_due")
-    total_str = f"{total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else (_find(m, r"Συνολικό ποσό οφειλής") or "")
-    inst = (out or {}).get("installment")
-    inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
-    pay_by = (out or {}).get("pay_by") or ""
+    # 1. Προσπάθεια μέσω print_form (doViewPdf, doViewArrPdf, doPrint, κ.λπ.)
+    for fn in ("doViewPdf", "doViewArrPdf", "doPrint", "doPrintDebtCode"):
+        pf = debts.print_form(page, fn)
+        if pf:
+            try:
+                res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
+                if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
+            except Exception as exc:
+                log.debug("print_form debt PDF failed (%s): %s", fn, exc)
 
-    name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
-    if (not name or not doy) and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
-        b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
-        if b_row:
-            if not name:
-                name = b_row["name"] or b_row["trade_name"] or ""
-            if not doy:
-                doy = b_row["doy"] or ""
+    # 2. Αναζήτηση απευθείας φόρμας εκτύπωσης / action μέσα στο page (π.χ. debtCodePdf.htm, viewPdf.htm)
+    m_action = re.search(r'''action=['"]([^'"]*(?:debtCodePdf|debtInfoPdf|viewPdf|print)[^'"]*)['"]''', page or "", re.I)
+    if m_action:
+        action_url = urljoin(url, m_action.group(1))
+        form_fields: dict[str, str] = {"declarationDatabaseId": db_id}
+        if decl_type:
+            form_fields["declarationType"] = decl_type
+        for m_inp in re.finditer(r'''<input[^>]*name=['"]([^'"]+)['"][^>]*value=['"]([^'"]*)['"]''', page or "", re.I):
+            form_fields[m_inp.group(1)] = m_inp.group(2)
+        try:
+            res = ctx.http.follow("POST", action_url, form_fields)
+            if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
+        except Exception as exc:
+            log.debug("form action debt PDF failed: %s", exc)
 
-    pdf_bytes = _debt_voucher_pdf(debt_id, total_str, period, doy, tax_kind, inst_str, pay_by, ctx.afm, name, issued_at)
-    if pdf_bytes:
-        return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", pdf_bytes)  # noqa: SLF001
+    # 3. Απευθείας λήψη του επίσημου PDF από το endpoint debtCodePdf.htm / debtInfoPdf.htm
+    # (αντίστοιχο με το viewPdf.htm που κατεβάζει το έντυπο της δήλωσης)
+    base_folder = url.rsplit("/", 1)[0] + "/"
+    for target in ("debtCodePdf.htm", "debtInfoPdf.htm"):
+        target_url = urljoin(base_folder, target)
+        attempts = []
+        if decl_type:
+            attempts.append({"declarationDatabaseId": db_id, "declarationType": decl_type})
+        attempts.append({"declarationDatabaseId": db_id})
+        for post_data in attempts:
+            try:
+                res = ctx.http.follow("POST", target_url, post_data)
+                if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
+            except Exception as exc:
+                log.debug("direct %s failed: %s", target, exc)
+
     return ""
 
 
@@ -641,7 +652,7 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
                                 m_did = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", debt_page, re.I)
                             if m_did:
                                 amounts["debt_id"] = m_did.group(0 if not hasattr(m_did, "group") else (1 if m_did.lastindex else 0)).strip()
-                        to_pdf = _debt_pdf(ctx, base + "displayDebtCode.htm", debt_page, o.key, d_id, amounts)
+                        to_pdf = _debt_pdf(ctx, base + "displayDebtCode.htm", debt_page, o.key, d_id, amounts, decl_type=decl_t)
                         if to_pdf:
                             amounts["pdf"] = to_pdf
                             amounts["pdf_checked"] = True
