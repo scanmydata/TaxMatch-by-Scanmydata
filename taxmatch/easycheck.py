@@ -188,6 +188,10 @@ def _set_as_myself(ctx: _Ctx, page: str, category: str) -> bool:
 
 
 _STATE_CALL = re.compile(r'doDisplayDeclarationState\(document\.displayDeclarationStateForm,\s*"([^"]*)"\s*,\s*"([^"]*)"')
+_DEBT_CALL = re.compile(
+    r'doDisplayDebtCode\s*\([^,]*?,\s*(?:&quot;|[\'"])?([^\'",;&]+?)(?:&quot;|[\'"])?\s*,\s*(?:&quot;|[\'"])?([^\'",;&]+?)(?:&quot;|[\'"])?\s*,\s*(?:&quot;|[\'"])?(.*?)(?:&quot;|[\'"])?\s*\)',
+    re.I,
+)
 #: Υποχρεώσεις για τις οποίες διαβάζονται και τα ΠΟΣΑ της δήλωσης (εκκαθάριση + ταυτότητα οφειλής). Φ2: πιστό port του
 #: runner `lib/aade-vat-http.js` (επαληθευμένο εκεί). Οι υπόλοιπες ακολουθούν την ίδια δομή σελίδων της ΑΑΔΕ στη δική
 #: τους κατηγορία — ΔΕΝ έχει επαληθευτεί· αν η σελίδα δεν έχει τα πεδία, απλώς δεν εμφανίζονται ποσά.
@@ -259,14 +263,59 @@ def _declarations(ctx: _Ctx, o: Obligation, args: dict[str, str]) -> Optional[li
     out = []
     for row in _ROW.findall(page or ""):
         texts = [strip_tags(c) for c in _CELL.findall(row)]
-        call = _STATE_CALL.search(_html.unescape(row))
-        out.append({"db_id": (call.group(2) if call else (texts[2] if len(texts) > 2 else "")).strip(),
+        raw_un = _html.unescape(row)
+        call = _STATE_CALL.search(raw_un)
+        debt_call = _DEBT_CALL.search(row) or _DEBT_CALL.search(raw_un)
+        db_id = (call.group(2) if call else (debt_call.group(2) if debt_call else (texts[2] if len(texts) > 2 else ""))).strip()
+        res_code = texts[6].strip().upper() if len(texts) > 6 else ""
+        result = "Χρεωστική" if (res_code in ("Χ", "X") or "ΧΡΕΩΣ" in res_code or debt_call) else (
+            "Πιστωτική" if (res_code in ("Π", "P") or "ΠΙΣΤ" in res_code) else (
+                "Μηδενική" if (res_code in ("Μ", "M") or "ΜΗΔ" in res_code) else ""
+            )
+        )
+        debt_info = None
+        if debt_call:
+            decl_type = debt_call.group(1).replace("&quot;", "").replace('"', "").replace("'", "").strip()
+            d_id = debt_call.group(2).replace("&quot;", "").replace('"', "").replace("'", "").strip()
+            ret_view = _html.unescape(debt_call.group(3).replace("&quot;", "").replace('"', "").replace("'", "")).strip()
+            debt_info = {
+                "decl_type": decl_type,
+                "db_id": d_id,
+                "ret_view": ret_view,
+            }
+        out.append({"db_id": db_id,
                     "submitted_at": texts[3] if len(texts) > 3 else "", "type": texts[4] if len(texts) > 4 else "",
-                    "final": texts[5] if len(texts) > 5 else ""})
+                    "final": texts[5] if len(texts) > 5 else "", "result": result,
+                    "has_debt_code": bool(debt_call) or (result == "Χρεωστική"),
+                    "debt_info": debt_info})
     return out
 
 
-def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> dict[str, Any]:
+def fetch_debt_code_page(ctx: _Ctx, base_url: str, decl_type: str, db_id: str, ret_view: str) -> str:
+    """Ανάκτηση της σελίδας displayDebtCode.htm μέσω GET (όπως στον browser / URL TAXISnet) ή fallback POST."""
+    target_url = urljoin(base_url, "displayDebtCode.htm")
+    data = {"declarationType": decl_type, "declarationDatabaseId": db_id, "returnView": ret_view}
+    try:
+        q = urlencode(data)
+        txt = ctx.get(f"{target_url}?{q}")
+        if txt and ("Ταυτότητα" in txt or "Συνολικό" in txt or "debtCode" in txt or "displayDebtCode" in txt):
+            return txt
+    except Exception as exc:
+        log.debug("GET displayDebtCode failed: %s", exc)
+        txt = ""
+    if hasattr(ctx.http, "follow"):
+        try:
+            res = ctx.http.follow("POST", target_url, data)
+            txt2 = res.get("text", "")
+            if txt2 and ("Ταυτότητα" in txt2 or "Συνολικό" in txt2 or "debtCode" in txt2 or "displayDebtCode" in txt2):
+                return txt2
+        except Exception as exc:
+            log.debug("POST displayDebtCode failed: %s", exc)
+    return txt
+
+
+def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str,
+                        debt_info: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """Εκκαθάριση + ταυτότητα οφειλής μιας δήλωσης (port του `declarationAmounts` του runner). Μόνο ανάγνωση."""
     out: dict[str, Any] = {}
     base = f"{AADE}/taxisnet/{o.category}/protected/"
@@ -294,16 +343,20 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> 
     except Exception as exc:                            # noqa: BLE001 — χωρίς ποσά, όχι αποτυχία ελέγχου
         log.info("easycheck declarationState %s: %s", o.key, exc)
     try:
-        page = ctx.get(base + "displayDebtCode.htm?" + q)
-        if re.search(r"Ταυτότητα Οφειλής|Συνολικό ποσό οφειλής", page or ""):
+        decl_type = (debt_info or {}).get("decl_type") or o.filter
+        d_id = (debt_info or {}).get("db_id") or db_id
+        r_view = (debt_info or {}).get("ret_view") or ret_view
+        page = fetch_debt_code_page(ctx, base, decl_type, d_id, r_view)
+        if re.search(r"Ταυτότητα\s*Οφειλής|Συνολικό\s*ποσό\s*οφειλής", page or "", re.I):
             m = label_map(page)
             total = to_num(_find(m, r"Συνολικό ποσό οφειλής"))
             if total is not None:
                 out["total_due"] = total
             debt = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
+            if not debt and page:
+                debt = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", page, re.I)
             if debt:
-                out["debt_id"] = debt.group(0).strip()
-            # Περισσότερες λεπτομέρειες χρεωστικής (ρητό αίτημα χρήστη 2026-10-22, όπως το Tax Center aade-vat-http.js)
+                out["debt_id"] = debt.group(0 if not hasattr(debt, "group") else (1 if debt.lastindex else 0)).strip()
             dose = next((k for k in m if re.search(r"Ποσό δόσης", k)), "")
             if dose:
                 out["installment"] = to_num(m[dose])
@@ -315,7 +368,7 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> 
                 if value:
                     out[key] = value
             if ctx.afm:
-                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, db_id, out)
+                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, d_id, out)
                 out["pdf_checked"] = True              # δεν ξαναζητείται σε κάθε έλεγχο αν η σελίδα δεν έχει εκτύπωση
     except Exception as exc:                            # noqa: BLE001
         log.info("easycheck debtCode %s: %s", o.key, exc)
@@ -494,15 +547,8 @@ def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optiona
     if not debt_id:
         return ""
 
-    name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
-    if not name and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
-        b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
-        if b_row:
-            name = b_row["name"] or b_row["trade_name"] or ""
-            if not doy:
-                doy = b_row["doy"] or ""
-    period = _find(m, r"Ημερολογιακή Περίοδος") or (out or {}).get("period", "")
     doy = (out or {}).get("doy") or _find(m, r"^ΔΟΥ$|Δ\.?Ο\.?Υ")
+    period = _find(m, r"Ημερολογιακή Περίοδος") or (out or {}).get("period", "")
     tax_kind = (out or {}).get("tax_kind") or _find(m, r"Είδος Φόρου") or key
     issued_at = (out or {}).get("issued_at") or _find(m, r"Ημ/νία Έκδοσης") or ""
     total = (out or {}).get("total_due")
@@ -510,6 +556,15 @@ def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optiona
     inst = (out or {}).get("installment")
     inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
     pay_by = (out or {}).get("pay_by") or ""
+
+    name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
+    if (not name or not doy) and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
+        b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
+        if b_row:
+            if not name:
+                name = b_row["name"] or b_row["trade_name"] or ""
+            if not doy:
+                doy = b_row["doy"] or ""
 
     pdf_bytes = _debt_voucher_pdf(debt_id, total_str, period, doy, tax_kind, inst_str, pay_by, ctx.afm, name, issued_at)
     if pdf_bytes:
@@ -530,18 +585,28 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
     effective = (finals or mine or [None])[-1]           # τροποποιητική υπερισχύει της αρχικής (τελευταία οριστική)
     if not effective or not effective["db_id"]:
         return submitted, {}
-    if o.key not in AMOUNT_KEYS:
+    ret_view_path = "displayDeclarationsList.htm?" + urlencode(args)
+    eff_result = effective.get("result") or (known or {}).get("result")
+    is_debt = bool(effective.get("has_debt_code") or eff_result == "Χρεωστική")
+
+    if o.key not in AMOUNT_KEYS and not is_debt:
         amounts: dict[str, Any] = {}
     elif known and known.get("registration_no") == effective["db_id"] and (
-            known.get("result") != "Χρεωστική" or not ctx.afm
+            not is_debt or not ctx.afm
             or (known.get("pdf") and Path(known["pdf"]).exists())
             or (known.get("pdf_checked") and not ctx.want_pdf)):
-        # χρεωστική χωρίς (υπαρκτό) PDF ταυτότητας οφειλής: ξαναζητείται σε κάθε έλεγχο «και λήψη PDF»
         amounts = dict(known)
+        if eff_result and not amounts.get("result"):
+            amounts["result"] = eff_result
     else:
-        amounts = declaration_amounts(ctx, o, effective["db_id"], "displayDeclarationsList.htm?" + urlencode(args))
+        amounts = declaration_amounts(ctx, o, effective["db_id"], ret_view_path, debt_info=effective.get("debt_info"))
         amounts.update(registration_no=effective["db_id"], submitted_at=effective["submitted_at"], amended=len(finals) > 1)
+        if eff_result and not amounts.get("result"):
+            amounts["result"] = eff_result
+
+    # Όταν κατεβαίνει το έντυπο (ή όταν ζητούνται PDF): κατεβαίνει ΚΑΙ το έντυπο ΚΑΙ η ταυτότητα οφειλής (αν είναι χρεωστική / υπάρχει κουμπί Τ.Ο.)
     if ctx.want_pdf and ctx.afm and effective["final"] == "Οριστική":
+        # 1. Έντυπο δήλωσης (submission_pdf)
         old = (known or {}).get("submission_pdf", "")
         if old and Path(old).exists() and (known or {}).get("registration_no") == effective["db_id"]:
             amounts["submission_pdf"] = old
@@ -549,6 +614,45 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
             pdf = submission_pdf(ctx, o, effective["db_id"], args)
             if pdf:
                 amounts["submission_pdf"] = pdf
+
+        # 2. Ταυτότητα Οφειλής (κουμπί doDisplayDebtCode ή χρεωστική δήλωση)
+        has_debt = bool(effective.get("has_debt_code") or amounts.get("result") == "Χρεωστική" or effective.get("result") == "Χρεωστική" or amounts.get("debt_id"))
+        if has_debt:
+            old_to = amounts.get("pdf") or (known or {}).get("pdf", "")
+            if old_to and Path(old_to).exists() and (known or {}).get("registration_no") == effective["db_id"]:
+                amounts["pdf"] = old_to
+            else:
+                d_info = effective.get("debt_info") or {}
+                decl_t = d_info.get("decl_type") or o.filter
+                d_id = d_info.get("db_id") or effective["db_id"]
+                r_view = d_info.get("ret_view") or ret_view_path
+                base = f"{AADE}/taxisnet/{o.category}/protected/"
+                try:
+                    debt_page = fetch_debt_code_page(ctx, base, decl_t, d_id, r_view)
+                    if debt_page:
+                        m_debt = label_map(debt_page)
+                        if not amounts.get("total_due"):
+                            tot = to_num(_find(m_debt, r"Συνολικό ποσό οφειλής"))
+                            if tot is not None:
+                                amounts["total_due"] = tot
+                        if not amounts.get("debt_id"):
+                            m_did = re.search(r"[\d ]{10,}", _find(m_debt, r"Ταυτότητα Οφειλής"))
+                            if not m_did:
+                                m_did = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", debt_page, re.I)
+                            if m_did:
+                                amounts["debt_id"] = m_did.group(0 if not hasattr(m_did, "group") else (1 if m_did.lastindex else 0)).strip()
+                        to_pdf = _debt_pdf(ctx, base + "displayDebtCode.htm", debt_page, o.key, d_id, amounts)
+                        if to_pdf:
+                            amounts["pdf"] = to_pdf
+                            amounts["pdf_checked"] = True
+                except Exception as exc:
+                    log.warning("failed fetching debt code pdf for %s/%s: %s", ctx.afm, o.key, exc)
+
+        # 3. Ενοποίηση της λίστας submission_pdfs ώστε το UI να περιέχει και τα δύο αρχεία
+        all_pdfs = [f for f in [amounts.get("submission_pdf"), amounts.get("pdf")] if f and Path(f).exists()]
+        if all_pdfs:
+            amounts["submission_pdfs"] = all_pdfs
+
         amounts.setdefault("registration_no", effective["db_id"])
     return submitted, amounts
 

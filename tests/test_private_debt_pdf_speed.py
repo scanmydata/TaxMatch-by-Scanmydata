@@ -82,3 +82,82 @@ def test_parallel_pdf_download_month(conn, tmp_path, monkeypatch):
     for r in rows:
         assert r[1] == "ok"
         assert Path(r[2]).exists()
+
+
+def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(conn, tmp_path, monkeypatch):
+    from taxmatch import config
+    monkeypatch.setattr(config, "data_dir", lambda: tmp_path)
+    afm = "802499326"
+    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+
+    user_html_snippet = '''
+    <table class="displayTable">
+    <tr class="tblRow1">
+        <td>TAXISnet</td>
+        <td>01/08/2026 - 31/08/2026</td>
+        <td>274364936</td>
+        <td>15/09/2026</td>
+        <td>Αρχική</td>
+        <td>Οριστική</td>
+        <td>Χ</td>
+        <td>
+            <div class="navbtn" onmouseover="this.className='navbtnOver'" onmouseout="this.className='navbtn'" onclick="doDisplayDebtCode(document.displayDebtCodeForm,&quot;vatF2&quot;,&quot;274364936&quot;,&quot;displayDeclarationsList.htm?declarationType=vatF2&amp;year=2026&amp;periodType=oneMonth&amp;periodStart=01%2F08%2F2026&amp;periodEnd=31%2F08%2F2026&amp;effectivePeriodStart=01%2F08%2F2026&amp;effectivePeriodEnd=31%2F08%2F2026&quot;);">
+                Ταυτότητα Οφειλής
+            </div>
+        </td>
+    </tr>
+    </table>
+    '''
+
+    debt_code_html = '''
+    <html>
+    <body>
+    <table>
+        <tr><td>Ταυτότητα Οφειλής</td><td>802499326 910102202 629053900890</td></tr>
+        <tr><td>Συνολικό ποσό οφειλής</td><td>3.543,17 €</td></tr>
+        <tr><td>Ποσό δόσης δήλωσης της 30/09/2026</td><td>1.771,59 €</td></tr>
+        <tr><td>ΔΟΥ</td><td>ΚΕ.ΦΟ.ΔΕ. ΑΤΤΙΚΗΣ</td></tr>
+        <tr><td>Είδος Φόρου</td><td>ΧΡΕΩΣΤΙΚΕΣ ΔΗΛΩΣΕΙΣ ΦΠΑ ΜΕΣΩ INTERNET</td></tr>
+        <tr><td>Ημερολογιακή Περίοδος</td><td>01/08/2026-31/08/2026</td></tr>
+        <tr><td>Ημ/νία Έκδοσης</td><td>15/09/2026</td></tr>
+    </table>
+    </body>
+    </html>
+    '''
+
+    class FakeHttp:
+        def follow(self, method, url, data=None):
+            if "viewPdf.htm" in url:
+                return {"is_pdf": True, "content": b"%PDF-1.4 Fake Form Submission"}
+            if "displayDebtCode.htm" in url:
+                return {"ok": True, "text": debt_code_html, "content": debt_code_html.encode("utf-8")}
+            return {"ok": True, "text": user_html_snippet, "content": user_html_snippet.encode("utf-8")}
+
+    class FakeCtx:
+        def __init__(self):
+            self.http = FakeHttp()
+            self.afm = afm
+            self.want_pdf = True
+            self.conn = conn
+        def get(self, url):
+            if "displayDebtCode.htm" in url:
+                return debt_code_html
+            return user_html_snippet
+
+    ctx = FakeCtx()
+    o = easycheck.OBLIGATIONS["Φ2"]
+    args = {"year": "2026", "periodType": "oneMonth", "periodStart": "01/08/2026", "periodEnd": "31/08/2026"}
+
+    submitted, amounts = easycheck._period_details(ctx, o, args)
+
+    assert submitted is None or submitted is True
+    assert amounts.get("result") == "Χρεωστική"
+    assert amounts.get("debt_id") == "802499326 910102202 629053900890"
+
+    # Ελέγχουμε ότι ΚΑΙ το έντυπο ΚΑΙ η ταυτότητα οφειλής κατέβηκαν ως PDF
+    sub_pdf = amounts.get("submission_pdf")
+    debt_pdf = amounts.get("pdf")
+    assert sub_pdf is not None and Path(sub_pdf).exists()
+    assert debt_pdf is not None and Path(debt_pdf).exists()
+    assert "submission_pdfs" in amounts
+    assert len(amounts["submission_pdfs"]) == 2
