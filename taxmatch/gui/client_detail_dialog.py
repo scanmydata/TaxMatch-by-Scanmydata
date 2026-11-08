@@ -517,6 +517,11 @@ class ClientDetailDialog(QDialog):
         self.e_pass.setPlaceholderText("(αφήστε κενό για να μείνει ως έχει)")
         form.addRow("Κωδικός ΙΚΑ εργοδότη", self.e_pass)
         self._employer_rows.append(self.e_pass)
+        self.e_note = QLabel("ℹ Απαραίτητοι για τον αυτόματο έλεγχο υποβολών ΑΠΔ e-ΕΦΚΑ & ΤΕΚΑ.")
+        self.e_note.setObjectName("muted")
+        self.e_note.setStyleSheet(f"color:{CURRENT.accent_deep}; font-size:11px;")
+        form.addRow("", self.e_note)
+        self._employer_rows.append(self.e_note)
         self.e_status = QLabel("")
         self.e_status.setWordWrap(True)
         self.e_status.setObjectName("muted")
@@ -1034,6 +1039,9 @@ class ClientDetailDialog(QDialog):
         if not client_creds.get(self.conn, self.afm):
             toast(self, "Χρειάζονται οι κωδικοί TAXISnet του πελάτη.", "warn")
             return
+        from .. import efka
+        if efka.should_check_apd(self.conn, self.afm) and not efka.has_ika_credentials(self.conn, self.afm):
+            toast(self, "Ο πελάτης δεν έχει κωδικούς ΙΚΑ εργοδότη — ο έλεγχος ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ θα παραλειφθεί.", "info")
         year = self.check_year.currentData() or date.today().year
         want_pdf = self.main.ask_submission_pdf(self)
         if want_pdf is None:

@@ -1235,14 +1235,17 @@ class MainWindow(QMainWindow):
     def on_run_checks(self) -> None:
         """«Έλεγχοι & ενημέρωση…»: popup με τους ελέγχους· κάθε επιλεγμένος τρέχει όπως το παλιό του κουμπί (ουρά εργασιών)."""
         from .checks_dialog import ChecksDialog
+        from .. import efka
         selected = self._selected_client_afms()
         afms = selected or [self.client_table.item(r, _C_CHK).data(Qt.ItemDataRole.UserRole)
                             for r in range(self.client_table.rowCount())]
         rows = {r["afm"]: r for r in clients.list_all(self.conn)}
         incomplete = {a: m for a in afms if a in rows for m in [clients.missing_basics(rows[a])] if m}
+        missing_ika = [a for a in afms if efka.should_check_apd(self.conn, a) and not efka.has_ika_credentials(self.conn, a)]
         scope = (f"{len(selected)} επιλεγμένοι πελάτες" if len(selected) > 1 else "1 επιλεγμένος πελάτης"
                  ) if selected else f"Όλοι οι πελάτες ({len(afms)})"
-        dlg = ChecksDialog(self, scope, incomplete, {a: (rows[a]["name"] if a in rows else a) for a in afms})
+        dlg = ChecksDialog(self, scope, incomplete, {a: (rows[a]["name"] if a in rows else a) for a in afms},
+                           missing_ika=missing_ika)
         if not dlg.exec():
             return
         actions = {"lookup": lambda: self._start_lookup(afms),
@@ -1310,8 +1313,11 @@ class MainWindow(QMainWindow):
         box = QMessageBox(parent)
         box.setWindowTitle("Έλεγχος υποβολών")
         box.setText("Να γίνει λήψη και των PDF των υποβληθεισών δηλώσεων (Φ2, Φ4/Φ5, ΦΜΥ, Intrastat…);")
-        box.setInformativeText("Αποθηκεύονται στον φάκελο δεδομένων (submissions) — μία φορά ανά δήλωση. Χωρίς PDF ο "
-                               "έλεγχος είναι πιο γρήγορος.")
+        box.setInformativeText("• Αποθηκεύονται στον φάκελο δεδομένων (submissions) — μία φορά ανά δήλωση. Χωρίς PDF ο "
+                               "έλεγχος είναι πιο γρήγορος.\n\n"
+                               "• Για τον έλεγχο ΑΠΔ (e-ΕΦΚΑ & ΤΕΚΑ) πρέπει να υπάρχουν κωδικοί ΙΚΑ εργοδότη "
+                               "(στην καρτέλα e-ΕΦΚΑ του πελάτη). Χωρίς κωδικούς ΙΚΑ ο έλεγχος ΑΠΔ παραλείπεται "
+                               "για να μην περιμένετε χωρίς λόγο.")
         with_pdf = box.addButton("Έλεγχος και PDF", QMessageBox.ButtonRole.YesRole)
         only = box.addButton("Μόνο έλεγχος", QMessageBox.ButtonRole.NoRole)
         box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)

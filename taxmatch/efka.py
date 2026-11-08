@@ -46,6 +46,7 @@ PAGE_ROWS = 20
 
 REASONS_EL = {
     "InvalidCredentials": "Λάθος κωδικοί TAXISnet / ΙΚΑ εργοδότη.",
+    "NoIka": "Απαιτούνται κωδικοί ΙΚΑ εργοδότη (στην καρτέλα e-ΕΦΚΑ / ΑΜΕ) για τον έλεγχο ΑΠΔ e-ΕΦΚΑ & ΤΕΚΑ.",
     "NoAme": "Λείπει ο ΑΜΕ (Αριθμός Μητρώου Εργοδότη) — συμπληρώστε τον στην καρτέλα ή στο Excel (στήλη «ΑΜΕ»).",
     "NoCredentials": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη.",
     "NoAmka": "Λείπει ο ΑΜΚΑ του πελάτη (καρτέλα πελάτη → Κωδικοί, ή στήλη «ΑΜΚΑ» του Excel).",
@@ -768,13 +769,19 @@ def remove_ame(conn: sqlite3.Connection, afm: str, ame: str) -> None:
 
 
 def ame_credentials(conn: sqlite3.Connection, afm: str, ame: str) -> Optional[tuple[str, str]]:
-    """Κωδικοί ΙΚΑ ΑΥΤΟΥ του ΑΜΕ· για το κύριο ΑΜΕ και οι κωδικοί ΙΚΑ εργοδότη του efka_credentials."""
+    """Κωδικοί ΙΚΑ ΑΥΤΟΥ του ΑΜΕ· για το κύριο ΑΜΕ (ή ως fallback) οι κωδικοί ΙΚΑ εργοδότη του efka_credentials."""
     r = conn.execute("SELECT ika_user, ika_pass FROM efka_ames WHERE afm=? AND ame=?", (afm, normalize_ame(ame))).fetchone()
     if r and r["ika_user"] and r["ika_pass"]:
         return crypto.dec(r["ika_user"]), crypto.dec(r["ika_pass"])
-    if normalize_ame(ame) == get_ame(conn, afm):
-        return ika_credentials(conn, afm)
-    return None
+    return ika_credentials(conn, afm)
+
+
+def has_ika_credentials(conn: sqlite3.Connection, afm: str, ame: str = "") -> bool:
+    """Ελέγχει αν υπάρχουν καταχωρημένοι κωδικοί ΙΚΑ εργοδότη (είτε συγκεκριμένοι για το ΑΜΕ είτε γενικοί)."""
+    return bool(ame_credentials(conn, afm, ame) if ame else (
+        ika_credentials(conn, afm)
+        or conn.execute("SELECT 1 FROM efka_ames WHERE afm=? AND ika_user<>'' AND ika_pass<>''", (afm,)).fetchone()
+    ))
 
 
 def _upper(s: str) -> str:
@@ -933,18 +940,11 @@ def submissions_entry(key: str, ame: str, rows: list[dict[str, Any]], year: int,
 def _login_for_ame(conn: sqlite3.Connection, afm: str, ame: str,
                    http_factory: Callable[[], _HyperHttp]) -> dict[str, Any]:
     """Σύνδεση για ΕΝΑ ΑΜΕ στη νέα πύλη (services.e-efka.gov.gr, «Είσοδος Εργοδότη» → GSIS → ρόλος external-employer
-    με ΑΥΤΟ το ΑΜΕ): πρώτα οι κωδικοί του ΑΜΕ (αν δόθηκαν), μετά οι TAXISnet του πελάτη. Η παλιά πύλη ΑΠΔ
-    (apps.e-efka.gov.gr/eAPDsso, με eAccess) ΑΝΑΚΑΤΕΥΘΥΝΕΙ πλέον στη νέα — ζωντανά 2026-10-27 — άρα δεν χρησιμοποιείται·
-    η σελίδα εισόδου δεν έχει άλλη επιλογή εργοδότη από το TAXISnet. {ok, http, portal: 'new', reason}."""
-    attempts: list[tuple[str, tuple[str, str]]] = []
+    με ΑΥΤΟ το ΑΜΕ): απαιτούνται οι κωδικοί ΙΚΑ του ΑΜΕ ή οι γενικοί κωδικοί ΙΚΑ του πελάτη."""
     own = ame_credentials(conn, afm, ame)
-    if own:
-        attempts.append(("new", own))
-    taxis = taxis_credentials.get(conn, afm)
-    if taxis and ("new", taxis) not in attempts:
-        attempts.append(("new", taxis))
-    if not attempts:
-        return {"ok": False, "reason": REASONS_EL["NoCredentials"]}
+    if not own:
+        return {"ok": False, "reason": "Λείπουν οι κωδικοί ΙΚΑ εργοδότη — απαιτούνται για τον έλεγχο ΑΠΔ e-ΕΦΚΑ & ΤΕΚΑ."}
+    attempts: list[tuple[str, tuple[str, str]]] = [("new", own)]
     last = "Αποτυχία σύνδεσης στον e-ΕΦΚΑ."
     for portal, (user, password) in attempts:
         try:
@@ -967,13 +967,16 @@ def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Opti
                       http_factory: Callable[[], _HyperHttp] = _HyperHttp, want_pdf: bool = False) -> list[dict[str, Any]]:
     """ΑΠΔ e-ΕΦΚΑ ΚΑΙ ΑΠΔ ΤΕΚΑ για ΚΑΘΕ ενεργό ΑΜΕ του εργοδότη → `obligation_checks` ως «ΑΠΔ#<ΑΜΕ>» /
     «ΑΠΔ_ΤΕΚΑ#<ΑΜΕ>» (το Ημερολόγιο τα ενώνει ανά κανόνα: deadlines._merge_per_ame). Χωρίς ΑΜΕ: ανάκτηση από την
-    «Πιστοποίηση Εργοδοτών»· αν δεν φορτώσει η σελίδα υποβολών ΑΠΔ, η παλιά μέθοδος (οικονομική καρτέλα εργοδότη)."""
+    «Πιστοποίηση Εργοδοτών» (εφόσον υπάρχουν κωδικοί ΙΚΑ)· αν δεν φορτώσει η σελίδα υποβολών ΑΠΔ, η παλιά μέθοδος (οικονομική καρτέλα εργοδότη)."""
     from .easycheck import store_results
     if not should_check_apd(conn, afm):
         return []
     today = today or date.today()
     ames = list_ames(conn, afm, active_only=True)
     if not ames and employer_credentials(conn, afm):
+        if not ika_credentials(conn, afm):
+            return [{"obligation": "ΑΠΔ", "label": "ΑΠΔ e-ΕΦΚΑ", "status": "error", "periods": [],
+                     "detail": "Απαιτούνται κωδικοί ΙΚΑ εργοδότη για τον έλεγχο ΑΠΔ e-ΕΦΚΑ / ΤΕΚΑ."}]
         found = retrieve_ame(conn, afm)
         ames = list_ames(conn, afm, active_only=True) if found.get("ok") else []
     if not ames:

@@ -22,7 +22,8 @@ CHECKS = [
 class ChecksDialog(QDialog):
     """`chosen` μετά το exec(): τα κλειδιά που τσεκαρίστηκαν (με τη σειρά του `CHECKS`)."""
 
-    def __init__(self, parent, scope_text: str, incomplete: dict[str, list[str]], names: dict[str, str]) -> None:
+    def __init__(self, parent, scope_text: str, incomplete: dict[str, list[str]], names: dict[str, str],
+                 missing_ika: Optional[list[str]] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Έλεγχοι & ενημέρωση")
         self.setMinimumWidth(560)
@@ -57,6 +58,16 @@ class ChecksDialog(QDialog):
                 box.toggled.connect(self.pdf_box.setEnabled)
                 self.pdf_box.setEnabled(box.isChecked())
                 root.addWidget(self.pdf_box)
+
+                # Prompt / υπόμνηση για κωδικούς ΙΚΑ εργοδότη στον έλεγχο ΑΠΔ e-ΕΦΚΑ / ΤΕΚΑ
+                self.ika_note = QLabel("💡 <b>ΑΠΔ (e-ΕΦΚΑ & ΤΕΚΑ):</b> Απαιτούνται κωδικοί ΙΚΑ εργοδότη (στην καρτέλα e-ΕΦΚΑ του πελάτη). "
+                                       "Σε πελάτες χωρίς κωδικούς ΙΚΑ ο έλεγχος ΑΠΔ παραλείπεται για αποφυγή άσκοπης αναμονής.")
+                self.ika_note.setWordWrap(True)
+                self.ika_note.setContentsMargins(26, 0, 0, 6)
+                self.ika_note.setStyleSheet(f"margin-left:26px; color:{CURRENT.accent_deep}; font-size:11.5px;")
+                box.toggled.connect(self.ika_note.setVisible)
+                self.ika_note.setVisible(box.isChecked())
+                root.addWidget(self.ika_note)
         if incomplete:
             # ελλιπή βασικά στοιχεία → προτείνεται ανανέωση, με το ποιοι και τι λείπει
             self.boxes["lookup"].setChecked(True)
@@ -68,6 +79,15 @@ class ChecksDialog(QDialog):
             warn.setWordWrap(True)
             warn.setStyleSheet(f"color:{CURRENT.warn};")
             root.addWidget(warn)
+        if missing_ika:
+            sample_ika = "; ".join(names.get(a, a) for a in missing_ika[:4])
+            more_ika = len(missing_ika) - 4
+            warn_ika = QLabel(f"ℹ {len(missing_ika)} {'εργοδότης δεν έχει' if len(missing_ika) == 1 else 'εργοδότες δεν έχουν'} "
+                              f"κωδικούς ΙΚΑ ({sample_ika}{f' και άλλοι {more_ika}' if more_ika > 0 else ''}) — "
+                              f"για τον έλεγχο ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ πρέπει να υπάρχουν κωδικοί ΙΚΑ.")
+            warn_ika.setWordWrap(True)
+            warn_ika.setStyleSheet(f"color:{CURRENT.accent_deep};")
+            root.addWidget(warn_ika)
         row = QHBoxLayout()
         row.addStretch()
         run = QPushButton("Εκτέλεση")
