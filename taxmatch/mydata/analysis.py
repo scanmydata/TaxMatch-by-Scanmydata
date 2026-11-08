@@ -239,12 +239,14 @@ def vat_warnings(conn: sqlite3.Connection, afm: str, year: Optional[int] = None)
 
 
 #: Καταχωρήσεις ΛΗΠΤΗ (τις διαβιβάζει ο ίδιος ο πελάτης ως αγοραστής/μισθωτής): είναι ΕΞΟΔΑ παρότι είναι «διαβιβασμένα».
-RECEIVER_TYPES = ("13.", "14.", "16.")
+RECEIVER_TYPES = ("13.", "14.", "15.", "16.", "17.1", "17.2", "17.5", "17.6")
 
 
 def is_income(doc: dict[str, Any]) -> bool:
     """Έσοδο (εκδοθέν του πελάτη) ή έξοδο (λήψη ή καταχώρηση λήπτη 13.x/14.x/16.x) — για τη στήλη «Έσοδο/Έξοδο»."""
-    return doc["direction"] == "outgoing" and not str(doc.get("invoice_type") or "").startswith(RECEIVER_TYPES)
+    if doc.get("direction") != "outgoing":
+        return False
+    return not str(doc.get("invoice_type") or "").startswith(RECEIVER_TYPES)
 
 
 def year_totals(conn: sqlite3.Connection, afm: str, year: str) -> dict[str, float]:

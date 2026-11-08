@@ -315,26 +315,206 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str) -> 
                 if value:
                     out[key] = value
             if ctx.afm:
-                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, db_id)
+                out["pdf"] = _debt_pdf(ctx, base + "displayDebtCode.htm?" + q, page, o.key, db_id, out)
                 out["pdf_checked"] = True              # δεν ξαναζητείται σε κάθε έλεγχο αν η σελίδα δεν έχει εκτύπωση
     except Exception as exc:                            # noqa: BLE001
         log.info("easycheck debtCode %s: %s", o.key, exc)
     return out
 
 
-def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str) -> str:
+def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_kind: str,
+                      installment: str, pay_by: str, afm: str, name: str, issued_at: str) -> bytes:
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QTextDocument, QPdfWriter, QPageSize, QPageLayout
+        from PySide6.QtCore import QMarginsF, QSizeF
+        import tempfile
+        import os
+        import sys
+
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+
+        dose_row = f"""<tr class="data-row">
+                <td class="label">Ποσό δόσης δήλωσης της {pay_by or issued_at}</td>
+                <td class="val">{installment}</td>
+            </tr>""" if installment else ""
+
+        inst_note = f"""Θα πρέπει να πληρώσετε το <b>ποσό της 1ης δόσης</b> μέχρι τις {pay_by or 'την καθορισμένη προθεσμία'} . Η καθυστέρηση πληρωμής του οφειλόμενου ποσού, συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).""" if (pay_by or installment) else """Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57)."""
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    body {{ font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #000; margin: 0; padding: 0; }}
+    .main-border {{ width: 100%; border: 1px dotted #000; padding: 20px; }}
+    .box-table {{ width: 100%; border: 1px solid #c8b9a6; margin-bottom: 16px; }}
+    .box-header {{ font-size: 11pt; color: #222; padding: 6px 12px; border-bottom: 1px solid #e2d7cb; background-color: #faf8f5; }}
+    .data-row td {{ padding: 4px 12px; font-size: 11pt; border: none; }}
+    .label {{ width: 44%; font-weight: bold; color: #000; }}
+    .val {{ width: 56%; font-weight: bold; color: #000; }}
+</style>
+</head>
+<body>
+<table class="main-border" cellspacing="0" cellpadding="0">
+    <tr><td>
+        <table style="width:100%; border:none; margin-bottom: 8px;" cellspacing="0" cellpadding="0">
+            <tr>
+                <td style="text-align:right; vertical-align:middle; padding-right:12px; border:none;">
+                    <span style="font-size:12.5pt; font-weight:bold;">TAXISnet - Υπηρεσίες Πληρωμής</span>
+                </td>
+                <td style="width:130px; text-align:right; vertical-align:middle; border:none;">
+                    <table style="background-color:#133b70; color:#fff; border:none; padding:4px 6px;" cellspacing="0" cellpadding="0">
+                        <tr>
+                            <td style="color:#fff; font-family:Arial; font-weight:bold; font-size:11.5pt; padding:0; letter-spacing:1px; line-height:1; border:none;">ΑΑΔΕ</td>
+                        </tr>
+                        <tr>
+                            <td style="color:#fff; font-family:Arial; font-size:5.5pt; padding:2px 0 0 0; line-height:1.1; border:none;">Ανεξάρτητη Αρχή<br>Δημοσίων Εσόδων</td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+
+        <div style="font-size:17pt; font-weight:bold; text-align:center; margin: 12px 0 20px 0;">
+            Σημείωμα για Πληρωμή
+        </div>
+
+        <table class="box-table" cellspacing="0" cellpadding="0">
+            <tr>
+                <td colspan="2" class="box-header">Στοιχεία Οφειλέτη</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Α.Φ.Μ.</td>
+                <td class="val">{afm}</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Ονοματεπώνυμο/ Επωνυμία</td>
+                <td class="val">{name or '—'}</td>
+            </tr>
+        </table>
+
+        <table class="box-table" cellspacing="0" cellpadding="0">
+            <tr>
+                <td colspan="2" class="box-header">Στοιχεία Οφειλής</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Τύπος Πληρωμής</td>
+                <td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">ΔΟΥ</td>
+                <td class="val">{doy or '—'}</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Είδος Φόρου</td>
+                <td class="val">{tax_kind}</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Ημερολογιακή Περίοδος</td>
+                <td class="val">{period or '—'}</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Συνολικό ποσό οφειλής δήλωσης</td>
+                <td class="val">{total_due}</td>
+            </tr>
+            {dose_row}
+            <tr class="data-row">
+                <td class="label">Ταυτότητα Οφειλής</td>
+                <td class="val" style="font-size:12pt; letter-spacing:1px;">{debt_id}</td>
+            </tr>
+            <tr class="data-row">
+                <td class="label">Ημ/νία Έκδοσης</td>
+                <td class="val">{issued_at or '—'}</td>
+            </tr>
+        </table>
+
+        <div style="margin-top: 15px; font-size: 10.5pt; line-height: 1.4; color: #000; padding: 0 4px 6px 4px;">
+            <div style="color: #d00; font-weight: bold; font-size: 11pt; margin-bottom: 4px;">Προσοχή:</div>
+            <p style="margin: 3px 0 8px 0;">
+                Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.
+            </p>
+            <p style="margin: 3px 0 0 0;">
+                {inst_note}
+            </p>
+        </div>
+    </td></tr>
+</table>
+</body>
+</html>"""
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            tmp_name = f.name
+        try:
+            writer = QPdfWriter(tmp_name)
+            writer.setResolution(96)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+
+            doc = QTextDocument()
+            paint_rect = writer.pageLayout().paintRectPixels(96)
+            doc.setPageSize(QSizeF(paint_rect.width(), paint_rect.height()))
+            doc.setHtml(html)
+            doc.print_(writer)
+
+            with open(tmp_name, "rb") as fh:
+                return fh.read()
+        finally:
+            if os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except OSError:
+                    pass
+    except Exception as exc:
+        log.warning("error generating debt voucher pdf: %s", exc)
+        return b""
+
+
+def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None) -> str:
     """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — κουμπί «Εκτύπωση» της σελίδας (`debts.print_form`, ίδιος
-    μηχανισμός με τις οφειλές του Tax Center). '' αν η σελίδα δεν έχει εκτύπωση ή δεν ήρθε PDF."""
+    μηχανισμός με τις οφειλές του Tax Center). Αν η σελίδα τυπώνεται με window.print() στον client (όπως στο Φ2/παρακρατήσεις),
+    δημιουργεί απευθείας το επίσημο σημείωμα πληρωμής σε PDF."""
     from . import debts
-    if not ctx.afm or not hasattr(ctx.http, "follow"):
+    if not ctx.afm:
         return ""
-    pf = debts.print_form(page)
-    if not pf:
+    if hasattr(ctx.http, "follow"):
+        pf = debts.print_form(page)
+        if pf:
+            res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
+            if res.get("is_pdf"):
+                return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
+
+    m = label_map(page) if page else {}
+    debt_id = (out or {}).get("debt_id") or ""
+    if not debt_id and page:
+        m_id = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
+        debt_id = m_id.group(0).strip() if m_id else ""
+    if not debt_id:
         return ""
-    res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
-    if not res.get("is_pdf"):
-        return ""
-    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
+
+    name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
+    if not name and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
+        b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
+        if b_row:
+            name = b_row["name"] or b_row["trade_name"] or ""
+            if not doy:
+                doy = b_row["doy"] or ""
+    period = _find(m, r"Ημερολογιακή Περίοδος") or (out or {}).get("period", "")
+    doy = (out or {}).get("doy") or _find(m, r"^ΔΟΥ$|Δ\.?Ο\.?Υ")
+    tax_kind = (out or {}).get("tax_kind") or _find(m, r"Είδος Φόρου") or key
+    issued_at = (out or {}).get("issued_at") or _find(m, r"Ημ/νία Έκδοσης") or ""
+    total = (out or {}).get("total_due")
+    total_str = f"{total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else (_find(m, r"Συνολικό ποσό οφειλής") or "")
+    inst = (out or {}).get("installment")
+    inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
+    pay_by = (out or {}).get("pay_by") or ""
+
+    pdf_bytes = _debt_voucher_pdf(debt_id, total_str, period, doy, tax_kind, inst_str, pay_by, ctx.afm, name, issued_at)
+    if pdf_bytes:
+        return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", pdf_bytes)  # noqa: SLF001
+    return ""
 
 
 def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optional[dict] = None

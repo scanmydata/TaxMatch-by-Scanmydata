@@ -2,6 +2,7 @@
 χρησιμοποιούσε το web UI (business_profiles.service, matching.engine, deadlines, pipeline, notices, …) — καμία
 HTTP κλήση, κανένα token. Ό,τι αγγίζει δίκτυο/LLM/ΑΑΔΕ τρέχει σε background thread (`workers.run_task`)."""
 from __future__ import annotations
+import unicodedata
 
 import calendar as pycal
 import html
@@ -171,6 +172,55 @@ class _ClientItem(QTableWidgetItem):
             return (b < a) if descending else (a < b)
         except TypeError:
             return (str(b) < str(a)) if descending else (str(a) < str(b))
+
+
+_HOMOGLYPHS = str.maketrans({
+    'A': 'Α', 'B': 'Β', 'E': 'Ε', 'H': 'Η', 'I': 'Ι', 'K': 'Κ', 'M': 'Μ',
+    'N': 'Ν', 'O': 'Ο', 'P': 'Ρ', 'T': 'Τ', 'X': 'Χ', 'Y': 'Υ', 'Z': 'Ζ',
+})
+
+
+def _norm_search_str(s: str) -> str:
+    s = unicodedata.normalize("NFD", s.upper())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.translate(_HOMOGLYPHS)
+
+
+class _ClientTableWidget(QTableWidget):
+    """Πίνακας πελατών με βελτιωμένη αναζήτηση πληκτρολογίου (άλμα σε γράμμα).
+    Παρακάμπτει τα βελάκια '▾ ', '▸ ', '↳ ' και αναζητά case-insensitive χωρίς τόνους και
+    με αυτόματη αντιστοίχιση ελληνικών/λατινικών ομόγραφων χαρακτήρων (π.χ. M -> Μ)."""
+
+    def keyboardSearch(self, search: str) -> None:
+        if not search or self.rowCount() == 0:
+            return
+        col = self.currentColumn() if self.currentColumn() >= 0 else _C_NAME
+        cur_row = self.currentRow()
+        start_row = (cur_row + 1) if len(search) == 1 and cur_row >= 0 else (cur_row if cur_row >= 0 else 0)
+        norm_search = _norm_search_str(search)
+
+        for i in range(self.rowCount()):
+            r = (start_row + i) % self.rowCount()
+            if self.isRowHidden(r):
+                continue
+            item = self.item(r, col)
+            if not item:
+                continue
+            text = item.text()
+            if col == _C_NAME:
+                text = text.lstrip("▾▸↳ ").strip()
+            norm_text = _norm_search_str(text)
+
+            matched = norm_text.startswith(norm_search)
+            if not matched and col == _C_NAME:
+                trade = item.data(Qt.ItemDataRole.UserRole + 1) or ""
+                if trade:
+                    matched = _norm_search_str(str(trade)).startswith(norm_search)
+
+            if matched:
+                self.setCurrentCell(r, col)
+                self.scrollToItem(item)
+                return
 
 
 class _DayCell(QFrame):
@@ -808,7 +858,7 @@ class MainWindow(QMainWindow):
         selbar.addWidget(del_btn)
         root.addLayout(selbar)
 
-        self.client_table = QTableWidget(0, len(_CLIENT_COLS))
+        self.client_table = _ClientTableWidget(0, len(_CLIENT_COLS))
         self.client_table.setHorizontalHeaderLabels([c[0] for c in _CLIENT_COLS])
         self.client_table.verticalHeader().setVisible(False)
         self.client_table.setAlternatingRowColors(True)
@@ -1238,7 +1288,7 @@ class MainWindow(QMainWindow):
                 state["failed"] += 0 if result.get("ok") else 1
                 state["missing"] += sum(1 for e in result.get("entries", []) for p in e["periods"]
                                         if p["status"] == "not_submitted")
-                report(f"Έλεγχος υποβολών {n}/{total} — {names.get(afm, afm)}", n)
+                report(f"Έλεγχος υποβολών {n}/{total} — {names.get(afm, afm)}", n, total)
 
             clients.lookup_many(afms, on_each=each, fetch=one, should_cancel=cancelled)
             return state["done"]
@@ -1389,7 +1439,7 @@ class MainWindow(QMainWindow):
                 for i, afm in enumerate(afms, 1):
                     if cancelled():
                         break
-                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i - 1)
+                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i - 1, total)
                     try:
                         res = debts_mod.check_client(conn, afm, want_pdf=want_pdf)
                     except Exception as exc:                   # noqa: BLE001 — ένας πελάτης δεν σταματά τους άλλους
@@ -1400,7 +1450,7 @@ class MainWindow(QMainWindow):
                         state["failed"] += 1
                         state["reason"] = res["reason"]
                     state["done"] = i
-                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i)
+                    report(f"Οφειλές {i}/{total} — {names.get(afm, afm)}", i, total)
             finally:
                 conn.close()
             return state["done"]
@@ -1440,7 +1490,7 @@ class MainWindow(QMainWindow):
                 for i, afm in enumerate(afms, 1):
                     if cancelled():
                         break
-                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i - 1)
+                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i - 1, total)
                     try:
                         res = requests_aade.refresh(conn, afm)
                     except Exception as exc:                   # noqa: BLE001
@@ -1450,7 +1500,7 @@ class MainWindow(QMainWindow):
                         state["failed"] += 1
                         state["reason"] = res["reason"]
                     state["done"] = i
-                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i)
+                    report(f"Αιτήματα ΑΑΔΕ {i}/{total} — {names.get(afm, afm)}", i, total)
             finally:
                 conn.close()
             return state["done"]
@@ -1493,26 +1543,52 @@ class MainWindow(QMainWindow):
         def work(report, cancelled):
             conn = dbmod.connect()
             try:
-                for i, afm in enumerate(afms, 1):
-                    if cancelled():
-                        break
+                if total == 1:
+                    afm = afms[0]
                     wanted = months or mydata_store.months_to_refresh(conn, afm)
-                    report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)} ({len(wanted)} μήνες)", i - 1)
+                    total_steps = len(wanted) + (len(wanted) if pdfs else 0) + 1
+                    cur_step = 0
+                    report(f"Λήψη myDATA — {names.get(afm, afm)} ({len(wanted)} μήνες)", 0, total_steps)
                     out = mydata_store.sync_range(conn, afm, wanted)
                     if not out["ok"]:
                         state["failed"] += 1
                         state["reason"] = out["reason"]
                     state["docs"] += out.get("n", 0)
+                    cur_step += len(wanted)
+                    report(f"myDATA ({len(wanted)} μήνες) — {names.get(afm, afm)} ({out.get('n', 0)} παραστ.)", cur_step, total_steps)
                     if pdfs and out["ok"]:
                         for ym in wanted:
                             if cancelled():
                                 break
-                            report(f"PDF {ym} — {names.get(afm, afm)}", i - 1)
+                            report(f"Λήψη PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
                             mydata_pdfs.download_month(conn, afm, ym, should_cancel=cancelled)
-                    state["done"] = i
-                    report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i)
-                report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"])
-                mydata_names.resolve_via_vies(conn, afms[0] if total == 1 else None, limit=60, should_cancel=cancelled)
+                            cur_step += 1
+                            report(f"Ολοκληρώθηκε PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
+                    state["done"] = 1 if not cancelled() else 0
+                    report("Επωνυμίες αντισυμβαλλομένων (VIES)…", total_steps - 1, total_steps)
+                    mydata_names.resolve_via_vies(conn, afm, limit=60, should_cancel=cancelled)
+                    report("Ολοκληρώθηκε η λήψη myDATA", total_steps, total_steps)
+                else:
+                    for i, afm in enumerate(afms, 1):
+                        if cancelled():
+                            break
+                        wanted = months or mydata_store.months_to_refresh(conn, afm)
+                        report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)} ({len(wanted)} μήνες)", i - 1, total)
+                        out = mydata_store.sync_range(conn, afm, wanted)
+                        if not out["ok"]:
+                            state["failed"] += 1
+                            state["reason"] = out["reason"]
+                        state["docs"] += out.get("n", 0)
+                        if pdfs and out["ok"]:
+                            for ym in wanted:
+                                if cancelled():
+                                    break
+                                report(f"PDF {ym} — {names.get(afm, afm)}", i - 1, total)
+                                mydata_pdfs.download_month(conn, afm, ym, should_cancel=cancelled)
+                        state["done"] = i
+                        report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i, total)
+                    report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"], total)
+                    mydata_names.resolve_via_vies(conn, None, limit=60, should_cancel=cancelled)
             finally:
                 conn.close()
             return state["done"]
@@ -1600,7 +1676,7 @@ class MainWindow(QMainWindow):
         stop = threading.Event()
         started = time.monotonic()
         bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…",
-                            on_cancel=stop.set, afm=afms[0] if total == 1 else "")
+                            on_cancel=stop.set, afm=afms[0] if total == 1 else "", total=total, done=0)
         state = {"done": 0}
 
         def work(progress):

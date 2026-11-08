@@ -25,6 +25,7 @@ if (-not $SkipTests) { & $py -m pytest; if ($LASTEXITCODE -ne 0) { throw "Τα t
 
 # 3. εικονίδια από το λογότυπο
 & $py packaging\make_icons.py
+& $py packaging\make_wizard_images.py
 
 # 3b. version_info.txt (Windows FileVersion/ProductVersion) από το ίδιο __version__ — ΠΟΤΕ στο χέρι: ξέμεινε
 # hardcoded στο 0.3.1.0 ενώ το __version__ ήταν ήδη 0.3.2 (2026-09-23), το installer.exe έδειχνε λάθος αριθμό.

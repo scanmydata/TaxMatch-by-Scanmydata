@@ -57,7 +57,8 @@ class JobQueue:
         # εργασία ΕΝΟΣ πελάτη: η πρόοδος περνά στην καρτέλα του όταν ανοίξει (και πίσω όταν κλείσει)
         one = afms[0] if afms and len(afms) == 1 else getattr(window, "afm", "") or ""
         job.toast = ProgressToast(window or self._main, ("Σε αναμονή: " if waiting else "Ξεκίνησε: ") + title,
-                                  on_cancel=lambda j=job: self._cancel(j), afm=one)
+                                  on_cancel=lambda j=job: self._cancel(j), afm=one,
+                                  total=total if total > 0 else None, done=0 if total > 0 else None)
         self._pending.append(job)
         self._next()
         return job
@@ -84,7 +85,9 @@ class JobQueue:
                 job.toast.update(msg, job.done, job.total or None)
 
         def work(progress):
-            def report(msg: str, done: Optional[int] = None) -> None:
+            def report(msg: str, done: Optional[int] = None, total: Optional[int] = None) -> None:
+                if total is not None:
+                    job.total = total
                 if done is not None:
                     job.done = done
                 progress(msg)

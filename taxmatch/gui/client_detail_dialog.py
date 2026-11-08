@@ -185,11 +185,14 @@ class ClientDetailDialog(QDialog):
     def _apply_private_layout(self, b: dict) -> None:
         """Ιδιώτης (ή μέλος χωρίς ενεργή επιχείρηση): χωρίς τμήμα εργοδότη, χωρίς καρτέλες myDATA και «Μέλη» — δεν
         αφορούν φυσικό πρόσωπο χωρίς επιχείρηση (ρητό αίτημα 2026-10-27). Μένει ο ΑΜΚΑ (ΚΕΑΟ / εισφορές e-ΕΦΚΑ)."""
-        private = obligations.is_private_person(b)
+        private = obligations.is_private_person(b, self.conn)
         self.is_private = private
         for row in self._employer_rows:
             self._cred_form.setRowVisible(row, not private)
         self.fetch_ame_btn.setVisible(not private)
+        if hasattr(self, "_profile_form") and hasattr(self, "f_employer"):
+            self._profile_form.setRowVisible(self.f_employer, not private)
+            self._profile_form.setRowVisible(self.f_teka, not private)
         for name in ("mydata", "members_tab"):
             index = self._detail_tab_indices.get(name)
             if index is not None:
@@ -207,6 +210,7 @@ class ClientDetailDialog(QDialog):
     def _profile_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
+        self._profile_form = form
         self.f_afm = QLineEdit()
         self.f_afm.setReadOnly(True)                          # ο ΑΦΜ είναι το κλειδί του πελάτη — δεν αλλάζει από εδώ
         self.f_afm.setToolTip("Ο ΑΦΜ του πελάτη (μόνο ανάγνωση)")
@@ -399,12 +403,20 @@ class ClientDetailDialog(QDialog):
 
     def _save_profile(self) -> None:
         vat = self.f_vat.currentData()
+        status_val = self.f_status.text().strip()
         clients.update_fields(self.conn, self.afm, {
             "name": self.f_name.text().strip(), "legal_form": self.f_legal_form.text().strip(),
             "doy": self.f_doy.text().strip(), "address": self.f_address.text().strip(),
-            "books_category": self.f_books.currentData(), "status": self.f_status.text().strip(),
+            "books_category": self.f_books.currentData(), "status": status_val,
             "notes": self.f_notes.toPlainText().strip(),
         }, vat_subject={"1": True, "0": False}.get(vat, None))
+        s_norm = strip_accents(status_val).upper()
+        if any(k in s_norm for k in ("ΔΙΑΚΟΠ", "CEASED")):
+            self.conn.execute("UPDATE businesses SET activity_state='ceased' WHERE afm=?", (self.afm,))
+        elif any(k in s_norm for k in ("ΙΔΙΩΤ", "ΜΗ ΕΠΙΤΗΔΕΥΜΑΤ")):
+            self.conn.execute("UPDATE businesses SET activity_state='none' WHERE afm=?", (self.afm,))
+        elif "ΕΝΕΡΓ" in s_norm or "ACTIVE" in s_norm:
+            self.conn.execute("UPDATE businesses SET activity_state='active' WHERE afm=?", (self.afm,))
         self.conn.execute("UPDATE businesses SET trade_name=? WHERE afm=?", (self.f_trade_name.text().strip(), self.afm))
         old = self.conn.execute("SELECT email, email_assistant, mobile, phone FROM businesses WHERE afm=?",
                                 (self.afm,)).fetchone()
@@ -683,6 +695,10 @@ class ClientDetailDialog(QDialog):
                 labels = {"Κοινών Επιχειρήσεων": "Κοινών", "Οικοδομοτεχνικών Έργων": "Οικοδομοτεχνικών"}
                 found = " · ".join(f"{labels.get(item['kind'], item['kind'])}: {item['ame']}" for item in res["all"])
                 message = f"ΑΜΕ: {found}"
+                self.conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (self.afm,))
+                self.conn.commit()
+                self.f_employer.setCurrentIndex(max(0, self.f_employer.findData("1")))
+                self.f_teka.setEnabled(True)
             else:
                 message = res["reason"]
             if res.get("handoff"):                       # κόλλησε μετά τη σύνδεση → browser / ξανά δοκιμή / παράβλεψη
@@ -1206,10 +1222,16 @@ class ClientDetailDialog(QDialog):
         flags = self.conn.execute("SELECT employer, intrastat, teka, internet_contribution, parepid FROM businesses "
                                   "WHERE afm=?",
                                   (self.afm,)).fetchone()
-        for box, value in ((self.f_employer, flags["employer"]), (self.f_intrastat, flags["intrastat"])):
+        employer_val = flags["employer"]
+        has_ame = bool(efka.get_ame(self.conn, self.afm)) or bool(efka.list_ames(self.conn, self.afm))
+        if has_ame and employer_val != 1:
+            self.conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (self.afm,))
+            self.conn.commit()
+            employer_val = 1
+        for box, value in ((self.f_employer, employer_val), (self.f_intrastat, flags["intrastat"])):
             box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
         self.f_teka.setChecked(bool(flags["teka"]))
-        self.f_teka.setEnabled(flags["employer"] == 1)
+        self.f_teka.setEnabled(employer_val == 1)
         self.f_internet.setChecked(bool(flags["internet_contribution"]))
         from .. import advertising
         suggest = flags["internet_contribution"] is None and self.afm in advertising.google_candidates(self.conn)

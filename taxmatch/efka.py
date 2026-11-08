@@ -694,6 +694,7 @@ def retrieve_ame(conn: sqlite3.Connection, afm: str,
     if include_oikodomotexnika:
         conn.execute("UPDATE efka_credentials SET ame_oikodomotexnikon=?, updated_at=? WHERE afm=?",
                      (construction_ame, db.utcnow(), afm))
+    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (afm,))
     from . import handoff
     for h in handoff.pending(afm):                     # πέτυχε (π.χ. μετά από «Ξανά δοκιμή»): η εκκρεμότητα σβήνει
         if h["label"] == AME_HANDOFF_LABEL:

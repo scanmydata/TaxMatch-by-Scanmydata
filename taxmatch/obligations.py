@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import calendar as _cal
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import lru_cache
@@ -506,13 +507,38 @@ def parepid_note(business: Optional[dict[str, Any]]) -> str:
     return parepid.note([k["code"] if isinstance(k, dict) else k for k in kads])
 
 
-def is_private_person(b: Optional[dict[str, Any]]) -> bool:
-    """Ιδιώτης: φυσικό πρόσωπο χωρίς (ενεργή) επιχείρηση — «ΙΔΙΩΤΗΣ» του Μητρώου, ή ατομική με διακοπή. Δεν έχει
-    myDATA, μέλη ή ΑΠΔ (ρητό αίτημα 2026-10-27: η καρτέλα του δεν δείχνει αυτά)."""
+def is_private_person(b: Optional[dict[str, Any]], conn: Optional[Any] = None) -> bool:
+    """Ιδιώτης: φυσικό πρόσωπο χωρίς (ενεργή) επιχείρηση — «ΙΔΙΩΤΗΣ» του Μητρώου, ατομική με διακοπή,
+    ή μέλος/εκπρόσωπος εταιρείας χωρίς δική του ενεργή επιχείρηση. Δεν έχει myDATA, εργοδοτικές υποχρεώσεις κ.λπ."""
     if not b or is_legal_entity(b.get("legal_form") or ""):
         return False
-    return (b.get("activity_state") in ("none", "ceased")
-            or "ΙΔΙΩΤ" in strip_accents(b.get("legal_form") or "").upper())
+    form = strip_accents(b.get("legal_form") or "").upper().strip()
+    if any(k in form for k in ("ΙΔΙΩΤΙΚΗ", "ΙΚΕ", "ΕΤΑΙΡ", "ΚΕΦΑΛΑΙΟΥΧ", "ΣΥΣΤΑΣΗ", "ΚΟΙΝΟΠΡΑΞΙΑ")):
+        return False
+    state = (b.get("activity_state") or "").lower().strip()
+    status = strip_accents(b.get("status") or "").upper().strip()
+
+    if state in ("none", "ceased") or any(k in status for k in ("ΔΙΑΚΟΠ", "ΙΔΙΩΤ", "ΜΗ ΕΠΙΤΗΔΕΥΜΑΤ")):
+        return True
+
+    if bool(re.search(r"\bΙΔΙΩΤ(ΗΣ|ΕΣ|Η)\b", form) or "ΦΥΣΙΚΟ ΠΡΟΣΩΠΟ" in form or form in ("ΙΔΙΩΤΗΣ", "ΦΠ")):
+        return True
+
+    afm = b.get("afm") or ""
+    is_member = b.get("source") == "member" or bool(re.search(r"\b(ΕΚΠΡΟΣΩΠ|ΔΙΑΧΕΙΡΙΣΤ|ΜΕΛ|ΕΤΑΙΡ)\b", form))
+    if not is_member and conn and afm:
+        try:
+            is_member = bool(conn.execute("SELECT 1 FROM company_members WHERE member_afm=?", (afm,)).fetchone())
+        except Exception:
+            pass
+    if is_member and state != "active":
+        return True
+
+    has_business_traits = bool(b.get("kad_main_code") or b.get("books_category") or b.get("vat_subject") == 1)
+    if state != "active" and not has_business_traits:
+        return True
+
+    return False
 
 
 def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
@@ -743,9 +769,11 @@ def amounts_text(amounts: dict[str, Any]) -> str:
 
 
 def is_legal_entity(legal_form: str) -> bool:
-    f = legal_form.upper().replace(".", "").replace(" ", "")
-    return any(k in f for k in ("ΑΕ", "ΙΚΕ", "ΕΠΕ", "ΟΕ", "ΕΕ", "ΚΟΙΝΣΕΠ", "ΑΣΤΙΚΗ", "ΣΥΝΕΤΑΙΡ", "ΣΩΜΑΤΕΙ", "ΚΟΙΝΟΠΡΑΞ",
-                                "ΙΔΡΥΜΑ", "ΝΠΔΔ", "ΝΠΙΔ", "ΑΜΚΕ")) and "ΑΤΟΜΙΚ" not in f
+    f = strip_accents(legal_form or "").upper().replace(".", "").replace(" ", "")
+    stems = ("ΑΕ", "ΙΚΕ", "ΕΠΕ", "ΟΕ", "ΕΕ", "ΚΟΙΝΣΕΠ", "ΑΣΤΙΚΗ", "ΣΥΝΕΤΑΙΡ", "ΣΩΜΑΤΕΙ", "ΚΟΙΝΟΠΡΑΞ",
+             "ΙΔΡΥΜΑ", "ΝΠΔΔ", "ΝΠΙΔ", "ΑΜΚΕ", "ΚΕΦΑΛΑΙΟΥΧ", "ΑΝΩΝΥΜ", "ΠΕΡΙΟΡΙΣΜΕΝΗΣΕΥΘΥΝ",
+             "ΟΜΟΡΡΥΘΜ", "ΕΤΕΡΟΡΡΥΘΜ", "ΕΤΑΙΡΕΙΑ", "ΕΤΑΙΡΙΑ")
+    return any(k in f for k in stems) and "ΑΤΟΜΙΚ" not in f
 
 
 @dataclass

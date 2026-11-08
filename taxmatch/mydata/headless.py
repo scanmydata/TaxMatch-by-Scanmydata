@@ -84,7 +84,7 @@ def _json(url: str, timeout: float = 3.0, method: str = "GET") -> Any:
 class HeadlessRenderer:
     """Ένας αόρατος browser για πολλά παραστατικά (`with HeadlessRenderer() as r: r.render(url)`)."""
 
-    def __init__(self, timeout: float = 30.0, launcher: Callable[..., Any] = subprocess.Popen) -> None:
+    def __init__(self, timeout: float = 12.0, launcher: Callable[..., Any] = subprocess.Popen) -> None:
         self.timeout, self._launcher = timeout, launcher
         self._proc: Any = None
         self._profile: Optional[Path] = None
@@ -129,12 +129,12 @@ class HeadlessRenderer:
             deadline = time.monotonic() + self.timeout
             text = 0
             while time.monotonic() < deadline:
-                time.sleep(0.8)
+                time.sleep(0.3)
                 if cdp.evaluate("document.readyState") != "complete":
                     continue
                 text = cdp.evaluate("document.body ? document.body.innerText.trim().length : 0") or 0
                 if text >= MIN_TEXT:
-                    time.sleep(1.0)                     # γραμματοσειρές/εικόνες
+                    time.sleep(0.4)                     # γραμματοσειρές/εικόνες
                     break
             if text < MIN_TEXT:
                 raise RenderError("η σελίδα δεν στοιχειοθετήθηκε (κενή προβολή — πιθανός έλεγχος «είστε άνθρωπος»)")

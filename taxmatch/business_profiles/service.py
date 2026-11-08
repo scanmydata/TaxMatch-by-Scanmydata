@@ -130,7 +130,7 @@ def for_matching(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         # είδος πελάτη για τα `entity_types` του scope: ιδιώτης / ατομική / νομικό πρόσωπο (None = άγνωστο)
         if is_legal_entity(form):
             kind = "company"
-        elif state == "none" or "ΙΔΙΩΤ" in strip_accents(form).upper():
+        elif state == "none" or re.search(r"\bΙΔΙΩΤ(ΗΣ|ΕΣ)\b", strip_accents(form).upper()) or strip_accents(form).upper() == "ΙΔΙΩΤΗΣ":
             kind = "private"
         elif state in ("active", "ceased") or form:
             kind = "sole"
@@ -515,20 +515,39 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
         from .. import efka
         ame_fetch = efka.retrieve_ame
     if ame_fetch is not None:
-        # Εργοδότης χωρίς ΑΜΕ: και ο ΑΜΕ από την «Πιστοποίηση Εργοδοτών» (και στη μαζική ανανέωση — ρητό αίτημα
-        # 2026-10-29). Αν ο e-ΕΦΚΑ κολλήσει μετά τη σύνδεση (επιβεβαίωση στοιχείων), μένει «Συνέχεια στον browser».
-        from .. import efka
-        row = conn.execute("SELECT employer FROM businesses WHERE afm=?", (afm,)).fetchone()
-        if row and row["employer"] and not efka.get_ame(conn, afm) and (credentials.get(conn, afm)
-                                                                         or efka.ika_credentials(conn, afm)):
+        # Αυτόματη προσπάθεια ανάκτησης ΑΜΕ από την «Πιστοποίηση Εργοδοτών» e-ΕΦΚΑ (ePistErg)
+        # όταν υπάρχουν κωδικοί (TAXISnet ή ΙΚΑ) και δεν έχει ήδη ανακτηθεί ΑΜΕ:
+        # Αν βρεθεί ΑΜΕ, ο πελάτης ενημερώνεται αυτόματα ως εργοδότης (employer=1) ώστε να
+        # δημιουργηθούν σωστά οι υποχρεώσεις μισθοδοσίας (ΑΠΔ, Ε4, ΦΜΥ).
+        from .. import efka, obligations
+        row = conn.execute("SELECT employer, activity_state, legal_form, status FROM businesses WHERE afm=?", (afm,)).fetchone()
+        has_creds = bool(credentials.get(conn, afm) or efka.ika_credentials(conn, afm))
+        has_ame = bool(efka.get_ame(conn, afm))
+        if has_ame and (row is None or row["employer"] is None or row["employer"] == 0):
+            conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (afm,))
+        current_b = {
+            "afm": afm,
+            "legal_form": fields.get("legal_form") or (row["legal_form"] if row else ""),
+            "activity_state": (aade.get("business_state") if aade else "") or (row["activity_state"] if row else ""),
+            "status": fields.get("status") or (row["status"] if row else ""),
+            "kad_main_code": (kads[0]["code"] if kads else ""),
+            "books_category": vat.get("books_category") if vat else "",
+            "vat_subject": vat.get("vat_subject") if vat else None,
+        }
+        is_private = obligations.is_private_person(current_b, conn)
+        if has_creds and not has_ame and not is_private and (row is None or row["employer"] != 0):
             try:
                 ame = ame_fetch(conn, afm)
                 if ame.get("ok"):
                     sources.append("e-ΕΦΚΑ (ΑΜΕ)")
+                    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (afm,))
                 else:
                     errors.append("ΑΜΕ: " + ame.get("reason", ""))
                     if ame.get("handoff"):
                         issues.append({"code": "efka_handoff", "message": ame.get("reason", "")})
+                    elif ame.get("reason") in (efka.REASONS_EL.get("AmeNotFound", "AmeNotFound"), "AmeNotFound", "Δεν βρέθηκε καταχωρημένος ΑΜΕ στον e-ΕΦΚΑ."):
+                        if row and row["employer"] is None:
+                            conn.execute("UPDATE businesses SET employer=0 WHERE afm=?", (afm,))
             except Exception as exc:                   # noqa: BLE001
                 log.warning("ΑΜΕ %s: %s", afm, exc)
     if kads:

@@ -63,7 +63,7 @@ class NotAPdf(Exception):
     """Ο πάροχος δίνει μόνο σελίδα προβολής — δεν είναι σφάλμα."""
 
 
-def fetch_pdf(url: str, session: Optional[requests.Session] = None, timeout: float = 45.0) -> bytes:
+def fetch_pdf(url: str, session: Optional[requests.Session] = None, timeout: float = 15.0) -> bytes:
     if _host(urlparse(url).netloc, "eskap.gr"):
         raise NotAPdf("eskap: μόνο εκτυπώσιμη σελίδα")
     eps = epsilon_pdf_url(url)
@@ -115,7 +115,14 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
     (`marks`: μόνο αυτά — π.χ. «Λήψη PDF» από την καρτέλα παραστατικού).
     Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) περνούν ΜΙΑ φορά από αόρατο
     browser (`headless.py`, όπως το timologio)· όσα δεν στοιχειοθετούνται μένουν «μόνο online» και δεν ξαναζητούνται."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from requests.adapters import HTTPAdapter
+
     session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=12, pool_maxsize=12, max_retries=1)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
     if render is None and fetch is None:
         render = _headless_render
     fetch = fetch or (lambda u: fetch_pdf(u, session))
@@ -123,39 +130,70 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
         "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))
         if marks is None or r["mark"] in marks]
     counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0}
+    total_docs = len(rows)
+    processed = 0
+
+    to_fetch = []
     try:
-        for i, doc in enumerate(rows, 1):
+        for doc in rows:
             if should_cancel and should_cancel():
                 break
-            folder = month_dir(afm, doc["issue_date"][:7])
             status, path = doc["pdf_status"], doc["pdf_path"]
             if status == "ok" and path and Path(path).exists():
                 counts["ok"] += 1
+                processed += 1
+                if on_each:
+                    on_each(processed, total_docs)
             elif status == "viewer" and doc["url"]:
                 counts["viewer"] += 1
+                processed += 1
+                if on_each:
+                    on_each(processed, total_docs)
             elif not doc["url"]:
                 status, path = "no_url", ""
                 counts["no_url"] += 1
+                conn.execute("UPDATE mydata_docs SET pdf_status=?, pdf_path=? WHERE afm=? AND mark=?",
+                             (status, path, afm, doc["mark"]))
+                processed += 1
+                if on_each:
+                    on_each(processed, total_docs)
             else:
+                to_fetch.append(doc)
+
+        if to_fetch and not (should_cancel and should_cancel()):
+            def _fetch_one(d):
+                if should_cancel and should_cancel():
+                    return d["mark"], "cancelled", "", None
+                folder = month_dir(afm, d["issue_date"][:7])
                 try:
-                    payload = fetch(doc["url"])
+                    payload = fetch(d["url"])
                     folder.mkdir(parents=True, exist_ok=True)
-                    target = folder / file_name(doc)
+                    target = folder / file_name(d)
                     if target.exists() and target.read_bytes() != payload:
-                        target = target.with_name(target.stem + f"_{doc['mark']}.pdf")   # ποτέ αντικατάσταση άλλου MARK
+                        target = target.with_name(target.stem + f"_{d['mark']}.pdf")
                     target.write_bytes(payload)
-                    status, path = "ok", str(target)
-                    counts["ok"] += 1
+                    return d["mark"], "ok", str(target), None
                 except NotAPdf:
-                    status, path = "viewer", ""
-                    counts["viewer"] += 1
+                    return d["mark"], "viewer", "", None
                 except (requests.RequestException, OSError):
-                    status, path = "failed", ""
-                    counts["failed"] += 1
-            conn.execute("UPDATE mydata_docs SET pdf_status=?, pdf_path=? WHERE afm=? AND mark=?",
-                         (status, path, afm, doc["mark"]))
-            if on_each:
-                on_each(i, len(rows))
+                    return d["mark"], "failed", "", None
+
+            workers = min(6, len(to_fetch))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_fetch_one, d): d for d in to_fetch}
+                for f in as_completed(futures):
+                    if should_cancel and should_cancel():
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
+                    mark, status, path, _ = f.result()
+                    if status != "cancelled":
+                        counts[status] += 1
+                        conn.execute("UPDATE mydata_docs SET pdf_status=?, pdf_path=? WHERE afm=? AND mark=?",
+                                     (status, path, afm, mark))
+                    processed += 1
+                    if on_each:
+                        on_each(processed, total_docs)
+
         # δεύτερο πέρασμα: αόρατος browser για τα «μόνο online» που δεν έχουν δοκιμαστεί
         todo = [dict(r) for r in conn.execute(
             "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? AND pdf_status='viewer' AND url<>'' "

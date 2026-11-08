@@ -27,7 +27,7 @@ _DEFAULT_MS = {"ok": 4200, "info": 4200, "warn": 6000, "danger": 5000}
 
 class _ToastItem(QFrame):
     def __init__(self, message: str, level: str, progress: bool = False, title: str = "",
-                 actions: list | None = None) -> None:
+                 actions: list | None = None, total: int | None = None, done: int | None = None) -> None:
         super().__init__()
         self.setObjectName("toastItem")
         self.set_level(level)
@@ -49,9 +49,18 @@ class _ToastItem(QFrame):
         self.bar: QProgressBar | None = None
         if progress:
             self.bar = QProgressBar()
-            self.bar.setRange(0, 0)                      # «απροσδιόριστη» ώσπου να έρθει η πρώτη ενημέρωση
-            self.bar.setFixedHeight(16)
-            self.bar.setFormat("%p%")
+            tot = total or 0
+            d = done or 0
+            if tot > 0:
+                self.bar.setRange(0, tot)
+                val = max(0, min(d, tot))
+                self.bar.setValue(val)
+                pct = int(val * 100 / tot)
+                self.bar.setFormat(f"{pct}% ({val}/{tot})")
+            else:
+                self.bar.setRange(0, 0)
+                self.bar.setFormat("%p%")
+            self.bar.setFixedHeight(18)
             col.addWidget(self.bar)
         closing = []
 
@@ -144,8 +153,8 @@ class ToastHost(QWidget):
         self.raise_()
 
     def add(self, message: str, level: str, ms: int, progress: bool = False, title: str = "",
-            actions: list | None = None) -> _ToastItem:
-        item = _ToastItem(message, level, progress, title, actions)
+            actions: list | None = None, total: int | None = None, done: int | None = None) -> _ToastItem:
+        item = _ToastItem(message, level, progress, title, actions, total=total, done=done)
         self._box.addWidget(item)
         item.close_btn.clicked.connect(lambda: self._remove(item))
         self.show()
@@ -278,11 +287,14 @@ class ProgressToast:
     `on_cancel`: κουμπί «Διακοπή» — η εργασία σταματά ΜΕΤΑ τον πελάτη που τρέχει (όχι στη μέση του). `move_to()`: το
     toast περνά σε άλλο παράθυρο (π.χ. από την καρτέλα πελάτη που κλείνει στο κύριο), με την ίδια πρόοδο."""
 
-    def __init__(self, window: QWidget, message: str, on_cancel=None, afm: str = "") -> None:
+    def __init__(self, window: QWidget, message: str, on_cancel=None, afm: str = "",
+                 total: int | None = None, done: int | None = None) -> None:
         self.afm = afm                                   # πελάτης της εργασίας (αν είναι ένας) — βλ. `claim_for`
         _LIVE.append(self)
         self._window = window
-        self._message, self._done, self._total = message, None, None
+        self._total = total
+        self._done = done if (done is not None or total is None) else 0
+        self._message = message
         self._on_cancel, self._cancelled = on_cancel, False
         self._started = time.monotonic()
         self._title = ""
@@ -302,7 +314,12 @@ class ProgressToast:
         return f"{sec // 60}:{sec % 60:02d}"
 
     def _text(self) -> str:
-        return f"{self._message}\n⏱ {self._elapsed()}"
+        pct_str = ""
+        if self._total and self._total > 0 and self._done is not None:
+            val = max(0, min(self._done, self._total))
+            pct = int(val * 100 / self._total)
+            pct_str = f" · {pct}% ({val}/{self._total})"
+        return f"{self._message}\n⏱ {self._elapsed()}{pct_str}"
 
     def _tick(self) -> None:
         if self._finished or not self._alive():
@@ -319,8 +336,21 @@ class ProgressToast:
             self._title = context_of(top)
             self.move_to(main)
 
+    @staticmethod
+    def _apply_bar_progress(bar: QProgressBar, done: int | None, total: int | None) -> None:
+        if total and total > 0:
+            val = max(0, min(done or 0, total))
+            pct = int(val * 100 / total)
+            bar.setRange(0, total)
+            bar.setValue(val)
+            bar.setFormat(f"{pct}% ({val}/{total})")
+        else:
+            bar.setRange(0, 0)
+            bar.setFormat("%p%")
+
     def _build(self) -> _ToastItem:
-        item = self._host.add(self._text(), "info", 0, progress=True, title=self._title)
+        item = self._host.add(self._text(), "info", 0, progress=True, title=self._title,
+                              total=self._total, done=self._done)
         self.cancel_btn: QPushButton | None = None
         if self._on_cancel is not None:
             btn = QPushButton("Διακοπή μετά τον τρέχοντα πελάτη")
@@ -332,8 +362,7 @@ class ProgressToast:
             item.layout().itemAt(0).layout().addWidget(btn)
             self.cancel_btn = btn
         if self._total and item.bar is not None:
-            item.bar.setRange(0, self._total)
-            item.bar.setValue(max(0, min(self._done or 0, self._total)))
+            self._apply_bar_progress(item.bar, self._done, self._total)
         return item
 
     @property
@@ -375,14 +404,15 @@ class ProgressToast:
 
     def update(self, message: str, done: int | None = None, total: int | None = None) -> None:
         self._message = message
-        if total:
-            self._done, self._total = done, total
+        if total is not None:
+            self._total = total
+        if done is not None:
+            self._done = done
         if not self._alive():
             return
         self._item.label.setText(self._text())
-        if total and self._item.bar is not None:
-            self._item.bar.setRange(0, total)
-            self._item.bar.setValue(max(0, min(done or 0, total)))
+        if self._item.bar is not None:
+            self._apply_bar_progress(self._item.bar, self._done, self._total)
 
     def finish(self, message: str, level: str = "ok") -> None:
         self._finished = True
