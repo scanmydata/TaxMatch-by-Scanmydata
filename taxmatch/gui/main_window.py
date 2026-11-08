@@ -475,9 +475,11 @@ class MainWindow(QMainWindow):
         self.notice_panel = QFrame()
         self.notice_panel.setObjectName("noticeCenter")
         panel = QVBoxLayout(self.notice_panel)
-        panel.setContentsMargins(0, 0, 0, 0)
+        panel.setContentsMargins(16, 12, 16, 14)
+        panel.setSpacing(10)
         head = QHBoxLayout()
         self.notice_title = QLabel("<b>Κέντρο ειδοποιήσεων</b>")
+        self.notice_title.setStyleSheet(f"font-size:13.5px; font-weight:700; color:{CURRENT.txt};")
         head.addWidget(self.notice_title)
         head.addStretch()
         close_panel = QPushButton("Κλείσιμο")
@@ -487,11 +489,11 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMaximumHeight(340)
+        scroll.setMaximumHeight(300)
         holder = QWidget()
         self.notices_box = QVBoxLayout(holder)
-        self.notices_box.setContentsMargins(0, 0, 0, 0)
-        self.notices_box.setSpacing(6)
+        self.notices_box.setContentsMargins(2, 2, 2, 2)
+        self.notices_box.setSpacing(8)
         scroll.setWidget(holder)
         panel.addWidget(scroll)
         self.notice_panel.hide()
@@ -598,12 +600,17 @@ class MainWindow(QMainWindow):
         for n in found:
             frame = QFrame()
             frame.setObjectName("banner")
-            row = QHBoxLayout(frame)
-            row.setContentsMargins(10, 8, 10, 8)
             colour = {"danger": CURRENT.bad, "warn": CURRENT.warn}.get(n["level"], CURRENT.accent)
+            frame.setStyleSheet(
+                f"QFrame#banner {{ background:{CURRENT.chip}; border:1px solid {CURRENT.line}; "
+                f"border-left:4px solid {colour}; border-radius:8px; }}"
+            )
+            row = QHBoxLayout(frame)
+            row.setContentsMargins(14, 10, 14, 10)
+            row.setSpacing(10)
             text = QLabel(n["text"])
             text.setWordWrap(True)
-            text.setStyleSheet(f"color:{colour};")
+            text.setStyleSheet(f"color:{CURRENT.txt}; font-size:12.5px; border:none; background:transparent;")
             row.addWidget(text, 1)
             btn = QPushButton(n["label"])
             if n.get("afms"):
@@ -1296,7 +1303,7 @@ class MainWindow(QMainWindow):
         label = ", ".join(str(y) for y in sorted(set(years)))
         title = (f"έλεγχος υποβολών {label}{' με PDF δηλώσεων' if want_pdf else ''} — "
                  f"{total} {'πελάτης' if total == 1 else 'πελάτες'}")
-        state = {"missing": 0, "failed": 0, "done": 0}
+        state = {"missing": 0, "failed": 0, "done": 0, "errors": []}
         started = time.monotonic()
 
         def work(report, cancelled):
@@ -1307,7 +1314,14 @@ class MainWindow(QMainWindow):
 
             def each(afm, n, result):
                 state["done"] = n
-                state["failed"] += 0 if result.get("ok") else 1
+                if not result.get("ok"):
+                    state["failed"] += 1
+                    err_msg = f"{names.get(afm, afm)}: {result.get('reason') or 'Αποτυχία σύνδεσης/κωδικών'}"
+                    state["errors"].append(err_msg)
+                    log.warning("Έλεγχος υποβολών: %s", err_msg)
+                for e in result.get("entries", []):
+                    if e.get("status") == "error":
+                        log.warning("Σφάλμα ελέγχου υποχρέωσης για %s / %s: %s", names.get(afm, afm), e.get("label"), e.get("detail"))
                 state["missing"] += sum(1 for e in result.get("entries", []) for p in e["periods"]
                                         if p["status"] == "not_submitted")
                 report(f"Έλεγχος υποβολών {n}/{total} — {names.get(afm, afm)}", n, total)

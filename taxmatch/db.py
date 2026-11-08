@@ -631,6 +631,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE businesses ADD COLUMN parepid INTEGER;
     ALTER TABLE mydata_docs ADD COLUMN render_tried INTEGER NOT NULL DEFAULT 0;
     """,
+    # v25: Διόρθωση κατεύθυνσης εξόδων/μισθοδοσίας (17.1, 17.2, 17.5, 17.6, 13.*, 14.*) σε incoming (έξοδα)
+    """
+    UPDATE mydata_docs SET direction='incoming' WHERE invoice_type IN ('17.1', '17.2', '17.5', '17.6') OR invoice_type LIKE '13.%' OR invoice_type LIKE '14.%';
+    """,
 ]
 
 

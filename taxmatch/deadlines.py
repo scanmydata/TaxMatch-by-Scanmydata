@@ -64,7 +64,7 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
                   "url": oc.source_url, "n_clients": None, "description": oc.description,
                   "conditional": oc.conditional, "ref_month": oc.ref_month}
             if business is not None:
-                ev["submission"] = obligations.submission(oc.rule_id, business, oc.ref_month)
+                ev["submission"] = obligations.submission(oc.rule_id, business, oc.ref_month, due_date=oc.date)
             events.append(ev)
 
     if afm and business is not None:
@@ -83,7 +83,7 @@ def events_between(conn: sqlite3.Connection, start: date, end: date, afm: Option
                     best = (rid, status, reason, ref)
             if best and (best[1] == "yes" or include_conditional):
                 ev.update(conditional=best[1] == "maybe", ref_month=best[3], rule_id=best[0],
-                          submission=obligations.submission(best[0], business, best[3]))
+                          submission=obligations.submission(best[0], business, best[3], due_date=date.fromisoformat(ev["date"])))
                 kept.append(ev)
         events = kept
 
@@ -313,7 +313,7 @@ def _liable(ev: dict[str, Any], businesses: list[dict[str, Any]]) -> Optional[li
         if status != "no":
             out.append({"afm": b["afm"], "name": b["name"] or b["afm"], "status": status, "reason": reason,
                         "rule_id": rid, "ref_month": refs[rid],
-                        "submission": obligations.submission(rid, b, refs[rid])})
+                        "submission": obligations.submission(rid, b, refs[rid], due_date=due)})
     out.sort(key=lambda c: (_RANK[c["status"]], c["name"]))
     return out
 
@@ -376,7 +376,7 @@ def client_year(conn: sqlite3.Connection, afm: str, year: int) -> list[dict[str,
             continue
         out.append({"rule_id": oc.rule_id, "title": oc.title, "date": oc.date.isoformat(), "ref_month": oc.ref_month,
                     "status": status, "reason": reason, "url": oc.source_url, "description": oc.description,
-                    "submission": obligations.submission(oc.rule_id, business, oc.ref_month)})
+                    "submission": obligations.submission(oc.rule_id, business, oc.ref_month, due_date=oc.date)})
     out.sort(key=lambda r: (r["date"], r["title"]))
     return out
 
@@ -399,7 +399,7 @@ def work_items(conn: sqlite3.Connection, year: int, afm: Optional[str] = None) -
                         "rule_id": oc.rule_id, "title": oc.title, "date": oc.date.isoformat(),
                         "ref_month": oc.ref_month, "category": "Μισθοδοσία" if oc.rule_id in payroll else "ΑΑΔΕ",
                         "status": status, "reason": reason,
-                        "submission": obligations.submission(oc.rule_id, business, oc.ref_month),
+                        "submission": obligations.submission(oc.rule_id, business, oc.ref_month, due_date=oc.date),
                         "description": oc.description})
     out.sort(key=lambda r: (r["date"], r["category"], r["title"], r["name"]))
     return out

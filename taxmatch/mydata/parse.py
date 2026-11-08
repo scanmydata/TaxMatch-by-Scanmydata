@@ -197,8 +197,13 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
     net, vat = _f(_t(summary, "totalNetValue")), _f(_t(summary, "totalVatAmount"))
     gross = _f(_t(summary, "totalGrossValue")) or round(net + vat, 2)
     url = _t(inv, "downloadingInvoiceUrl")
+    inv_type = _t(header, "invoiceType")
+    # Μισθοδοσία (17.1), Αποσβέσεις (17.2), Λοιπές εγγραφές εξόδων (17.5, 17.6) και καταχωρήσεις λήπτη
+    # (13.*, 14.*) είναι ΕΞΟΔΑ/ΔΑΠΑΝΕΣ (incoming), παρότι διαβιβάζονται από την ίδια την επιχείρηση
+    if inv_type in ("17.1", "17.2", "17.5", "17.6") or inv_type.startswith(("13.", "14.", "15.", "16.")):
+        direction = "incoming"
     return {
-        "mark": _t(inv, "mark"), "direction": direction, "invoice_type": _t(header, "invoiceType"),
+        "mark": _t(inv, "mark"), "direction": direction, "invoice_type": inv_type,
         "series": _t(header, "series"), "aa": _t(header, "aa"), "issue_date": iso_date(_t(header, "issueDate")),
         "issuer_vat": issuer["vat"], "issuer_name": issuer["name"], "issuer_country": issuer["country"],
         "counter_vat": counter["vat"], "counter_name": counter["name"], "counter_country": counter["country"],

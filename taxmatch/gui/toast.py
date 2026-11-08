@@ -101,7 +101,7 @@ class _ToastItem(QFrame):
         colour = {"ok": CURRENT.ok, "warn": CURRENT.warn, "danger": CURRENT.bad}.get(level, CURRENT.accent)  # info = accent
         self.setStyleSheet(
             f"QFrame#toastItem {{ background:{CURRENT.panel}; border:1px solid {CURRENT.line}; "
-            f"border-left:3px solid {colour}; border-radius:10px; }}"
+            f"border-left:4px solid {colour}; border-radius:10px; }}"
         )
 
 
@@ -109,8 +109,8 @@ class ToastHost(QWidget):
     """Μία στοίβα toasts, πάνω-δεξιά μέσα στο παράθυρο-γονέα (ρητό αίτημα χρήστη, 2026-09-22 — πιο κοντά στο
     πάνω μενού/κουμπιά όπου γίνεται η ενέργεια, όχι κάτω-δεξιά όπως το παλιό web UI)."""
 
-    _MARGIN = 18
-    _WIDTH = 340
+    _MARGIN = 20
+    _WIDTH = 400
 
     def __init__(self, host: QWidget) -> None:
         super().__init__(host)
@@ -147,7 +147,9 @@ class ToastHost(QWidget):
         else:
             h = self._box.totalSizeHint().height()
         x = self._host.width() - self._WIDTH - self._MARGIN
-        y = self._MARGIN
+        is_main = isinstance(self._host, QMainWindow)
+        # Στο MainWindow αφήνουμε επαρκή απόσταση (68px) από το πάνω header/αναζήτηση ώστε να μη στριμώχνονται
+        y = (self._MARGIN + 48) if is_main else self._MARGIN
         if self.geometry().getRect() != (max(0, x), y, self._WIDTH, max(h, 1)):
             self.setGeometry(max(0, x), y, self._WIDTH, max(h, 1))
         self.raise_()

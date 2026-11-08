@@ -697,16 +697,48 @@ def _payment_liability(rule_id: str, business: dict[str, Any], ref_month: str) -
     return None
 
 
-SUBMISSION_LABEL = {"submitted": "Υποβλήθηκε", "pending": "Σε εκκρεμότητα", "not_submitted": "ΔΕΝ υποβλήθηκε",
-                    "done": "Ολοκληρώθηκε (χειροκίνητα)", "": "Δεν έχει ελεγχθεί"}
+SUBMISSION_LABEL = {
+    "submitted": "Υποβλήθηκε",
+    "pending": "Εκκρεμεί",
+    "not_submitted": "ΔΕΝ υποβλήθηκε",
+    "error": "Σφάλμα ελέγχου",
+    "done": "Ολοκληρώθηκε (χειροκίνητα)",
+    "": "Δεν έχει ελεγχθεί",
+}
 
 
-def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str) -> dict[str, Any]:
-    """Υποβλήθηκε η δήλωση αυτής της προθεσμίας; {'status': submitted|pending|not_submitted|done|'', 'label', 'amounts',
-    'manual'}. Πηγές: χειροκίνητο «ολοκληρώθηκε» (`obligation_done`) → έλεγχος υποβολών ΑΑΔΕ (`obligation_checks`, ανά
-    μήνα αναφοράς). '' = δεν έχει ελεγχθεί / δεν υπάρχει μέθοδος."""
+def due_date_for_ref(rule_id: str, ref_month: str) -> Optional[date]:
+    """Υπολογίζει την ημερομηνία προθεσμίας ενός κανόνα από τον μήνα αναφοράς."""
+    rule = RULES_BY_ID.get(rule_id)
+    if not rule or not ref_month:
+        return None
+    try:
+        parts = ref_month.split("-")
+        y, m = int(parts[0]), int(parts[1])
+        dy, dm = y, m + rule.ref_offset
+        while dm > 12:
+            dy, dm = dy + 1, dm - 12
+        while dm < 1:
+            dy, dm = dy - 1, dm + 12
+        return rule.due(dy, dm)
+    except Exception:
+        return None
+
+
+def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str,
+               due_date: Optional[date | str] = None) -> dict[str, Any]:
+    """Υποβλήθηκε η δήλωση αυτής της προθεσμίας; {'status': submitted|pending|not_submitted|error|done|'', 'label',
+    'amounts', 'manual', 'detail'}. Πηγές: χειροκίνητο «ολοκληρώθηκε» (`obligation_done`) → έλεγχος υποβολών ΑΑΔΕ
+    (`obligation_checks`, ανά μήνα αναφοράς). '' = δεν έχει ελεγχθεί / δεν υπάρχει μέθοδος.
+
+    ΕΜΠΡΟΘΕΣΜΕΣ ΥΠΟΧΡΕΩΣΕΙΣ (ρητό αίτημα χρήστη 2026-11-09):
+    Για όσες υποχρεώσεις είναι ακόμα εμπρόθεσμες (βάσει ημερομηνίας προθεσμίας >= σήμερα),
+    αν δεν έχουν υποβληθεί εμφανίζουν «Εκκρεμεί» (status: pending, πορτοκαλί).
+    Το «ΔΕΝ υποβλήθηκε» (status: not_submitted, κόκκινο) εμφανίζεται αποκλειστικά για όσες
+    υποχρεώσεις όντως μετά από έλεγχο δεν έχουν υποβληθεί και η προθεσμία τους έχει παρέλθει!
+    Σε περίπτωση σφάλματος ελέγχου επιστρέφεται status: 'error' και σχετικό μήνυμα."""
     out: dict[str, Any] = {"status": "", "label": SUBMISSION_LABEL[""], "amounts": {}, "manual": rule_id in MANUAL_ONLY,
-                           "checks": [], "done_at": ""}
+                           "checks": [], "done_at": "", "detail": ""}
     if business is None:
         return out
     if (rule_id, ref_month) in (business.get("done") or set()):
@@ -732,15 +764,65 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str)
     if not found:
         return out
     out["checks"] = found
+
+    # Έλεγχος για σφάλμα ελέγχου στην πύλη
+    if any(f.get("status") == "error" for f in found):
+        err_detail = next((f.get("detail") for f in found if f.get("status") == "error" and f.get("detail")), "Σφάλμα κατά τον έλεγχο")
+        out.update(status="error", label=SUBMISSION_LABEL["error"], detail=err_detail)
+        return out
+
+    # Υπολογισμός ημερομηνίας λήξης προθεσμίας (due date)
+    today = date.today()
+    due: Optional[date] = None
+    if isinstance(due_date, str):
+        try:
+            due = date.fromisoformat(due_date)
+        except Exception:
+            due = due_date_for_ref(rule_id, ref_month)
+    elif isinstance(due_date, date):
+        due = due_date
+    else:
+        due = due_date_for_ref(rule_id, ref_month)
+
     statuses = [f["status"] for f in found]
-    status = ("not_submitted" if "not_submitted" in statuses and "submitted" not in statuses
-              else "pending" if "pending" in statuses and "submitted" not in statuses else "submitted")
-    if rule_id == "vies" and vies_forms(business, ref_month)[1] and status == "submitted" and (
-            len(found) < len(rule_checks(rule_id, business, ref_month)) or set(statuses) != {"submitted"}):
-        # το myDATA λέει ποιοι πίνακες οφείλονται — αν έχει και παραδόσεις και αποκτήσεις, θέλει και τους δύο
-        status = "not_submitted" if "not_submitted" in statuses else "pending"
+    if "submitted" in statuses:
+        if rule_id == "vies" and vies_forms(business, ref_month)[1] and (
+                len(found) < len(rule_checks(rule_id, business, ref_month)) or set(statuses) != {"submitted"}):
+            # το myDATA λέει ποιοι πίνακες οφείλονται — αν έχει και παραδόσεις και αποκτήσεις, θέλει και τους δύο
+            raw_status = "not_submitted" if "not_submitted" in statuses else "pending"
+        else:
+            raw_status = "submitted"
+    elif "pending" in statuses:
+        raw_status = "pending"
+    elif "not_submitted" in statuses:
+        raw_status = "not_submitted"
+    else:
+        raw_status = statuses[0] if statuses else ""
+
+    # Εμπρόθεσμο vs Εκπρόθεσμο:
+    # Αν ο έλεγχος έδειξε ότι δεν έχει υποβληθεί αλλά η προθεσμία είναι ακόμα στο μέλλον ή σήμερα (due >= today),
+    # τότε είναι εμπρόθεσμη και εκκρεμεί η υποβολή της!
+    # Το «ΔΕΝ υποβλήθηκε» εμφανίζεται μόνο όταν η προθεσμία έχει λήξει (due < today).
+    if raw_status == "not_submitted":
+        if due is not None and due >= today:
+            status = "pending"
+            label = "Εκκρεμεί"
+        else:
+            status = "not_submitted"
+            label = "ΔΕΝ υποβλήθηκε"
+    elif raw_status == "pending":
+        status = "pending"
+        label = "Εκκρεμεί"
+    elif raw_status == "submitted":
+        status = "submitted"
+        label = "Υποβλήθηκε"
+    else:
+        status = raw_status
+        label = SUBMISSION_LABEL.get(status, status)
+
     amounts = next((f["amounts"] for f in found if f.get("amounts")), {})
-    out.update(status=status, label=SUBMISSION_LABEL[status], amounts=amounts)
+    detail = next((f.get("detail") for f in found if f.get("detail")), "")
+    out.update(status=status, label=label, amounts=amounts, detail=detail)
     if rule_id in PAYMENT_RULES and status == "pending":
         out["label"] = "Εκδόθηκε — η εξόφληση στις οφειλές ΑΑΔΕ"
     return out

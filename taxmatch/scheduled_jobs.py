@@ -125,7 +125,10 @@ def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int]
     from . import advertising, easycheck, efka, fee_portals, intrastat, obligations, personal
     result: dict[str, Any] = {"ok": True, "entries": []}
     for y in years:
+        log.info("Έναρξη ελέγχου υποβολών για πελάτη ΑΦΜ %s χρήση %s (want_pdf=%s)", afm, y, want_pdf)
         r = easycheck.check_client(conn, afm, y, want_pdf=want_pdf)
+        if not r.get("ok"):
+            log.warning("Αποτυχία ελέγχου TAXISnet για ΑΦΜ %s χρήση %s: %s", afm, y, r.get("reason"))
         result["ok"] = result["ok"] and r.get("ok")
         result["entries"] += r.get("entries", [])
         result["entries"] += efka.check_apd_entries(conn, afm, y, want_pdf=want_pdf)

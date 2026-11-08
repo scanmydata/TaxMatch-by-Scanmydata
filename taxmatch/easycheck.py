@@ -864,13 +864,15 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
     year = year or date.today().year
     creds = credentials.get(conn, afm)
     if not creds:
+        log.warning("Έλεγχος υποβολών: δεν υπάρχουν κωδικοί TAXISnet για ΑΦΜ %s", afm)
         return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη.", "entries": []}
     b = conn.execute("SELECT * FROM businesses WHERE afm=?", (afm,)).fetchone()
     keys = keys or default_keys(dict(b) if b else {}, withheld_keys(conn, afm, year) | fee_keys(conn, afm, year))
     login = login_fn(*creds)
     if not login.get("ok"):
-        return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet."),
-                "entries": []}
+        reason_msg = lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")
+        log.warning("Έλεγχος υποβολών: αποτυχία σύνδεσης TAXISnet για ΑΦΜ %s (%s)", afm, reason_msg)
+        return {"ok": False, "reason": reason_msg, "entries": []}
     ctx, cache, entries = _Ctx(login["http"], afm, want_pdf), {}, []
     stored: dict[str, dict[str, dict]] = {}
     for r in conn.execute("SELECT obligation, period, amounts_json FROM obligation_checks WHERE afm=? AND year=? "
@@ -880,16 +882,17 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
         try:
             entries.append(check_obligation(ctx, key, year, cache, stored.get(key)))
         except Exception as exc:                        # noqa: BLE001 — μία υποχρέωση δεν ρίχνει τις υπόλοιπες
-            log.warning("easycheck %s/%s: %s", afm, key, exc)
+            log.error("Σφάλμα ελέγχου υποχρέωσης %s για ΑΦΜ %s χρήση %s: %s", key, afm, year, exc, exc_info=True)
             from . import handoff
             handoff.remember(f"ΑΑΔΕ — {OBLIGATIONS[key].label}", afm, login["http"])
             entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
-                            "detail": str(exc)[:200]})
+                            "detail": f"Σφάλμα ελέγχου ({type(exc).__name__}: {str(exc)[:120]})"})
     entries = [_only_liable_fee_periods(conn, afm, year, e) for e in entries]
     store_results(conn, afm, year, entries)
     vat_type = next((vat_period_from_checks(e) for e in entries if e["obligation"] == "Φ2"), "")
     if vat_type:                                       # οι πραγματικές περίοδοι Φ2 υπερισχύουν της κατηγορίας βιβλίων
         conn.execute("UPDATE businesses SET vat_period_type=?, vat_period_source='easycheck' WHERE afm=?", (vat_type, afm))
+    log.info("Ολοκληρώθηκε ο έλεγχος υποβολών TAXISnet για ΑΦΜ %s χρήση %s (%d υποχρεώσεις ελέγχθηκαν)", afm, year, len(entries))
     return {"ok": True, "reason": "", "entries": entries}
 
 

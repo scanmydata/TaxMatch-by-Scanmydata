@@ -698,7 +698,10 @@ class ClientDetailDialog(QDialog):
                 message = f"ΑΜΕ: {found}"
                 self.conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (self.afm,))
                 self.conn.commit()
-                self.f_employer.setCurrentIndex(max(0, self.f_employer.findData("1")))
+                self.f_employer.setChecked(True)
+                self._reload_checks()
+                self.main.reload_clients()
+                self.main._render_calendar_from_db()
                 self.f_teka.setEnabled(True)
             else:
                 message = res["reason"]
@@ -955,7 +958,7 @@ class ClientDetailDialog(QDialog):
         year = self.check_year.currentData() or date.today().year
         all_rows = deadlines.client_year(self.conn, self.afm, year)
         rows = [r for r in all_rows if r["status"] == "yes" or self.show_maybe.isChecked()]
-        colours = {"submitted": CURRENT.ok, "done": CURRENT.ok, "pending": CURRENT.warn, "not_submitted": CURRENT.bad}
+        colours = {"submitted": CURRENT.ok, "done": CURRENT.ok, "pending": CURRENT.warn, "not_submitted": CURRENT.bad, "error": CURRENT.bad}
         t = self.year_table
         self.year_kit.begin()
         t.setRowCount(len(rows))
@@ -984,6 +987,8 @@ class ClientDetailDialog(QDialog):
                     item.setToolTip("Κλικ: άνοιγμα — " + ", ".join(Path(f).name for f in pdfs))
                 if col == 5 and sub["status"]:
                     item.setForeground(QColor(colours.get(sub["status"], CURRENT.muted)))
+                    if sub['status'] == 'error':
+                        item.setToolTip(sub.get('detail') or 'Σφάλμα κατά τον έλεγχο υποβολής')
                 elif col == 5 and r["date"] < today and r["status"] == "yes":
                     item.setForeground(QColor(CURRENT.warn))      # έληξε χωρίς κατάσταση — να ελεγχθεί
                 if r["status"] == "maybe" and col != 5:
@@ -995,6 +1000,7 @@ class ClientDetailDialog(QDialog):
         n_ok = sum(1 for r in rows if r["submission"]["status"] in ("submitted", "done"))
         n_miss = sum(1 for r in rows if r["submission"]["status"] == "not_submitted")
         n_pend = sum(1 for r in rows if r["submission"]["status"] == "pending")
+        n_err = sum(1 for r in rows if r['submission']['status'] == 'error')
         n_open = sum(1 for r in rows if r["status"] == "yes" and not r["submission"]["status"] and r["date"] < today)
         last_check = self.conn.execute("SELECT MAX(checked_at) FROM obligation_checks WHERE afm=? AND year=?",
                                        (self.afm, year)).fetchone()[0]
@@ -1005,7 +1011,8 @@ class ClientDetailDialog(QDialog):
             + (f" (+{n_maybe} υπό προϋποθέσεις{'' if self.show_maybe.isChecked() else ', κρυμμένες'})" if n_maybe else "")
             + " · "
             f"<b style='color:{CURRENT.ok}'>✓ {n_ok} ολοκληρωμένες</b> · "
-            f"<b style='color:{CURRENT.bad}'>✗ {n_miss} χωρίς υποβολή</b> · {n_pend} σε εκκρεμότητα · "
+            f"<b style='color:{CURRENT.bad}'>✗ {n_miss} εκπρόθεσμες χωρίς υποβολή</b> · "
+            f"<span style='color:{CURRENT.warn}'>{n_pend} εκκρεμούν</span>" + (f" · <b style='color:{CURRENT.bad}'>⚠️ {n_err} με σφάλμα ελέγχου</b>" if n_err else "") + " · "
             f"<span style='color:{CURRENT.warn}'>{n_open} έληξαν χωρίς έλεγχο</span><br>"
             f"<span style='color:{CURRENT.muted}'>Τελευταίος έλεγχος υποβολών: "
             f"{(last_check or '—')[:16].replace('T', ' ')} · myDATA: {last_sync[1]} μήνες της χρήσης"

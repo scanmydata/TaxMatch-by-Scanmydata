@@ -169,9 +169,15 @@ QFrame#card {{
     border-radius: {RADIUS};
 }}
 QFrame#line {{ background: {p.line}; max-height: 1px; border: none; }}
+QFrame#noticeCenter {{
+    background: {p.panel};
+    border: 1px solid {p.line};
+    border-radius: 12px;
+    margin: 8px 0px 12px 0px;
+}}
 QFrame#banner {{
     background: {p.chip};
-    border: 1px solid {p.accent};
+    border: 1px solid {p.line};
     border-radius: 9px;
 }}
 
