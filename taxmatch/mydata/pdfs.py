@@ -110,7 +110,8 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
                    fetch: Callable[[str], bytes] = None,
                    should_cancel: Optional[Callable[[], bool]] = None,
                    marks: Optional[list[str]] = None,
-                   render: Optional[Callable[[list[str]], dict[str, bytes]]] = None) -> dict[str, int]:
+                   render: Optional[Callable[[list[str]], dict[str, bytes]]] = None,
+                   directions: Optional[list[str]] = None) -> dict[str, int]:
     """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει
     (`marks`: μόνο αυτά — π.χ. «Λήψη PDF» από την καρτέλα παραστατικού).
     Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) περνούν ΜΙΑ φορά από αόρατο
@@ -126,9 +127,15 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
     if render is None and fetch is None:
         render = _headless_render
     fetch = fetch or (lambda u: fetch_pdf(u, session))
-    rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=? ORDER BY issue_date, mark", (afm, len(ym), ym))
-        if marks is None or r["mark"] in marks]
+    query = "SELECT * FROM mydata_docs WHERE afm=? AND substr(issue_date,1,?)=?"
+    params = [afm, len(ym), ym]
+    if directions:
+        q_marks = ",".join("?" * len(directions))
+        query += f" AND direction IN ({q_marks})"
+        params.extend(directions)
+    query += " ORDER BY issue_date, mark"
+    rows = [dict(r) for r in conn.execute(query, params)
+            if marks is None or r["mark"] in marks]
     counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0}
     total_docs = len(rows)
     processed = 0

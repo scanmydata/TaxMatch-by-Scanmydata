@@ -25,3 +25,4 @@ dist/
 Output/
 installer-output/
 packaging/manual.pdf
+gh_bin/

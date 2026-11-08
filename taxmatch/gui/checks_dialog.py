@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from .table_kit import ui_prefs
 from .theme import CURRENT
@@ -68,6 +68,56 @@ class ChecksDialog(QDialog):
                 box.toggled.connect(self.ika_note.setVisible)
                 self.ika_note.setVisible(box.isChecked())
                 root.addWidget(self.ika_note)
+            elif key == "mydata":
+                # Διάστημα λήψης myDATA
+                range_layout = QHBoxLayout()
+                range_layout.setContentsMargins(26, 0, 0, 4)
+                range_lbl = QLabel("Διάστημα:")
+                range_lbl.setStyleSheet(f"color:{CURRENT.muted}; font-size:11.5px;")
+                self.mydata_range_combo = QComboBox()
+                ranges = [
+                    ("Τελευταίοι 3 μήνες (προεπιλογή)", "3m"),
+                    ("Τρέχον έτος", "current_year"),
+                    ("Προηγούμενο έτος", "prev_year"),
+                    ("Τελευταίοι 6 μήνες", "6m"),
+                    ("Τελευταίοι 12 μήνες", "12m"),
+                    ("Όλα (24 μήνες)", "24m"),
+                ]
+                for r_label, r_code in ranges:
+                    self.mydata_range_combo.addItem(r_label, r_code)
+                rem_range = str(self._prefs.value("checks/mydata_range", "3m"))
+                idx = self.mydata_range_combo.findData(rem_range)
+                if idx >= 0:
+                    self.mydata_range_combo.setCurrentIndex(idx)
+                range_layout.addWidget(range_lbl)
+                range_layout.addWidget(self.mydata_range_combo)
+                range_layout.addStretch()
+                root.addLayout(range_layout)
+
+                # PDF παραστατικών εσόδων (εκδοθέντα)
+                self.mydata_pdf_income_box = QCheckBox("και λήψη PDF παραστατικών εσόδων (εκδοθέντα)")
+                self.mydata_pdf_income_box.setToolTip("Κατεβάζει τα PDF των εκδοθέντων τιμολογίων στον φάκελο invoices")
+                self.mydata_pdf_income_box.setChecked(str(self._prefs.value("checks/mydata_pdf_income", "0")) == "1")
+                self.mydata_pdf_income_box.setContentsMargins(26, 0, 0, 2)
+                self.mydata_pdf_income_box.setStyleSheet("margin-left:26px;")
+                root.addWidget(self.mydata_pdf_income_box)
+
+                # PDF παραστατικών εξόδων (ληφθέντα)
+                self.mydata_pdf_expenses_box = QCheckBox("και λήψη PDF παραστατικών εξόδων (ληφθέντα)")
+                self.mydata_pdf_expenses_box.setToolTip("Κατεβάζει τα PDF των ληφθέντων τιμολογίων στον φάκελο invoices")
+                self.mydata_pdf_expenses_box.setChecked(str(self._prefs.value("checks/mydata_pdf_expenses", "0")) == "1")
+                self.mydata_pdf_expenses_box.setContentsMargins(26, 0, 0, 4)
+                self.mydata_pdf_expenses_box.setStyleSheet("margin-left:26px;")
+                root.addWidget(self.mydata_pdf_expenses_box)
+
+                def sync_mydata(on: bool) -> None:
+                    range_lbl.setEnabled(on)
+                    self.mydata_range_combo.setEnabled(on)
+                    self.mydata_pdf_income_box.setEnabled(on)
+                    self.mydata_pdf_expenses_box.setEnabled(on)
+
+                box.toggled.connect(sync_mydata)
+                sync_mydata(box.isChecked())
         if incomplete:
             # ελλιπή βασικά στοιχεία → προτείνεται ανανέωση, με το ποιοι και τι λείπει
             self.boxes["lookup"].setChecked(True)
@@ -107,9 +157,31 @@ class ChecksDialog(QDialog):
     def want_pdf(self) -> bool:
         return self.pdf_box.isChecked() and self.boxes["submissions"].isChecked()
 
+    @property
+    def mydata_range(self) -> str:
+        if hasattr(self, "mydata_range_combo"):
+            return self.mydata_range_combo.currentData() or "3m"
+        return "3m"
+
+    @property
+    def mydata_pdf_directions(self) -> list[str]:
+        dirs: list[str] = []
+        if self.boxes.get("mydata") and self.boxes["mydata"].isChecked():
+            if hasattr(self, "mydata_pdf_income_box") and self.mydata_pdf_income_box.isChecked():
+                dirs.append("outgoing")
+            if hasattr(self, "mydata_pdf_expenses_box") and self.mydata_pdf_expenses_box.isChecked():
+                dirs.append("incoming")
+        return dirs
+
     def _run(self) -> None:
         self.chosen = [k for k, _t, _tip in CHECKS if self.boxes[k].isChecked()]
         self._prefs.setValue("checks/submissions_pdf", "1" if self.pdf_box.isChecked() else "0")
+        if hasattr(self, "mydata_range_combo"):
+            self._prefs.setValue("checks/mydata_range", self.mydata_range_combo.currentData() or "3m")
+        if hasattr(self, "mydata_pdf_income_box"):
+            self._prefs.setValue("checks/mydata_pdf_income", "1" if self.mydata_pdf_income_box.isChecked() else "0")
+        if hasattr(self, "mydata_pdf_expenses_box"):
+            self._prefs.setValue("checks/mydata_pdf_expenses", "1" if self.mydata_pdf_expenses_box.isChecked() else "0")
         for key, box in self.boxes.items():
             if key != "lookup":                          # η ανανέωση προτείνεται κάθε φορά από τα ελλιπή στοιχεία
                 self._prefs.setValue(f"checks/{key}", "1" if box.isChecked() else "0")

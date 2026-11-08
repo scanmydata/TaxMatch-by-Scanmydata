@@ -1250,7 +1250,8 @@ class MainWindow(QMainWindow):
             return
         actions = {"lookup": lambda: self._start_lookup(afms),
                    "submissions": lambda: self.on_check_submissions(want_pdf=dlg.want_pdf),
-                   "mydata": self.on_fetch_mydata, "debts": self.on_fetch_debts, "requests": self.on_fetch_requests}
+                   "mydata": lambda: self.on_fetch_mydata(range_code=dlg.mydata_range, pdf_directions=dlg.mydata_pdf_directions),
+                   "debts": self.on_fetch_debts, "requests": self.on_fetch_requests}
         for key in dlg.chosen:
             actions[key]()
 
@@ -1525,25 +1526,48 @@ class MainWindow(QMainWindow):
         self.jobs.submit(f"αιτήματα ΑΑΔΕ — {total} {'πελάτης' if total == 1 else 'πελάτες'}", work, total=total,
                          window=window, on_done=done, afms=afms)
 
-    def on_fetch_mydata(self) -> None:
-        """Μαζική λήψη myDATA (στοιχεία, όχι PDF): οι μήνες που χρειάζονται (τρέχων + προηγούμενος + όσοι λείπουν)."""
-        from ..mydata import credentials as mydata_creds
+    def on_fetch_mydata(self, range_code: str = "3m", pdf_directions: Optional[list[str]] = None) -> None:
+        """Μαζική λήψη myDATA: διάστημα επιλογής χρήστη και τυχόν λήψη PDF εσόδων/εξόδων."""
+        from datetime import date
+        from ..mydata import credentials as mydata_creds, store as mydata_store
         have = mydata_creds.with_credentials(self.conn)
         afms = [a for a in (self._selected_client_afms() or sorted(have)) if a in have]
         if not afms:
             toast(self, "Κανένας (επιλεγμένος) πελάτης δεν έχει κωδικούς myDATA.", "warn")
             return
-        self.run_mydata_sync(afms)
+        today = date.today()
+        cur_ym = f"{today.year}-{today.month:02d}"
+        if range_code == "current_year":
+            months = [f"{today.year}-{m:02d}" for m in range(1, today.month + 1)]
+        elif range_code == "prev_year":
+            months = [f"{today.year - 1}-{m:02d}" for m in range(1, 13)]
+        elif range_code == "6m":
+            months = mydata_store.previous_months(cur_ym, 6)
+        elif range_code == "12m":
+            months = mydata_store.previous_months(cur_ym, 12)
+        elif range_code == "24m":
+            months = mydata_store.previous_months(cur_ym, 24)
+        else:
+            months = None
+        self.run_mydata_sync(afms, months=months, pdf_directions=pdf_directions)
 
     def run_mydata_sync(self, afms: list[str], months: Optional[list[str]] = None, window: Optional[QWidget] = None,
-                        on_done: Optional[Callable[[], None]] = None, pdfs: bool = False, title: str = "") -> None:
+                        on_done: Optional[Callable[[], None]] = None, pdfs: bool = False,
+                        pdf_directions: Optional[list[str]] = None, title: str = "") -> None:
         """Λήψη myDATA στην ουρά εργασιών, ένας πελάτης τη φορά (η ΑΑΔΕ απαντά 429 σε πολλά παράλληλα). `months=None`:
-        έξυπνη επιλογή (`store.months_to_refresh`). `pdfs`: κατεβαίνουν και τα PDF των μηνών (καρτέλα πελάτη)."""
+        έξυπνη επιλογή (`store.months_to_refresh`). `pdfs` / `pdf_directions`: κατεβαίνουν και τα PDF (εσόδων/εξόδων)."""
         from ..mydata import names as mydata_names, pdfs as mydata_pdfs, store as mydata_store
         afms = list(dict.fromkeys(a for a in afms if a))
         total = len(afms)
         names = self._client_names(afms)
-        title = title or f"λήψη myDATA — {total} {'πελάτης' if total == 1 else 'πελάτες'}"
+        want_any_pdfs = pdfs or bool(pdf_directions)
+        if not title:
+            dirs_note = ""
+            if pdf_directions:
+                dirs_note = " με PDF (" + "/".join("έσοδα" if d == "outgoing" else "έξοδα" for d in pdf_directions) + ")"
+            elif want_any_pdfs:
+                dirs_note = " με PDF"
+            title = f"λήψη myDATA{dirs_note} — {total} {'πελάτης' if total == 1 else 'πελάτες'}"
         state = {"failed": 0, "docs": 0, "done": 0, "reason": ""}
 
         def work(report, cancelled):
@@ -1552,7 +1576,7 @@ class MainWindow(QMainWindow):
                 if total == 1:
                     afm = afms[0]
                     wanted = months or mydata_store.months_to_refresh(conn, afm)
-                    total_steps = len(wanted) + (len(wanted) if pdfs else 0) + 1
+                    total_steps = len(wanted) + (len(wanted) if want_any_pdfs else 0) + 1
                     cur_step = 0
                     report(f"Λήψη myDATA — {names.get(afm, afm)} ({len(wanted)} μήνες)", 0, total_steps)
                     out = mydata_store.sync_range(conn, afm, wanted)
@@ -1562,12 +1586,12 @@ class MainWindow(QMainWindow):
                     state["docs"] += out.get("n", 0)
                     cur_step += len(wanted)
                     report(f"myDATA ({len(wanted)} μήνες) — {names.get(afm, afm)} ({out.get('n', 0)} παραστ.)", cur_step, total_steps)
-                    if pdfs and out["ok"]:
+                    if want_any_pdfs and out["ok"]:
                         for ym in wanted:
                             if cancelled():
                                 break
                             report(f"Λήψη PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
-                            mydata_pdfs.download_month(conn, afm, ym, should_cancel=cancelled)
+                            mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled)
                             cur_step += 1
                             report(f"Ολοκληρώθηκε PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
                     state["done"] = 1 if not cancelled() else 0
@@ -1585,12 +1609,12 @@ class MainWindow(QMainWindow):
                             state["failed"] += 1
                             state["reason"] = out["reason"]
                         state["docs"] += out.get("n", 0)
-                        if pdfs and out["ok"]:
+                        if want_any_pdfs and out["ok"]:
                             for ym in wanted:
                                 if cancelled():
                                     break
                                 report(f"PDF {ym} — {names.get(afm, afm)}", i - 1, total)
-                                mydata_pdfs.download_month(conn, afm, ym, should_cancel=cancelled)
+                                mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled)
                         state["done"] = i
                         report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i, total)
                     report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"], total)

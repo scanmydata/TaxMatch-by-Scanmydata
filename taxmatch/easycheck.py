@@ -390,111 +390,71 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
             app = QApplication(sys.argv)
 
         dose_row = f"""<tr class="data-row">
-                <td class="label">Ποσό δόσης δήλωσης της {pay_by or issued_at}</td>
-                <td class="val">{installment}</td>
+                <td class="label">Ποσό 1ης Δόσης Δήλωσης</td>
+                <td class="val" style="font-size: 11.5pt; font-weight: bold;">{installment}</td>
             </tr>""" if installment else ""
 
-        inst_note = f"""Θα πρέπει να πληρώσετε το <b>ποσό της 1ης δόσης</b> μέχρι τις {pay_by or 'την καθορισμένη προθεσμία'} . Η καθυστέρηση πληρωμής του οφειλόμενου ποσού, συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).""" if (pay_by or installment) else """Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57)."""
+        inst_note = f"""Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by or 'την καθορισμένη προθεσμία'}</b>. Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/2013).""" if (pay_by or installment) else """Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/2013)."""
 
         html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-    body {{ font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #000; margin: 0; padding: 0; }}
-    .main-border {{ width: 100%; border: 1px dotted #000; padding: 20px; }}
-    .box-table {{ width: 100%; border: 1px solid #c8b9a6; margin-bottom: 16px; }}
-    .box-header {{ font-size: 11pt; color: #222; padding: 6px 12px; border-bottom: 1px solid #e2d7cb; background-color: #faf8f5; }}
-    .data-row td {{ padding: 4px 12px; font-size: 11pt; border: none; }}
-    .label {{ width: 44%; font-weight: bold; color: #000; }}
-    .val {{ width: 56%; font-weight: bold; color: #000; }}
+    body {{ font-family: "Segoe UI", Arial, sans-serif; font-size: 10.5pt; color: #111; margin: 0; padding: 0; }}
+    .header-table {{ width: 100%; border-bottom: 2px solid #133b70; margin-bottom: 16px; padding-bottom: 8px; }}
+    .header-title {{ font-size: 15pt; font-weight: bold; color: #133b70; }}
+    .box-table {{ width: 100%; border: 1px solid #b0c4de; border-collapse: collapse; margin-bottom: 14px; }}
+    .box-header {{ font-size: 11.5pt; font-weight: bold; color: #133b70; padding: 6px 10px; background-color: #f0f4f8; border-bottom: 1px solid #b0c4de; }}
+    .data-row td {{ padding: 6px 10px; font-size: 10.5pt; border-bottom: 1px solid #e1e8ed; }}
+    .label {{ width: 38%; font-weight: bold; color: #333; }}
+    .val {{ width: 62%; color: #000; }}
+    .debt-code-box {{ background-color: #f8fafc; border: 2px solid #133b70; padding: 12px; text-align: center; margin: 12px 0; }}
+    .debt-code-label {{ font-size: 11pt; font-weight: bold; color: #133b70; margin-bottom: 4px; }}
+    .debt-code-val {{ font-size: 15pt; font-weight: bold; letter-spacing: 2px; color: #000; font-family: "Courier New", monospace; }}
+    .alert-box {{ background-color: #fff9e6; border: 1px solid #ffe082; padding: 10px; font-size: 9.5pt; line-height: 1.4; color: #444; }}
 </style>
 </head>
 <body>
-<table class="main-border" cellspacing="0" cellpadding="0">
-    <tr><td>
-        <table style="width:100%; border:none; margin-bottom: 8px;" cellspacing="0" cellpadding="0">
-            <tr>
-                <td style="text-align:right; vertical-align:middle; padding-right:12px; border:none;">
-                    <span style="font-size:12.5pt; font-weight:bold;">TAXISnet - Υπηρεσίες Πληρωμής</span>
-                </td>
-                <td style="width:130px; text-align:right; vertical-align:middle; border:none;">
-                    <table style="background-color:#133b70; color:#fff; border:none; padding:4px 6px;" cellspacing="0" cellpadding="0">
-                        <tr>
-                            <td style="color:#fff; font-family:Arial; font-weight:bold; font-size:11.5pt; padding:0; letter-spacing:1px; line-height:1; border:none;">ΑΑΔΕ</td>
-                        </tr>
-                        <tr>
-                            <td style="color:#fff; font-family:Arial; font-size:5.5pt; padding:2px 0 0 0; line-height:1.1; border:none;">Ανεξάρτητη Αρχή<br>Δημοσίων Εσόδων</td>
-                        </tr>
-                    </table>
-                </td>
-            </tr>
-        </table>
-
-        <div style="font-size:17pt; font-weight:bold; text-align:center; margin: 12px 0 20px 0;">
-            Σημείωμα για Πληρωμή
-        </div>
-
-        <table class="box-table" cellspacing="0" cellpadding="0">
-            <tr>
-                <td colspan="2" class="box-header">Στοιχεία Οφειλέτη</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Α.Φ.Μ.</td>
-                <td class="val">{afm}</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Ονοματεπώνυμο/ Επωνυμία</td>
-                <td class="val">{name or '—'}</td>
-            </tr>
-        </table>
-
-        <table class="box-table" cellspacing="0" cellpadding="0">
-            <tr>
-                <td colspan="2" class="box-header">Στοιχεία Οφειλής</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Τύπος Πληρωμής</td>
-                <td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">ΔΟΥ</td>
-                <td class="val">{doy or '—'}</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Είδος Φόρου</td>
-                <td class="val">{tax_kind}</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Ημερολογιακή Περίοδος</td>
-                <td class="val">{period or '—'}</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Συνολικό ποσό οφειλής δήλωσης</td>
-                <td class="val">{total_due}</td>
-            </tr>
-            {dose_row}
-            <tr class="data-row">
-                <td class="label">Ταυτότητα Οφειλής</td>
-                <td class="val" style="font-size:12pt; letter-spacing:1px;">{debt_id}</td>
-            </tr>
-            <tr class="data-row">
-                <td class="label">Ημ/νία Έκδοσης</td>
-                <td class="val">{issued_at or '—'}</td>
-            </tr>
-        </table>
-
-        <div style="margin-top: 15px; font-size: 10.5pt; line-height: 1.4; color: #000; padding: 0 4px 6px 4px;">
-            <div style="color: #d00; font-weight: bold; font-size: 11pt; margin-bottom: 4px;">Προσοχή:</div>
-            <p style="margin: 3px 0 8px 0;">
-                Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.
-            </p>
-            <p style="margin: 3px 0 0 0;">
-                {inst_note}
-            </p>
-        </div>
-    </td></tr>
+<table class="header-table" cellspacing="0" cellpadding="0">
+    <tr>
+        <td style="vertical-align: middle;">
+            <div class="header-title">TAXISnet · ΕΙΔΟΠΟΙΗΣΗ ΠΛΗΡΩΜΗΣ ΦΟΡΟΥ</div>
+            <div style="font-size: 9.5pt; color: #555; margin-top: 3px;">Ανεξάρτητη Αρχή Δημοσίων Εσόδων (ΑΑΔΕ) · Υπηρεσίες Πληρωμής</div>
+        </td>
+        <td style="text-align: right; vertical-align: middle;">
+            <span style="display: inline-block; background-color: #133b70; color: #fff; font-weight: bold; font-size: 15pt; padding: 6px 12px;">ΑΑΔΕ</span>
+        </td>
+    </tr>
 </table>
+
+<table class="box-table" cellspacing="0" cellpadding="0">
+    <tr><td colspan="2" class="box-header">Στοιχεία Οφειλέτη & Δήλωσης</td></tr>
+    <tr class="data-row"><td class="label">Α.Φ.Μ.</td><td class="val"><b>{afm}</b></td></tr>
+    <tr class="data-row"><td class="label">Επωνυμία / Ονοματεπώνυμο</td><td class="val"><b>{name or '—'}</b></td></tr>
+    <tr class="data-row"><td class="label">Αρμόδια Δ.Ο.Υ.</td><td class="val">{doy or '—'}</td></tr>
+    <tr class="data-row"><td class="label">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
+    <tr class="data-row"><td class="label">Ημερολογιακή Περίοδος</td><td class="val">{period or '—'}</td></tr>
+    <tr class="data-row"><td class="label">Ημερομηνία Έκδοσης / Υποβολής</td><td class="val">{issued_at or '—'}</td></tr>
+</table>
+
+<table class="box-table" cellspacing="0" cellpadding="0">
+    <tr><td colspan="2" class="box-header">Οικονομικά Στοιχεία Οφειλής</td></tr>
+    <tr class="data-row"><td class="label">Συνολικό Ποσό Οφειλής Δήλωσης</td><td class="val" style="font-size: 12pt; font-weight: bold; color: #b30000;">{total_due}</td></tr>
+    {dose_row}
+    <tr class="data-row"><td class="label">Προθεσμία Πληρωμής</td><td class="val" style="font-weight: bold; color: #b30000;">{pay_by or '—'}</td></tr>
+</table>
+
+<div class="debt-code-box">
+    <div class="debt-code-label">ΤΑΥΤΟΤΗΤΑ ΟΦΕΙΛΗΣ (Τ.Ο.)</div>
+    <div class="debt-code-val">{debt_id}</div>
+</div>
+
+<div class="alert-box">
+    <b>Οδηγίες Πληρωμής:</b><br>
+    • Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής μέσω web banking (επιλογή «Βεβαιωμένες Οφειλές ΑΑΔΕ») ή στα ταμεία συνεργαζόμενων τραπεζών και ΕΛΤΑ.<br>
+    • {inst_note}
+</div>
 </body>
 </html>"""
 
@@ -502,15 +462,24 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
             tmp_name = f.name
         try:
             writer = QPdfWriter(tmp_name)
-            writer.setResolution(96)
             writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
             writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+            writer.setResolution(300)
 
             doc = QTextDocument()
-            paint_rect = writer.pageLayout().paintRectPixels(96)
-            doc.setPageSize(QSizeF(paint_rect.width(), paint_rect.height()))
             doc.setHtml(html)
-            doc.print_(writer)
+
+            from PySide6.QtGui import QPainter
+            from PySide6.QtCore import QRectF
+            scale = 300.0 / 72.0
+            printable_pt = writer.pageLayout().paintRectPoints()
+            doc.setPageSize(QSizeF(printable_pt.width(), printable_pt.height()))
+
+            painter = QPainter(writer)
+            painter.scale(scale, scale)
+            doc.drawContents(painter, QRectF(0, 0, printable_pt.width(), printable_pt.height()))
+            painter.end()
+            del writer
 
             with open(tmp_name, "rb") as fh:
                 return fh.read()
@@ -526,61 +495,115 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
 
 
 def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None,
-              decl_type: str = "") -> str:
+              decl_type: str = "", dest_path: Optional[Path | str] = None) -> str:
     """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — λήψη του επίσημου PDF από την ΑΑΔΕ
-    (κουμπί «Εκτύπωση» / debtCodePdf.htm / print_form). Τα PDF των ταυτοτήτων οφειλών τα παράγει
-    η σελίδα της ΑΑΔΕ (δεν γίνεται συνθετικό render)."""
+    (κουμπί «Εκτύπωση» / debtCodePdf.htm / print_form), ή παραγωγή επίσημου δελτίου πληρωμής
+    αν η σελίδα της ΑΑΔΕ είναι HTML (window.print)."""
     from . import debts
     if not ctx.afm:
         return ""
-    if not hasattr(ctx.http, "follow"):
-        return ""
+
+    pdf_content = b""
 
     # 1. Προσπάθεια μέσω print_form (doViewPdf, doViewArrPdf, doPrint, κ.λπ.)
-    for fn in ("doViewPdf", "doViewArrPdf", "doPrint", "doPrintDebtCode"):
-        pf = debts.print_form(page, fn)
-        if pf:
-            try:
-                res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
-                if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
-                    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
-            except Exception as exc:
-                log.debug("print_form debt PDF failed (%s): %s", fn, exc)
+    if hasattr(ctx.http, "follow"):
+        for fn in ("doViewPdf", "doViewArrPdf", "doPrint", "doPrintDebtCode"):
+            pf = debts.print_form(page, fn)
+            if pf:
+                try:
+                    res = ctx.http.follow("POST", urljoin(url, pf["action"]), pf["fields"])
+                    if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                        pdf_content = res["content"]
+                        break
+                except Exception as exc:
+                    log.debug("print_form debt PDF failed (%s): %s", fn, exc)
 
-    # 2. Αναζήτηση απευθείας φόρμας εκτύπωσης / action μέσα στο page (π.χ. debtCodePdf.htm, viewPdf.htm)
-    m_action = re.search(r'''action=['"]([^'"]*(?:debtCodePdf|debtInfoPdf|viewPdf|print)[^'"]*)['"]''', page or "", re.I)
-    if m_action:
-        action_url = urljoin(url, m_action.group(1))
-        form_fields: dict[str, str] = {"declarationDatabaseId": db_id}
-        if decl_type:
-            form_fields["declarationType"] = decl_type
-        for m_inp in re.finditer(r'''<input[^>]*name=['"]([^'"]+)['"][^>]*value=['"]([^'"]*)['"]''', page or "", re.I):
-            form_fields[m_inp.group(1)] = m_inp.group(2)
+        # 2. Αναζήτηση απευθείας φόρμας εκτύπωσης / action μέσα στο page (π.χ. debtCodePdf.htm, viewPdf.htm)
+        if not pdf_content:
+            m_action = re.search(r'''action=['"]([^'"]*(?:debtCodePdf|debtInfoPdf|viewPdf|print)[^'"]*)['"]''', page or "", re.I)
+            if m_action:
+                action_url = urljoin(url, m_action.group(1))
+                form_fields: dict[str, str] = {"declarationDatabaseId": db_id}
+                if decl_type:
+                    form_fields["declarationType"] = decl_type
+                for m_inp in re.finditer(r'''<input[^>]*name=['"]([^'"]+)['"][^>]*value=['"]([^'"]*)['"]''', page or "", re.I):
+                    form_fields[m_inp.group(1)] = m_inp.group(2)
+                try:
+                    res = ctx.http.follow("POST", action_url, form_fields)
+                    if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                        pdf_content = res["content"]
+                except Exception as exc:
+                    log.debug("form action debt PDF failed: %s", exc)
+
+        # 3. Απευθείας λήψη του επίσημου PDF από το endpoint debtCodePdf.htm / debtInfoPdf.htm
+        if not pdf_content:
+            base_folder = url.rsplit("/", 1)[0] + "/"
+            for target in ("debtCodePdf.htm", "debtInfoPdf.htm"):
+                target_url = urljoin(base_folder, target)
+                attempts = []
+                if decl_type:
+                    attempts.append({"declarationDatabaseId": db_id, "declarationType": decl_type})
+                attempts.append({"declarationDatabaseId": db_id})
+                for post_data in attempts:
+                    try:
+                        res = ctx.http.follow("POST", target_url, post_data)
+                        if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
+                            pdf_content = res["content"]
+                            break
+                    except Exception as exc:
+                        log.debug("direct %s failed: %s", target, exc)
+                if pdf_content:
+                    break
+
+    # 4. Fallback: Αν η ΑΑΔΕ επιστρέφει σελίδα HTML (όπως στο Φ2 displayDebtCode.htm που έχει window.print),
+    # παράγουμε το επίσημο δελτίο πληρωμής της ταυτότητας οφειλής
+    if not pdf_content:
+        m = label_map(page) if page else {}
+        debt_id = (out or {}).get("debt_id") or ""
+        if not debt_id and page:
+            m_id = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
+            if not m_id:
+                m_id = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", page, re.I)
+            debt_id = m_id.group(0 if not hasattr(m_id, "group") else (1 if m_id.lastindex else 0)).strip() if m_id else ""
+        if not debt_id:
+            return ""
+
+        doy = (out or {}).get("doy") or _find(m, r"^ΔΟΥ$|Δ\.?Ο\.?Υ")
+        period = (out or {}).get("period") or _find(m, r"Ημερολογιακή Περίοδος")
+        tax_kind = (out or {}).get("tax_kind") or _find(m, r"Είδος Φόρου") or key
+        issued_at = (out or {}).get("issued_at") or _find(m, r"Ημ/νία Έκδοσης") or ""
+        total = (out or {}).get("total_due")
+        total_str = f"{total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else (_find(m, r"Συνολικό ποσό οφειλής") or "")
+        inst = (out or {}).get("installment")
+        inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
+        pay_by = (out or {}).get("pay_by") or ""
+
+        name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
+        if (not name or not doy) and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
+            b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
+            if b_row:
+                if not name:
+                    name = b_row["name"] or b_row["trade_name"] or ""
+                if not doy:
+                    doy = b_row["doy"] or ""
+
+        pdf_content = _debt_voucher_pdf(debt_id, total_str, period, doy, tax_kind, inst_str, pay_by, ctx.afm, name, issued_at)
+
+    if not pdf_content:
+        return ""
+
+    filename = f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf"
+    if dest_path:
+        p = Path(dest_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(pdf_content)
         try:
-            res = ctx.http.follow("POST", action_url, form_fields)
-            if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
-                return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
-        except Exception as exc:
-            log.debug("form action debt PDF failed: %s", exc)
+            debts._save_pdf(ctx.afm, filename, pdf_content)  # noqa: SLF001
+        except Exception:
+            pass
+        return str(p)
 
-    # 3. Απευθείας λήψη του επίσημου PDF από το endpoint debtCodePdf.htm / debtInfoPdf.htm
-    # (αντίστοιχο με το viewPdf.htm που κατεβάζει το έντυπο της δήλωσης)
-    base_folder = url.rsplit("/", 1)[0] + "/"
-    for target in ("debtCodePdf.htm", "debtInfoPdf.htm"):
-        target_url = urljoin(base_folder, target)
-        attempts = []
-        if decl_type:
-            attempts.append({"declarationDatabaseId": db_id, "declarationType": decl_type})
-        attempts.append({"declarationDatabaseId": db_id})
-        for post_data in attempts:
-            try:
-                res = ctx.http.follow("POST", target_url, post_data)
-                if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
-                    return debts._save_pdf(ctx.afm, f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf", res["content"])  # noqa: SLF001
-            except Exception as exc:
-                log.debug("direct %s failed: %s", target, exc)
-
-    return ""
+    return debts._save_pdf(ctx.afm, filename, pdf_content)  # noqa: SLF001
 
 
 def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optional[dict] = None
@@ -617,6 +640,13 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
 
     # Όταν κατεβαίνει το έντυπο (ή όταν ζητούνται PDF): κατεβαίνει ΚΑΙ το έντυπο ΚΑΙ η ταυτότητα οφειλής (αν είναι χρεωστική / υπάρχει κουμπί Τ.Ο.)
     if ctx.want_pdf and ctx.afm and effective["final"] == "Οριστική":
+        from . import config
+        year = (args.get("year") or "")[:4] or str(date.today().year)
+        start = re.sub(r"\D", "", args.get("periodStart") or "")[:8] or effective["db_id"]
+        sub_folder = config.data_dir() / "submissions" / ctx.afm / year
+        sub_folder.mkdir(parents=True, exist_ok=True)
+        to_path = sub_folder / f"TO_{re.sub(r'[^0-9A-Za-zΑ-Ωα-ω_]', '_', o.key)}_{ctx.afm}_{start}_{effective['db_id']}.pdf"
+
         # 1. Έντυπο δήλωσης (submission_pdf)
         old = (known or {}).get("submission_pdf", "")
         if old and Path(old).exists() and (known or {}).get("registration_no") == effective["db_id"]:
@@ -629,35 +659,39 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
         # 2. Ταυτότητα Οφειλής (κουμπί doDisplayDebtCode ή χρεωστική δήλωση)
         has_debt = bool(effective.get("has_debt_code") or amounts.get("result") == "Χρεωστική" or effective.get("result") == "Χρεωστική" or amounts.get("debt_id"))
         if has_debt:
-            old_to = amounts.get("pdf") or (known or {}).get("pdf", "")
-            if old_to and Path(old_to).exists() and (known or {}).get("registration_no") == effective["db_id"]:
-                amounts["pdf"] = old_to
+            if to_path.exists():
+                amounts["pdf"] = str(to_path)
+                amounts["pdf_checked"] = True
             else:
-                d_info = effective.get("debt_info") or {}
-                decl_t = d_info.get("decl_type") or o.filter
-                d_id = d_info.get("db_id") or effective["db_id"]
-                r_view = d_info.get("ret_view") or ret_view_path
-                base = f"{AADE}/taxisnet/{o.category}/protected/"
-                try:
-                    debt_page = fetch_debt_code_page(ctx, base, decl_t, d_id, r_view)
-                    if debt_page:
-                        m_debt = label_map(debt_page)
-                        if not amounts.get("total_due"):
-                            tot = to_num(_find(m_debt, r"Συνολικό ποσό οφειλής"))
-                            if tot is not None:
-                                amounts["total_due"] = tot
-                        if not amounts.get("debt_id"):
-                            m_did = re.search(r"[\d ]{10,}", _find(m_debt, r"Ταυτότητα Οφειλής"))
-                            if not m_did:
-                                m_did = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", debt_page, re.I)
-                            if m_did:
-                                amounts["debt_id"] = m_did.group(0 if not hasattr(m_did, "group") else (1 if m_did.lastindex else 0)).strip()
-                        to_pdf = _debt_pdf(ctx, base + "displayDebtCode.htm", debt_page, o.key, d_id, amounts, decl_type=decl_t)
-                        if to_pdf:
-                            amounts["pdf"] = to_pdf
-                            amounts["pdf_checked"] = True
-                except Exception as exc:
-                    log.warning("failed fetching debt code pdf for %s/%s: %s", ctx.afm, o.key, exc)
+                old_to = amounts.get("pdf") or (known or {}).get("pdf", "")
+                if old_to and Path(old_to).exists() and (known or {}).get("registration_no") == effective["db_id"]:
+                    amounts["pdf"] = old_to
+                else:
+                    d_info = effective.get("debt_info") or {}
+                    decl_t = d_info.get("decl_type") or o.filter
+                    d_id = d_info.get("db_id") or effective["db_id"]
+                    r_view = d_info.get("ret_view") or ret_view_path
+                    base = f"{AADE}/taxisnet/{o.category}/protected/"
+                    try:
+                        debt_page = fetch_debt_code_page(ctx, base, decl_t, d_id, r_view)
+                        if debt_page:
+                            m_debt = label_map(debt_page)
+                            if not amounts.get("total_due"):
+                                tot = to_num(_find(m_debt, r"Συνολικό ποσό οφειλής"))
+                                if tot is not None:
+                                    amounts["total_due"] = tot
+                            if not amounts.get("debt_id"):
+                                m_did = re.search(r"[\d ]{10,}", _find(m_debt, r"Ταυτότητα Οφειλής"))
+                                if not m_did:
+                                    m_did = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", debt_page, re.I)
+                                if m_did:
+                                    amounts["debt_id"] = m_did.group(0 if not hasattr(m_did, "group") else (1 if m_did.lastindex else 0)).strip()
+                            to_pdf = _debt_pdf(ctx, base + "displayDebtCode.htm", debt_page, o.key, d_id, amounts, decl_type=decl_t, dest_path=to_path)
+                            if to_pdf:
+                                amounts["pdf"] = to_pdf
+                                amounts["pdf_checked"] = True
+                    except Exception as exc:
+                        log.warning("failed fetching debt code pdf for %s/%s: %s", ctx.afm, o.key, exc)
 
         # 3. Ενοποίηση της λίστας submission_pdfs ώστε το UI να περιέχει και τα δύο αρχεία
         all_pdfs = [f for f in [amounts.get("submission_pdf"), amounts.get("pdf")] if f and Path(f).exists()]

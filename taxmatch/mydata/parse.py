@@ -217,3 +217,45 @@ def parse_invoice(inv: ET.Element, direction: str) -> dict[str, Any]:
 def parse_page(payload: bytes, direction: str) -> list[dict[str, Any]]:
     root = ET.fromstring(payload)
     return [parse_invoice(inv, direction) for inv in root.iter(NS + "invoice")]
+
+
+def parse_classifications_doc(payload: bytes) -> dict[str, list[dict[str, Any]]]:
+    """Εξαγωγή χαρακτηρισμών από RequestedDoc (expensesClassificationsDoc / incomeClassificationsDoc).
+    Επιστρέφει { invoiceMark: [ {"kind": "expense"|"income", "line": line_no, "type": typ, "category": cat, "amount": amt, "vat_type": vat_type}, ... ] }"""
+    root = ET.fromstring(payload)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for exp in root.iter():
+        tag = _local(exp)
+        if tag in ("expensesInvoiceClassification", "incomeInvoiceClassification"):
+            kind = "expense" if tag == "expensesInvoiceClassification" else "income"
+            inv_mark = ""
+            for c in exp:
+                ctag = _local(c)
+                if ctag == "invoiceMark":
+                    inv_mark = (c.text or "").strip()
+                elif ctag in ("invoicesExpensesClassificationDetails", "invoicesIncomeClassificationDetails"):
+                    line_no = ""
+                    for sc in c:
+                        sctag = _local(sc)
+                        if sctag == "lineNumber":
+                            line_no = (sc.text or "").strip()
+                        elif sctag in ("expensesClassificationDetailData", "incomeClassificationDetailData"):
+                            data: dict[str, str] = {}
+                            for x in sc:
+                                data[_local(x)] = (x.text or "").strip()
+                            typ = data.get("classificationType") or ""
+                            cat = data.get("classificationCategory") or ""
+                            amt = round(_f(data.get("amount") or "0"), 2)
+                            vat_type = data.get("vatClassificationType") or ""
+                            if not vat_type and typ.startswith("VAT_"):
+                                vat_type = typ
+                            if typ or cat or amt:
+                                out.setdefault(inv_mark, []).append({
+                                    "kind": kind,
+                                    "line": line_no,
+                                    "type": typ,
+                                    "category": cat,
+                                    "amount": amt,
+                                    "vat_type": vat_type,
+                                })
+    return out

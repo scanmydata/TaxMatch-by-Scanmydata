@@ -31,7 +31,7 @@ from .toast import toast
 from .widgets import fit_to_screen
 from .workers import run_task
 
-_COLS = ["Ημ/νία", "Τύπος", "Έσοδο/Έξοδο", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
+_COLS = ["Ημ/νία", "Τύπος", "Έσοδο/Έξοδο", "Χαρακτηρισμός", "Αντισυμβαλλόμενος", "ΑΦΜ", "Καθαρή", "ΦΠΑ", "Σύνολο", "Παρακρ.", "PDF"]
 HISTORY_MONTHS = 24                     # για Intrastat χρειάζεται όλο το προηγούμενο έτος + το τρέχον
 
 
@@ -310,7 +310,7 @@ class MydataTab(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.kit = TableKit(self.table, list(zip(_COLS, (64, 48, 92, 0, 90, 90, 80, 90, 80, 90))), "client_mydata",
+        self.kit = TableKit(self.table, list(zip(_COLS, (64, 48, 86, 120, 0, 90, 85, 85, 80, 85, 75))), "client_mydata",
                             prefs=getattr(main, "_prefs", None),
                             placeholder="Αναζήτηση παραστατικού (αντισυμβαλλόμενος, ΑΦΜ, τύπος, ποσό…)")
         root.addWidget(self.kit.bar)
@@ -536,12 +536,29 @@ class MydataTab(QWidget):
             incoming = d["direction"] == "incoming"
             income = analysis.is_income(d)
             other_name, other_vat = names.display_name(d, party, self.afm)
+            det = _detail(d)
+            top_cls = (det.get("summary_classifications") or [c for line in det.get("lines", []) for c in line.get("classifications", [])])
+            cls_cell = ""
+            if top_cls:
+                first = top_cls[0]
+                t_typ = first.get("type") or ""
+                t_cat = first.get("category") or ""
+                cat_short = t_cat.replace("category", "cat.")
+                if t_typ and t_cat:
+                    cls_cell = f"{t_typ} ({cat_short})"
+                elif t_typ:
+                    cls_cell = t_typ
+                elif t_cat:
+                    cls_cell = cat_short
+                if len(top_cls) > 1:
+                    cls_cell += f" +{len(top_cls)-1}"
             cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], labels.invoice_type(d["invoice_type"], short=True),
                      "Έσοδο" if income else "Έξοδο",
+                     cls_cell or "—",
                      other_name or "—", other_vat or "—", office.money(d["net"]), office.money(d["vat"]),
                      office.money(d["total"]), office.money(d["withheld"]) if d["withheld"] else "",
                      pdfs.STATUS_LABEL.get(d["pdf_status"], "—")]
-            keys = {0: d["issue_date"] + d["mark"], 5: d["net"], 6: d["vat"], 7: d["total"], 8: d["withheld"] or 0.0}
+            keys = {0: d["issue_date"] + d["mark"], 3: cls_cell, 6: d["net"], 7: d["vat"], 8: d["total"], 9: d["withheld"] or 0.0}
             tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other_name or '—'} · ΑΦΜ {other_vat or '—'}\n"
                    f"{d['series']} {d['aa']} · {d['issue_date']} · {labels.invoice_type(d['invoice_type'])} · MARK {d['mark']}\n"
                    f"Καθαρή {office.money(d['net'])} · ΦΠΑ {office.money(d['vat'])} · Σύνολο {office.money(d['total'])}"
@@ -553,14 +570,16 @@ class MydataTab(QWidget):
                 item.setToolTip(tip)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, i)
-                if col in (5, 6, 7, 8):
+                if col in (6, 7, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if col == 2:                                   # έσοδα πράσινα, έξοδα κόκκινα (ρητό αίτημα χρήστη)
+                if col == 2:                                   # έσοδα πράσινα, έξοδα κόκκινα
                     item.setForeground(QColor(CURRENT.ok if income else CURRENT.bad))
-                if col == 9:
+                if col == 3 and not cls_cell:
+                    item.setForeground(QColor(CURRENT.muted))
+                if col == 10:
                     item.setForeground(QColor(pdf_colour.get(d["pdf_status"] or "", CURRENT.muted)))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if col == 8 and d["withheld"] and incoming:
+                if col == 9 and d["withheld"] and incoming:
                     item.setForeground(QColor(CURRENT.warn))
                 if d.get("vat_class") and non_vat:
                     item.setForeground(QColor(CURRENT.bad))

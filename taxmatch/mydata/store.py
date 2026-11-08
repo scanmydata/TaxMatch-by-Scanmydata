@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 from .. import db
 from . import credentials
 from .client import AuthError, MydataClient
-from .parse import parse_page
+from .parse import parse_classifications_doc, parse_page
 
 
 def month_range(ym: str) -> tuple[str, str]:
@@ -68,15 +68,18 @@ def sync_range(conn: sqlite3.Connection, afm: str, months: list[str],
                 break
             date_from, date_to = month_range(span[0])[0], month_range(span[-1])[1]
             docs: list[dict[str, Any]] = []
+            cls_by_mark: dict[str, list[dict[str, Any]]] = {}
             try:
                 for incoming in (True, False):
                     for page in client.fetch_pages(incoming, date_from, date_to):
                         docs += parse_page(page, "incoming" if incoming else "outgoing")
+                        for mark, items in parse_classifications_doc(page).items():
+                            cls_by_mark.setdefault(mark, []).extend(items)
             except AuthError:
                 credentials.record_check(conn, afm, "invalid")
                 return {"ok": False, "reason": "Το myDATA απέρριψε τους κωδικούς (όνομα χρήστη / κλειδί API).",
                         "n": total, "months": done}
-            total += _store(conn, afm, docs, span)
+            total += _store(conn, afm, docs, span, classifications=cls_by_mark)
             done += len(span)
     finally:
         client.close()
@@ -86,10 +89,38 @@ def sync_range(conn: sqlite3.Connection, afm: str, months: list[str],
     return {"ok": True, "reason": "", "n": total, "months": done}
 
 
-def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], months: list[str]) -> int:
+def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], months: list[str],
+           classifications: Optional[dict[str, list[dict[str, Any]]]] = None) -> int:
     now = db.utcnow()
     conn.execute("BEGIN")
     try:
+        if classifications:
+            for d in docs:
+                mark = d.get("mark")
+                if mark in classifications:
+                    cls_items = classifications[mark]
+                    det = d.setdefault("detail", {})
+                    sum_cls = det.setdefault("summary_classifications", [])
+                    existing_sigs = {(c.get("kind"), c.get("type"), c.get("category"), c.get("amount")) for c in sum_cls}
+                    for it in cls_items:
+                        sig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))
+                        if sig not in existing_sigs:
+                            sum_cls.append({"kind": it["kind"], "type": it["type"], "category": it["category"],
+                                            "amount": it["amount"], "vat_type": it.get("vat_type", "")})
+                            existing_sigs.add(sig)
+                    lines = det.setdefault("lines", [])
+                    for it in cls_items:
+                        line_str = str(it.get("line") or "1")
+                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0] if lines else None)
+                        if target_line is not None:
+                            line_cls = target_line.setdefault("classifications", [])
+                            lsig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))
+                            if lsig not in {(c.get("kind"), c.get("type"), c.get("category"), c.get("amount")) for c in line_cls}:
+                                line_cls.append({"kind": it["kind"], "type": it["type"], "category": it["category"],
+                                                 "amount": it["amount"], "vat_type": it.get("vat_type", "")})
+                    if any(it.get("vat_type", "").startswith("VAT_3") for it in cls_items):
+                        d["vat_class"] = 1
+
         for d in docs:
             if not d["mark"]:
                 continue
@@ -109,6 +140,40 @@ def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], month
                  d["url"], d["provider"], now, d.get("stamp", 0.0), int(bool(d.get("vat_class"))),
                  int(bool(d.get("rent"))), json.dumps(d.get("taxes") or {}),
                  json.dumps(d.get("detail") or {}, ensure_ascii=False)))
+        if classifications:
+            for mark, cls_items in classifications.items():
+                row = conn.execute("SELECT detail_json, vat_class FROM mydata_docs WHERE afm=? AND mark=?", (afm, mark)).fetchone()
+                if row:
+                    try:
+                        det = json.loads(row["detail_json"] or "{}")
+                    except Exception:
+                        det = {}
+                    sum_cls = det.setdefault("summary_classifications", [])
+                    existing_sigs = {(c.get("kind"), c.get("type"), c.get("category"), c.get("amount")) for c in sum_cls}
+                    changed = False
+                    for it in cls_items:
+                        sig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))
+                        if sig not in existing_sigs:
+                            sum_cls.append({"kind": it["kind"], "type": it["type"], "category": it["category"],
+                                            "amount": it["amount"], "vat_type": it.get("vat_type", "")})
+                            existing_sigs.add(sig)
+                            changed = True
+                    lines = det.setdefault("lines", [])
+                    for it in cls_items:
+                        line_str = str(it.get("line") or "1")
+                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0] if lines else None)
+                        if target_line is not None:
+                            line_cls = target_line.setdefault("classifications", [])
+                            lsig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))
+                            if lsig not in {(c.get("kind"), c.get("type"), c.get("category"), c.get("amount")) for c in line_cls}:
+                                line_cls.append({"kind": it["kind"], "type": it["type"], "category": it["category"],
+                                                 "amount": it["amount"], "vat_type": it.get("vat_type", "")})
+                                changed = True
+                    vat_class = row["vat_class"] or (1 if any(it.get("vat_type", "").startswith("VAT_3") for it in cls_items) else 0)
+                    if changed or vat_class != row["vat_class"]:
+                        conn.execute("UPDATE mydata_docs SET detail_json=?, vat_class=? WHERE afm=? AND mark=?",
+                                     (json.dumps(det, ensure_ascii=False), vat_class, afm, mark))
+
         per_month: dict[str, int] = {ym: 0 for ym in months}
         for mark, issued in {d["mark"]: d["issue_date"][:7] for d in docs if d["mark"]}.items():
             if issued in per_month:
