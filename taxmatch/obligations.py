@@ -649,6 +649,7 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             ("ΑΠΔ_ΤΕΚΑ", int(ref_month[:4]) if ref_month else date.today().year))
         if yr in ("submitted", "not_submitted", "pending"):
             return "yes", "υποβάλλει ΑΠΔ ΤΕΚΑ (έλεγχος υποβολών e-ΕΦΚΑ)"
+        return "yes", "επιλογή «ΑΠΔ ΤΕΚΑ» στο Προφίλ του πελάτη"
     if rule_id in ("apd", "ergani_e4", "fmy_wages") and business.get("employer") is not None:
         return ("yes", "εργοδότης (μισθοδοσία)") if business["employer"] else ("no", "χωρίς μισθοδοσία")
     if rule_id == "intrastat" and business.get("intrastat"):

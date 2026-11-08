@@ -379,8 +379,8 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
                       installment: str, pay_by: str, afm: str, name: str, issued_at: str) -> bytes:
     try:
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtGui import QTextDocument, QPdfWriter, QPageSize, QPageLayout
-        from PySide6.QtCore import QMarginsF, QSizeF
+        from PySide6.QtGui import QTextDocument, QPdfWriter, QPageSize, QPageLayout, QPainter
+        from PySide6.QtCore import QMarginsF, QSizeF, QRectF
         import tempfile
         import os
         import sys
@@ -389,79 +389,64 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
         if app is None:
             app = QApplication(sys.argv)
 
-        dose_row = f"""<tr class="data-row">
-                <td class="label">Ποσό 1ης Δόσης Δήλωσης</td>
-                <td class="val" style="font-size: 11.5pt; font-weight: bold;">{installment}</td>
-            </tr>""" if installment else ""
-
-        inst_note = f"""Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by or 'την καθορισμένη προθεσμία'}</b>. Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/2013).""" if (pay_by or installment) else """Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/2013)."""
+        dose_row = f'<tr><td class="label">Ποσό δόσης δήλωσης της {pay_by}</td><td class="val">{installment}</td></tr>' if installment else ""
+        inst_note = (f'Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by}</b>. Η καθυστέρηση πληρωμής '
+                     f'του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).'
+                     if pay_by else 'Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).')
 
         html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-    body {{ font-family: "Segoe UI", Arial, sans-serif; font-size: 10.5pt; color: #111; margin: 0; padding: 0; }}
-    .header-table {{ width: 100%; border-bottom: 2px solid #133b70; margin-bottom: 16px; padding-bottom: 8px; }}
-    .header-title {{ font-size: 15pt; font-weight: bold; color: #133b70; }}
-    .box-table {{ width: 100%; border: 1px solid #b0c4de; border-collapse: collapse; margin-bottom: 14px; }}
-    .box-header {{ font-size: 11.5pt; font-weight: bold; color: #133b70; padding: 6px 10px; background-color: #f0f4f8; border-bottom: 1px solid #b0c4de; }}
-    .data-row td {{ padding: 6px 10px; font-size: 10.5pt; border-bottom: 1px solid #e1e8ed; }}
-    .label {{ width: 38%; font-weight: bold; color: #333; }}
-    .val {{ width: 62%; color: #000; }}
-    .debt-code-box {{ background-color: #f8fafc; border: 2px solid #133b70; padding: 12px; text-align: center; margin: 12px 0; }}
-    .debt-code-label {{ font-size: 11pt; font-weight: bold; color: #133b70; margin-bottom: 4px; }}
-    .debt-code-val {{ font-size: 15pt; font-weight: bold; letter-spacing: 2px; color: #000; font-family: "Courier New", monospace; }}
-    .alert-box {{ background-color: #fff9e6; border: 1px solid #ffe082; padding: 10px; font-size: 9.5pt; line-height: 1.4; color: #444; }}
+    body {{ font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #000; margin: 25px 30px; }}
+    .header-title {{ font-size: 15pt; font-weight: bold; margin-bottom: 4px; }}
+    .header-sub {{ font-size: 13pt; font-weight: bold; margin-bottom: 22px; }}
+    .section-title {{ font-size: 11.5pt; font-weight: bold; margin-top: 16px; margin-bottom: 6px; }}
+    table.data {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
+    table.data td {{ padding: 3px 0; font-size: 10.5pt; vertical-align: top; }}
+    table.data td.label {{ width: 38%; font-weight: normal; color: #222; }}
+    table.data td.val {{ width: 62%; font-weight: bold; color: #000; }}
+    .debt-code-val {{ font-family: "Courier New", Courier, monospace; font-size: 12pt; font-weight: bold; letter-spacing: 1px; }}
+    .warning-title {{ font-size: 10.5pt; font-weight: bold; margin-top: 22px; margin-bottom: 6px; }}
+    .warning-text {{ font-size: 9.5pt; line-height: 1.45; color: #111; }}
 </style>
 </head>
 <body>
-<table class="header-table" cellspacing="0" cellpadding="0">
-    <tr>
-        <td style="vertical-align: middle;">
-            <div class="header-title">TAXISnet · ΕΙΔΟΠΟΙΗΣΗ ΠΛΗΡΩΜΗΣ ΦΟΡΟΥ</div>
-            <div style="font-size: 9.5pt; color: #555; margin-top: 3px;">Ανεξάρτητη Αρχή Δημοσίων Εσόδων (ΑΑΔΕ) · Υπηρεσίες Πληρωμής</div>
-        </td>
-        <td style="text-align: right; vertical-align: middle;">
-            <span style="display: inline-block; background-color: #133b70; color: #fff; font-weight: bold; font-size: 15pt; padding: 6px 12px;">ΑΑΔΕ</span>
-        </td>
-    </tr>
-</table>
+    <div class="header-title">TAXISnet - Υπηρεσίες Πληρωμής</div>
+    <div class="header-sub">Σημείωμα για Πληρωμή</div>
 
-<table class="box-table" cellspacing="0" cellpadding="0">
-    <tr><td colspan="2" class="box-header">Στοιχεία Οφειλέτη & Δήλωσης</td></tr>
-    <tr class="data-row"><td class="label">Α.Φ.Μ.</td><td class="val"><b>{afm}</b></td></tr>
-    <tr class="data-row"><td class="label">Επωνυμία / Ονοματεπώνυμο</td><td class="val"><b>{name or '—'}</b></td></tr>
-    <tr class="data-row"><td class="label">Αρμόδια Δ.Ο.Υ.</td><td class="val">{doy or '—'}</td></tr>
-    <tr class="data-row"><td class="label">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
-    <tr class="data-row"><td class="label">Ημερολογιακή Περίοδος</td><td class="val">{period or '—'}</td></tr>
-    <tr class="data-row"><td class="label">Ημερομηνία Έκδοσης / Υποβολής</td><td class="val">{issued_at or '—'}</td></tr>
-</table>
+    <div class="section-title">Στοιχεία Οφειλέτη</div>
+    <table class="data">
+        <tr><td class="label">Α.Φ.Μ.</td><td class="val">{afm}</td></tr>
+        <tr><td class="label">Ονοματεπώνυμο/ Επωνυμία</td><td class="val">{name}</td></tr>
+    </table>
 
-<table class="box-table" cellspacing="0" cellpadding="0">
-    <tr><td colspan="2" class="box-header">Οικονομικά Στοιχεία Οφειλής</td></tr>
-    <tr class="data-row"><td class="label">Συνολικό Ποσό Οφειλής Δήλωσης</td><td class="val" style="font-size: 12pt; font-weight: bold; color: #b30000;">{total_due}</td></tr>
-    {dose_row}
-    <tr class="data-row"><td class="label">Προθεσμία Πληρωμής</td><td class="val" style="font-weight: bold; color: #b30000;">{pay_by or '—'}</td></tr>
-</table>
+    <div class="section-title">Στοιχεία Οφειλής</div>
+    <table class="data">
+        <tr><td class="label">Τύπος Πληρωμής</td><td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td></tr>
+        <tr><td class="label">ΔΟΥ</td><td class="val">{doy}</td></tr>
+        <tr><td class="label">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
+        <tr><td class="label">Ημερολογιακή Περίοδος</td><td class="val">{period}</td></tr>
+        <tr><td class="label">Συνολικό ποσό οφειλής δήλωσης</td><td class="val">{total_due}</td></tr>
+        {dose_row}
+        <tr><td class="label">Ταυτότητα Οφειλής</td><td class="val debt-code-val">{debt_id}</td></tr>
+        <tr><td class="label">Ημ/νία Έκδοσης</td><td class="val">{issued_at}</td></tr>
+    </table>
 
-<div class="debt-code-box">
-    <div class="debt-code-label">ΤΑΥΤΟΤΗΤΑ ΟΦΕΙΛΗΣ (Τ.Ο.)</div>
-    <div class="debt-code-val">{debt_id}</div>
-</div>
-
-<div class="alert-box">
-    <b>Οδηγίες Πληρωμής:</b><br>
-    • Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής μέσω web banking (επιλογή «Βεβαιωμένες Οφειλές ΑΑΔΕ») ή στα ταμεία συνεργαζόμενων τραπεζών και ΕΛΤΑ.<br>
-    • {inst_note}
-</div>
+    <div class="warning-title">Προσοχή:</div>
+    <div class="warning-text">
+        Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.<br><br>
+        {inst_note}
+    </div>
 </body>
 </html>"""
 
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            tmp_name = f.name
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+            tmp_path = tf.name
+
         try:
-            writer = QPdfWriter(tmp_name)
+            writer = QPdfWriter(tmp_path)
             writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
             writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
             writer.setResolution(300)
@@ -469,8 +454,6 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
             doc = QTextDocument()
             doc.setHtml(html)
 
-            from PySide6.QtGui import QPainter
-            from PySide6.QtCore import QRectF
             scale = 300.0 / 72.0
             printable_pt = writer.pageLayout().paintRectPoints()
             doc.setPageSize(QSizeF(printable_pt.width(), printable_pt.height()))
@@ -481,18 +464,17 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
             painter.end()
             del writer
 
-            with open(tmp_name, "rb") as fh:
-                return fh.read()
+            with open(tmp_path, "rb") as f:
+                return f.read()
         finally:
-            if os.path.exists(tmp_name):
+            if os.path.exists(tmp_path):
                 try:
-                    os.remove(tmp_name)
-                except OSError:
+                    os.remove(tmp_path)
+                except Exception:
                     pass
     except Exception as exc:
-        log.warning("error generating debt voucher pdf: %s", exc)
+        log.warning("_debt_voucher_pdf failed: %s", exc)
         return b""
-
 
 def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None,
               decl_type: str = "", dest_path: Optional[Path | str] = None) -> str:
@@ -576,7 +558,13 @@ def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optiona
         total_str = f"{total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else (_find(m, r"Συνολικό ποσό οφειλής") or "")
         inst = (out or {}).get("installment")
         inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
+        if not inst_str and page:
+            inst_str = _find(m, r"Ποσό\s*δόσης") or ""
         pay_by = (out or {}).get("pay_by") or ""
+        if not pay_by and page:
+            m_pb = re.search(r"Ποσό\s*δόσης.*?(?:της|έως|μέχρι)\s*(\d{1,2}/\d{1,2}/\d{4})", page, re.I) or re.search(r"μέχρι\s*τις\s*(\d{1,2}/\d{1,2}/\d{4})", page, re.I)
+            if m_pb:
+                pay_by = m_pb.group(1)
 
         name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
         if (not name or not doy) and ctx.afm and hasattr(ctx, "conn") and ctx.conn:

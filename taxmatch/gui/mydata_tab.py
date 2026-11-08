@@ -541,17 +541,11 @@ class MydataTab(QWidget):
             cls_cell = ""
             if top_cls:
                 first = top_cls[0]
-                t_typ = first.get("type") or ""
-                t_cat = first.get("category") or ""
-                cat_short = t_cat.replace("category", "cat.")
-                if t_typ and t_cat:
-                    cls_cell = f"{t_typ} ({cat_short})"
-                elif t_typ:
-                    cls_cell = t_typ
-                elif t_cat:
-                    cls_cell = cat_short
+                label_text = labels.classification_label(first)
                 if len(top_cls) > 1:
-                    cls_cell += f" +{len(top_cls)-1}"
+                    cls_cell = f"{label_text} (+{len(top_cls)-1})"
+                else:
+                    cls_cell = label_text
             cells = [d["issue_date"][8:10] + "/" + d["issue_date"][5:7], labels.invoice_type(d["invoice_type"], short=True),
                      "Έσοδο" if income else "Έξοδο",
                      cls_cell or "—",

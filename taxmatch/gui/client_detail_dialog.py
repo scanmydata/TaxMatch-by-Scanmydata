@@ -280,37 +280,41 @@ class ClientDetailDialog(QDialog):
         self.f_vat_note = QLabel("")
         self.f_vat_note.setWordWrap(True)
         form.addRow("", self.f_vat_note)
-        self.f_employer = QComboBox()
-        for label, value in (("— άγνωστο —", ""), ("Ναι — απασχολεί προσωπικό (ΑΠΔ, Ε4)", "1"), ("Όχι", "0")):
-            self.f_employer.addItem(label, value)
-        form.addRow("Εργοδότης", self.f_employer)
-        # ΑΠΔ ΤΕΚΑ: μόνο με ρητή επιλογή, και μόνο όταν υπάρχει μισθοδοσία (ρητό αίτημα χρήστη 2026-10-27)
+        self.f_employer = QCheckBox("Εργοδότης — απασχολεί προσωπικό (ΑΠΔ e-ΕΦΚΑ, Ε4, ΦΜΥ μισθωτών)")
+        self.f_employer.setToolTip("Ενεργοποιεί τις υποχρεώσεις μισθοδοσίας: μηνιαία ΑΠΔ e-ΕΦΚΑ, Ετήσιος Πίνακας Προσωπικού Ε4 και ΦΜΥ μισθωτών.")
+        form.addRow("Μισθοδοσία", self.f_employer)
+
         self.f_teka = QCheckBox("Υποβάλλει ΑΠΔ ΤΕΚΑ (επικουρική ασφάλιση εργαζομένων) — υποχρέωση και έλεγχος υποβολής")
-        self.f_teka.setToolTip("Ενεργό μόνο για εργοδότες. Χωρίς την επιλογή δεν δημιουργείται υποχρέωση ΑΠΔ ΤΕΚΑ "
-                               "ούτε γίνεται έλεγχος στο e-ΕΦΚΑ.")
+        self.f_teka.setToolTip("Ενεργό μόνο για εργοδότες με εργαζόμενους ασφαλισμένους στο ΤΕΚΑ. Δημιουργεί υποχρέωση ΑΠΔ ΤΕΚΑ και έλεγχο στο e-ΕΦΚΑ.")
         form.addRow("", self.f_teka)
-        self.f_employer.currentIndexChanged.connect(
-            lambda _i: self.f_teka.setEnabled(self.f_employer.currentData() == "1"))
-        self.f_intrastat = QComboBox()
-        for label, value in (("— άγνωστο —", ""), ("Ναι — υποβάλλει Intrastat", "1"), ("Όχι", "0")):
-            self.f_intrastat.addItem(label, value)
+
+        def _on_emp_toggled(chk: bool):
+            self.f_teka.setEnabled(chk)
+            if not chk:
+                self.f_teka.setChecked(False)
+
+        def _on_tek_toggled(chk: bool):
+            if chk and not self.f_employer.isChecked():
+                self.f_employer.setChecked(True)
+
+        self.f_employer.toggled.connect(_on_emp_toggled)
+        self.f_teka.toggled.connect(_on_tek_toggled)
+
+        self.f_intrastat = QCheckBox("Υποβάλλει Intrastat (ενδοκοινοτικές αποκτήσεις / παραδόσεις)")
+        self.f_intrastat.setToolTip("Δημιουργεί μηνιαία υποχρέωση Intrastat και έλεγχο υποβολής.")
         form.addRow("Intrastat", self.f_intrastat)
-        # Ειδική εισφορά διαδικτύου ΕΔΟΕΑΠ (ΑΚΕΕΔ): την ενεργοποιεί ο χρήστης — η εφαρμογή την προτείνει όταν βρει 14.3
-        # από Google στο myDATA (ρητό αίτημα 2026-11-02)
+
         self.f_internet = QCheckBox("Ειδική εισφορά διαδικτύου 2% ΕΔΟΕΑΠ (ΑΚΕΕΔ) — υποχρέωση και έλεγχος υποβολής")
-        self.f_internet.setToolTip("Για διαφημίσεις/προβολή στο διαδίκτυο (π.χ. Google Ads, Meta): μηνιαία ΑΚΕΕΔ στην εφαρμογή "
-                                   "ΕΔΟΕΑΠ, έως το τέλος του επόμενου μήνα")
-        form.addRow("", self.f_internet)
-        self.f_parepid = QCheckBox("Τέλος παρεπιδημούντων / ακαθαρίστων εσόδων (δήμος) — υποχρέωση και έλεγχος στο "
-                                   "dae.govapp.gr")
-        self.f_parepid.setToolTip("Χωρίς ρητή επιλογή η εφαρμογή το βρίσκει μόνη της από το myDATA (κατηγορίες τελών "
-                                  "18–22) ή το προτείνει από τον ΚΑΔ. Τσεκαρισμένο = πάντα υπόχρεος· ξετσεκαρισμένο "
-                                  "αφού είχε τσεκαριστεί = ρητά όχι.")
+        self.f_internet.setToolTip("Για διαφημίσεις/προβολή στο διαδίκτυο (π.χ. Google Ads, Meta): μηνιαία ΑΚΕΕΔ στην εφαρμογή ΕΔΟΕΑΠ, έως το τέλος του επόμενου μήνα.")
+        form.addRow("ΕΔΟΕΑΠ (ΑΚΕΕΔ)", self.f_internet)
         self.f_internet_note = QLabel("")
         self.f_internet_note.setWordWrap(True)
         self.f_internet_note.setStyleSheet(f"color:{CURRENT.warn};")
         form.addRow("", self.f_internet_note)
-        form.addRow("", self.f_parepid)
+
+        self.f_parepid = QCheckBox("Τέλος παρεπιδημούντων / ακαθαρίστων εσόδων (δήμος — dae.govapp.gr)")
+        self.f_parepid.setToolTip("Χωρίς ρητή επιλογή η εφαρμογή το βρίσκει μόνη της από το myDATA (κατηγορίες τελών 18–22) ή το προτείνει από τον ΚΑΔ. Τσεκαρισμένο = πάντα υπόχρεος· ξετσεκαρισμένο = ρητά όχι.")
+        form.addRow("Παρεπιδημούντες", self.f_parepid)
         self.f_parepid_note = QLabel("")
         self.f_parepid_note.setWordWrap(True)
         self.f_parepid_note.setStyleSheet(f"color:{CURRENT.warn};")
@@ -336,21 +340,19 @@ class ClientDetailDialog(QDialog):
         for w in (self.f_name, self.f_trade_name, self.f_legal_form, self.f_doy, self.f_address, self.f_email,
                   self.f_email_assistant, self.f_mobile, self.f_phone, self.f_status):
             w.textChanged.connect(self._profile_changed)
-        for w in (self.f_books, self.f_vat, self.f_vat_period, self.f_employer, self.f_intrastat):
+        for w in (self.f_books, self.f_vat, self.f_vat_period):
             w.currentIndexChanged.connect(self._profile_changed)
         for w in (self.f_kads, self.f_notes):
             w.textChanged.connect(self._profile_changed)
-        self.f_email_auto.toggled.connect(self._profile_changed)
-        self.f_teka.toggled.connect(self._profile_changed)
-        self.f_internet.toggled.connect(self._profile_changed)
-        self.f_parepid.toggled.connect(self._profile_changed)
+        for w in (self.f_email_auto, self.f_employer, self.f_teka, self.f_intrastat, self.f_internet, self.f_parepid):
+            w.toggled.connect(self._profile_changed)
         return page
 
     def _profile_state(self) -> tuple:
         return (self.f_name.text(), self.f_trade_name.text(), self.f_legal_form.text(), self.f_doy.text(),
                 self.f_address.text(), self.f_email.text(), self.f_email_assistant.text(), self.f_mobile.text(),
                 self.f_phone.text(), self.f_status.text(), self.f_books.currentIndex(), self.f_vat.currentIndex(),
-                self.f_vat_period.currentIndex(), self.f_employer.currentIndex(), self.f_intrastat.currentIndex(),
+                self.f_vat_period.currentIndex(), self.f_employer.isChecked(), self.f_intrastat.isChecked(),
                 self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked(),
                 self.f_teka.isChecked(), self.f_internet.isChecked(), self.f_parepid.isChecked())
 
@@ -434,20 +436,14 @@ class ClientDetailDialog(QDialog):
         else:
             self.conn.execute("UPDATE businesses SET vat_period_source='' WHERE afm=? AND vat_period_source='manual'",
                               (self.afm,))
-        flags = {"1": 1, "0": 0}
-        employer = flags.get(self.f_employer.currentData())
-        self.conn.execute("UPDATE businesses SET employer=?, intrastat=?, teka=? WHERE afm=?",
-                          (employer, flags.get(self.f_intrastat.currentData()),
-                           1 if (self.f_teka.isChecked() and employer == 1) else 0, self.afm))
-        # ΑΚΕΕΔ: NULL = δεν έχει αποφασίσει (η εφαρμογή προτείνει), 0 = ρητά όχι, 1 = ναι
-        before = self.conn.execute("SELECT internet_contribution FROM businesses WHERE afm=?", (self.afm,)).fetchone()[0]
-        if self.f_internet.isChecked() or before is not None:
-            self.conn.execute("UPDATE businesses SET internet_contribution=? WHERE afm=?",
-                              (1 if self.f_internet.isChecked() else 0, self.afm))
-        before = self.conn.execute("SELECT parepid FROM businesses WHERE afm=?", (self.afm,)).fetchone()[0]
-        if self.f_parepid.isChecked() or before is not None:
-            self.conn.execute("UPDATE businesses SET parepid=? WHERE afm=?",
-                              (1 if self.f_parepid.isChecked() else 0, self.afm))
+        emp_val = 1 if self.f_employer.isChecked() else 0
+        intrastat_val = 1 if self.f_intrastat.isChecked() else 0
+        teka_val = 1 if (self.f_teka.isChecked() and emp_val == 1) else 0
+        internet_val = 1 if self.f_internet.isChecked() else 0
+        parepid_val = 1 if self.f_parepid.isChecked() else 0
+        self.conn.execute("UPDATE businesses SET employer=?, intrastat=?, teka=?, internet_contribution=?, parepid=? WHERE afm=?",
+                          (emp_val, intrastat_val, teka_val, internet_val, parepid_val, self.afm))
+        self.conn.commit()
         kads = []
         for line in self.f_kads.toPlainText().splitlines():
             line = line.strip()
@@ -1232,14 +1228,14 @@ class ClientDetailDialog(QDialog):
                                   (self.afm,)).fetchone()
         employer_val = flags["employer"]
         has_ame = bool(efka.get_ame(self.conn, self.afm)) or bool(efka.list_ames(self.conn, self.afm))
-        if has_ame and employer_val != 1:
+        if has_ame and employer_val != 1 and employer_val is None:
             self.conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (self.afm,))
             self.conn.commit()
             employer_val = 1
-        for box, value in ((self.f_employer, employer_val), (self.f_intrastat, flags["intrastat"])):
-            box.setCurrentIndex(max(0, box.findData("" if value is None else str(int(value)))))
-        self.f_teka.setChecked(bool(flags["teka"]))
+        self.f_employer.setChecked(employer_val == 1)
         self.f_teka.setEnabled(employer_val == 1)
+        self.f_teka.setChecked(bool(flags["teka"]) and employer_val == 1)
+        self.f_intrastat.setChecked(bool(flags["intrastat"]))
         self.f_internet.setChecked(bool(flags["internet_contribution"]))
         from .. import advertising
         suggest = flags["internet_contribution"] is None and self.afm in advertising.google_candidates(self.conn)

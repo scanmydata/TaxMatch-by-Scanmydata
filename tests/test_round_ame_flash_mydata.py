@@ -129,7 +129,7 @@ def test_client_table_keyboard_search_jumps_past_arrows():
     table = _ClientTableWidget(3, len(_CLIENT_COLS))
 
     item0 = QTableWidgetItem("ΑΛΦΑ ΑΕ")
-    item1 = QTableWidgetItem("▾ CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    item1 = QTableWidgetItem("▼ CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
     item2 = QTableWidgetItem("↳ ΜΑΛΛΗΣ ΕΛΕΥΘΕΡΙΟΣ")
 
     table.setItem(0, _C_NAME, item0)
@@ -139,12 +139,22 @@ def test_client_table_keyboard_search_jumps_past_arrows():
     table.setCurrentCell(0, _C_NAME)
     assert table.currentRow() == 0
 
-    # Πάτημα 'C' οδηγεί απευθείας στην CHARGELINE παρόλο που έχει το '▾ ' μπροστά
+    # Πάτημα 'C' οδηγεί απευθείας στην CHARGELINE παρόλο που έχει το '▼ ' μπροστά
     table.keyboardSearch("C")
     assert table.currentRow() == 1
 
     # Πάτημα 'M' οδηγεί στον ΜΑΛΛΗ παρόλο που έχει το '↳ ' μπροστά
     table.keyboardSearch("M")
     assert table.currentRow() == 2
+
+    # Πάτημα 'Ψ' (διάταξη ελληνικού πληκτρολογίου στο πλήκτρο C)
+    table.setCurrentCell(0, _C_NAME)
+    table.keyboardSearch("Ψ")
+    assert table.currentRow() == 1
+
+    # Πάτημα 'Χ' (αναζήτηση CH)
+    table.setCurrentCell(0, _C_NAME)
+    table.keyboardSearch("Χ")
+    assert table.currentRow() == 1
 
     table.deleteLater()

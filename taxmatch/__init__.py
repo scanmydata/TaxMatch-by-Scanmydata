@@ -1,5 +1,5 @@
 """TaxMatch by ScanMyData — τοπικός παρακολουθητής φορολογικών νέων για λογιστικά γραφεία."""
 
-__version__ = "0.14.4"
+__version__ = "0.14.5"
 APP_NAME = "TaxMatch"
 APP_TITLE = "TaxMatch by ScanMyData"

@@ -2,6 +2,7 @@
 χρησιμοποιούσε το web UI (business_profiles.service, matching.engine, deadlines, pipeline, notices, …) — καμία
 HTTP κλήση, κανένα token. Ό,τι αγγίζει δίκτυο/LLM/ΑΑΔΕ τρέχει σε background thread (`workers.run_task`)."""
 from __future__ import annotations
+import re
 import unicodedata
 
 import calendar as pycal
@@ -188,13 +189,20 @@ def _norm_search_str(s: str) -> str:
 
 class _ClientTableWidget(QTableWidget):
     """Πίνακας πελατών με βελτιωμένη αναζήτηση πληκτρολογίου (άλμα σε γράμμα).
-    Παρακάμπτει τα βελάκια '▾ ', '▸ ', '↳ ' και αναζητά case-insensitive χωρίς τόνους και
-    με αυτόματη αντιστοίχιση ελληνικών/λατινικών ομόγραφων χαρακτήρων (π.χ. M -> Μ)."""
+    Παρακάμπτει οποιοδήποτε βελάκι/σύμβολο δέντρου ('▼', '▾', '▶', '▸', '►', '↳' κ.λπ.)
+    και αναζητά case-insensitive χωρίς τόνους και με αυτόματη αντιστοίχιση ελληνικών/λατινικών
+    ομόγραφων χαρακτήρων και διατάξεων πληκτρολογίου."""
 
     def keyboardSearch(self, search: str) -> None:
         if not search or self.rowCount() == 0:
             return
-        col = self.currentColumn() if self.currentColumn() >= 0 else _C_NAME
+        s_clean = search.strip()
+        # Αν αναζητά αριθμό (ΑΦΜ), ψάχνουμε στη στήλη ΑΦΜ· αν γράμμα/λέξη, πάντα στην Επωνυμία
+        if s_clean.isdigit():
+            col = _C_AFM
+        else:
+            col = _C_NAME
+
         cur_row = self.currentRow()
         start_row = (cur_row + 1) if len(search) == 1 and cur_row >= 0 else (cur_row if cur_row >= 0 else 0)
         norm_search = _norm_search_str(search)
@@ -208,14 +216,24 @@ class _ClientTableWidget(QTableWidget):
                 continue
             text = item.text()
             if col == _C_NAME:
-                text = text.lstrip("▾▸↳ ").strip()
+                text = re.sub(r"^[\s▼▾▶▸►↳\-\*•\(\)\[\]]+", "", text).strip()
             norm_text = _norm_search_str(text)
 
             matched = norm_text.startswith(norm_search)
             if not matched and col == _C_NAME:
+                # Υποστήριξη διάταξης ελληνικού πληκτρολογίου (το πλήκτρο C παράγει Ψ, το πλήκτρο X παράγει Χ)
+                if norm_search == "Ψ" and norm_text.startswith("C"):
+                    matched = True
+                elif norm_search == "Χ" and norm_text.startswith(("CH", "C")):
+                    matched = True
+                elif norm_search == "C" and norm_text.startswith(("CH", "Χ")):
+                    matched = True
+
+            if not matched and col == _C_NAME:
                 trade = item.data(Qt.ItemDataRole.UserRole + 1) or ""
                 if trade:
-                    matched = _norm_search_str(str(trade)).startswith(norm_search)
+                    trade_clean = re.sub(r"^[\s▼▾▶▸►↳\-\*•\(\)\[\]]+", "", str(trade)).strip()
+                    matched = _norm_search_str(trade_clean).startswith(norm_search)
 
             if matched:
                 self.setCurrentCell(r, col)
