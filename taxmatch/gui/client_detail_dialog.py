@@ -473,6 +473,7 @@ class ClientDetailDialog(QDialog):
         if self.main is not None:
             try:
                 self.main._render_calendar_from_db()
+                self.main._reload_work_items()
                 self.main.reload_dashboard()
                 self.main._apply_client_filter()
             except Exception:

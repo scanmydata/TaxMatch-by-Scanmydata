@@ -2194,7 +2194,7 @@ class MainWindow(QMainWindow):
         month = self.work_month.currentData()
         rows = deadlines.work_items(self.conn, year)
         if month:
-            rows = [r for r in rows if date.fromisoformat(r["date"]).month == month]
+            rows = [r for r in rows if r.get("due_month", date.fromisoformat(r["date"]).month) == month]
         scope = self.work_scope.currentData()
         if scope != "all":
             rows = [r for r in rows if r["status"] == scope]

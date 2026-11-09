@@ -192,6 +192,28 @@ _DEBT_CALL = re.compile(
     r'doDisplayDebtCode\s*\([^,]*?,\s*(?:&quot;|[\'"])?([^\'",;&]+?)(?:&quot;|[\'"])?\s*,\s*(?:&quot;|[\'"])?([^\'",;&]+?)(?:&quot;|[\'"])?\s*,\s*(?:&quot;|[\'"])?(.*?)(?:&quot;|[\'"])?\s*\)',
     re.I,
 )
+
+def parse_debt_call(call_str: str) -> Optional[dict[str, str]]:
+    """Αναλύει κλήση doDisplayDebtCode(frm, declType, dbId, returnView, [fmyType]) handling 3-5 ορίσματα."""
+    m = re.search(r'doDisplayDebtCode\s*\((.*?)\)', call_str, re.S | re.I)
+    if not m:
+        return None
+    raw = m.group(1)
+    parts: list[str] = []
+    for item in re.finditer(r"""(?:&quot;|['"])(.*?)(?:&quot;|['"])|([^,\s()]+)""", raw):
+        token = (item.group(1) if item.group(1) is not None else item.group(2)).strip()
+        if token.startswith("document.") or token == "this":
+            continue
+        parts.append(_html.unescape(token))
+    if len(parts) >= 2:
+        return {
+            "decl_type": parts[0],
+            "db_id": parts[1],
+            "ret_view": parts[2] if len(parts) > 2 else "displayDebtCode",
+            "fmy_type": parts[3] if len(parts) > 3 else "",
+        }
+    return None
+
 #: Υποχρεώσεις για τις οποίες διαβάζονται και τα ΠΟΣΑ της δήλωσης (εκκαθάριση + ταυτότητα οφειλής). Φ2: πιστό port του
 #: runner `lib/aade-vat-http.js` (επαληθευμένο εκεί). Οι υπόλοιπες ακολουθούν την ίδια δομή σελίδων της ΑΑΔΕ στη δική
 #: τους κατηγορία — ΔΕΝ έχει επαληθευτεί· αν η σελίδα δεν έχει τα πεδία, απλώς δεν εμφανίζονται ποσά.
@@ -265,36 +287,28 @@ def _declarations(ctx: _Ctx, o: Obligation, args: dict[str, str]) -> Optional[li
         texts = [strip_tags(c) for c in _CELL.findall(row)]
         raw_un = _html.unescape(row)
         call = _STATE_CALL.search(raw_un)
-        debt_call = _DEBT_CALL.search(row) or _DEBT_CALL.search(raw_un)
-        db_id = (call.group(2) if call else (debt_call.group(2) if debt_call else (texts[2] if len(texts) > 2 else ""))).strip()
+        debt_info = parse_debt_call(row) or parse_debt_call(raw_un)
+        db_id = (call.group(2) if call else (debt_info["db_id"] if debt_info else (texts[2] if len(texts) > 2 else ""))).strip()
         res_code = texts[6].strip().upper() if len(texts) > 6 else ""
-        result = "Χρεωστική" if (res_code in ("Χ", "X") or "ΧΡΕΩΣ" in res_code or debt_call) else (
+        result = "Χρεωστική" if (res_code in ("Χ", "X") or "ΧΡΕΩΣ" in res_code or debt_info) else (
             "Πιστωτική" if (res_code in ("Π", "P") or "ΠΙΣΤ" in res_code) else (
                 "Μηδενική" if (res_code in ("Μ", "M") or "ΜΗΔ" in res_code) else ""
             )
         )
-        debt_info = None
-        if debt_call:
-            decl_type = debt_call.group(1).replace("&quot;", "").replace('"', "").replace("'", "").strip()
-            d_id = debt_call.group(2).replace("&quot;", "").replace('"', "").replace("'", "").strip()
-            ret_view = _html.unescape(debt_call.group(3).replace("&quot;", "").replace('"', "").replace("'", "")).strip()
-            debt_info = {
-                "decl_type": decl_type,
-                "db_id": d_id,
-                "ret_view": ret_view,
-            }
         out.append({"db_id": db_id,
                     "submitted_at": texts[3] if len(texts) > 3 else "", "type": texts[4] if len(texts) > 4 else "",
                     "final": texts[5] if len(texts) > 5 else "", "result": result,
-                    "has_debt_code": bool(debt_call) or (result == "Χρεωστική"),
+                    "has_debt_code": bool(debt_info) or (result == "Χρεωστική"),
                     "debt_info": debt_info})
     return out
 
 
-def fetch_debt_code_page(ctx: _Ctx, base_url: str, decl_type: str, db_id: str, ret_view: str) -> str:
+def fetch_debt_code_page(ctx: _Ctx, base_url: str, decl_type: str, db_id: str, ret_view: str, fmy_type: str = "") -> str:
     """Ανάκτηση της σελίδας displayDebtCode.htm μέσω GET (όπως στον browser / URL TAXISnet) ή fallback POST."""
     target_url = urljoin(base_url, "displayDebtCode.htm")
     data = {"declarationType": decl_type, "declarationDatabaseId": db_id, "returnView": ret_view}
+    if fmy_type:
+        data["fmyTempDeclType"] = fmy_type
     try:
         q = urlencode(data)
         txt = ctx.get(f"{target_url}?{q}")
@@ -346,7 +360,8 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str,
         decl_type = (debt_info or {}).get("decl_type") or o.filter
         d_id = (debt_info or {}).get("db_id") or db_id
         r_view = (debt_info or {}).get("ret_view") or ret_view
-        page = fetch_debt_code_page(ctx, base, decl_type, d_id, r_view)
+        fmy_t = (debt_info or {}).get("fmy_type") or ""
+        page = fetch_debt_code_page(ctx, base, decl_type, d_id, r_view, fmy_type=fmy_t)
         if re.search(r"Ταυτότητα\s*Οφειλής|Συνολικό\s*ποσό\s*οφειλής", page or "", re.I):
             m = label_map(page)
             total = to_num(_find(m, r"Συνολικό ποσό οφειλής"))
@@ -377,70 +392,160 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str,
 
 def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_kind: str,
                       installment: str, pay_by: str, afm: str, name: str, issued_at: str) -> bytes:
-    try:
-        from PySide6.QtWidgets import QApplication
-        from PySide6.QtGui import QTextDocument, QPdfWriter, QPageSize, QPageLayout, QPainter
-        from PySide6.QtCore import QMarginsF, QSizeF, QRectF
-        import tempfile
-        import os
-        import sys
+    """Παραγωγή του επίσημου σημειώματος πληρωμής TAXISnet (πιστό αντίγραφο του original ΑΑΔΕ PDF)."""
+    import os
+    import sys
+    import tempfile
+    import subprocess
 
-        app = QApplication.instance()
-        if app is None:
-            app = QApplication(sys.argv)
+    dose_row = f'<tr><td class="lbl">Ποσό δόσης δήλωσης της {pay_by}</td><td class="val">{installment}</td></tr>' if installment else ""
+    inst_note = (f'Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by}</b>. Η καθυστέρηση πληρωμής '
+                 f'του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).'
+                 if pay_by else 'Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).')
 
-        dose_row = f'<tr><td class="label">Ποσό δόσης δήλωσης της {pay_by}</td><td class="val">{installment}</td></tr>' if installment else ""
-        inst_note = (f'Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by}</b>. Η καθυστέρηση πληρωμής '
-                     f'του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).'
-                     if pay_by else 'Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).')
-
-        html = f"""<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-    body {{ font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #000; margin: 25px 30px; }}
-    .header-title {{ font-size: 15pt; font-weight: bold; margin-bottom: 4px; }}
-    .header-sub {{ font-size: 13pt; font-weight: bold; margin-bottom: 22px; }}
-    .section-title {{ font-size: 11.5pt; font-weight: bold; margin-top: 16px; margin-bottom: 6px; }}
-    table.data {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
-    table.data td {{ padding: 3px 0; font-size: 10.5pt; vertical-align: top; }}
-    table.data td.label {{ width: 38%; font-weight: normal; color: #222; }}
-    table.data td.val {{ width: 62%; font-weight: bold; color: #000; }}
-    .debt-code-val {{ font-family: "Courier New", Courier, monospace; font-size: 12pt; font-weight: bold; letter-spacing: 1px; }}
-    .warning-title {{ font-size: 10.5pt; font-weight: bold; margin-top: 22px; margin-bottom: 6px; }}
-    .warning-text {{ font-size: 9.5pt; line-height: 1.45; color: #111; }}
+    @page {{
+        size: A4 portrait;
+        margin: 20mm 20mm 20mm 20mm;
+    }}
+    body {{
+        font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+        color: #000000;
+        margin: 0;
+        padding: 0;
+        font-size: 13.5px;
+        line-height: 1.4;
+    }}
+    .header-main {{
+        font-size: 20px;
+        font-weight: bold;
+        margin-bottom: 3px;
+    }}
+    .header-sub {{
+        font-size: 16px;
+        font-weight: bold;
+        margin-bottom: 25px;
+    }}
+    .sec-head {{
+        font-size: 14.5px;
+        font-weight: bold;
+        margin-top: 18px;
+        margin-bottom: 8px;
+    }}
+    table.data-tbl {{
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 12px;
+    }}
+    table.data-tbl td {{
+        padding: 3px 0;
+        vertical-align: top;
+        font-size: 13px;
+    }}
+    table.data-tbl td.lbl {{
+        width: 38%;
+        color: #111;
+        font-weight: normal;
+    }}
+    table.data-tbl td.val {{
+        width: 62%;
+        color: #000;
+        font-weight: bold;
+    }}
+    .debt-code-box {{
+        font-family: "Courier New", Courier, monospace;
+        font-size: 15px;
+        font-weight: bold;
+        letter-spacing: 1px;
+    }}
+    .warn-title {{
+        font-size: 13.5px;
+        font-weight: bold;
+        margin-top: 25px;
+        margin-bottom: 6px;
+    }}
+    .warn-body {{
+        font-size: 12px;
+        line-height: 1.5;
+        color: #111;
+    }}
 </style>
 </head>
 <body>
-    <div class="header-title">TAXISnet - Υπηρεσίες Πληρωμής</div>
+    <div class="header-main">TAXISnet - Υπηρεσίες Πληρωμής</div>
     <div class="header-sub">Σημείωμα για Πληρωμή</div>
 
-    <div class="section-title">Στοιχεία Οφειλέτη</div>
-    <table class="data">
-        <tr><td class="label">Α.Φ.Μ.</td><td class="val">{afm}</td></tr>
-        <tr><td class="label">Ονοματεπώνυμο/ Επωνυμία</td><td class="val">{name}</td></tr>
+    <div class="sec-head">Στοιχεία Οφειλέτη</div>
+    <table class="data-tbl">
+        <tr><td class="lbl">Α.Φ.Μ.</td><td class="val">{afm}</td></tr>
+        <tr><td class="lbl">Ονοματεπώνυμο/ Επωνυμία</td><td class="val">{name}</td></tr>
     </table>
 
-    <div class="section-title">Στοιχεία Οφειλής</div>
-    <table class="data">
-        <tr><td class="label">Τύπος Πληρωμής</td><td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td></tr>
-        <tr><td class="label">ΔΟΥ</td><td class="val">{doy}</td></tr>
-        <tr><td class="label">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
-        <tr><td class="label">Ημερολογιακή Περίοδος</td><td class="val">{period}</td></tr>
-        <tr><td class="label">Συνολικό ποσό οφειλής δήλωσης</td><td class="val">{total_due}</td></tr>
+    <div class="sec-head">Στοιχεία Οφειλής</div>
+    <table class="data-tbl">
+        <tr><td class="lbl">Τύπος Πληρωμής</td><td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td></tr>
+        <tr><td class="lbl">ΔΟΥ</td><td class="val">{doy}</td></tr>
+        <tr><td class="lbl">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
+        <tr><td class="lbl">Ημερολογιακή Περίοδος</td><td class="val">{period}</td></tr>
+        <tr><td class="lbl">Συνολικό ποσό οφειλής δήλωσης</td><td class="val">{total_due}</td></tr>
         {dose_row}
-        <tr><td class="label">Ταυτότητα Οφειλής</td><td class="val debt-code-val">{debt_id}</td></tr>
-        <tr><td class="label">Ημ/νία Έκδοσης</td><td class="val">{issued_at}</td></tr>
+        <tr><td class="lbl">Ταυτότητα Οφειλής</td><td class="val debt-code-box">{debt_id}</td></tr>
+        <tr><td class="lbl">Ημ/νία Έκδοσης</td><td class="val">{issued_at}</td></tr>
     </table>
 
-    <div class="warning-title">Προσοχή:</div>
-    <div class="warning-text">
+    <div class="warn-title">Προσοχή:</div>
+    <div class="warn-body">
         Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.<br><br>
         {inst_note}
     </div>
 </body>
 </html>"""
+
+    # 1. Προσπάθεια παραγωγής original Chromium/Skia PDF μέσω headless Edge/Chrome
+    browser_exes = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    browser = next((b for b in browser_exes if os.path.exists(b)), None)
+    if browser:
+        tmp_html = ""
+        tmp_pdf = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as tf:
+                tf.write(html)
+                tmp_html = tf.name
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+                tmp_pdf = tf.name
+            cmd = [browser, "--headless", "--disable-gpu", f"--print-to-pdf={tmp_pdf}", tmp_html]
+            res = subprocess.run(cmd, capture_output=True, timeout=15)
+            if res.returncode == 0 and os.path.exists(tmp_pdf) and os.path.getsize(tmp_pdf) > 1000:
+                with open(tmp_pdf, "rb") as f:
+                    return f.read()
+        except Exception as exc:
+            log.debug("Headless browser print-to-pdf failed: %s", exc)
+        finally:
+            for p_file in (tmp_html, tmp_pdf):
+                if p_file and os.path.exists(p_file):
+                    try:
+                        os.remove(p_file)
+                    except Exception:
+                        pass
+
+    # 2. Fallback: PySide6 QPainter PDF rendering με ακριβείς στήλες
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QPdfWriter, QPageSize, QPageLayout, QPainter, QFont, QColor
+        from PySide6.QtCore import QMarginsF, QRectF, Qt
+
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
 
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
             tmp_path = tf.name
@@ -448,19 +553,79 @@ def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_k
         try:
             writer = QPdfWriter(tmp_path)
             writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
-            writer.setResolution(300)
-
-            doc = QTextDocument()
-            doc.setHtml(html)
-
-            scale = 300.0 / 72.0
-            printable_pt = writer.pageLayout().paintRectPoints()
-            doc.setPageSize(QSizeF(printable_pt.width(), printable_pt.height()))
+            writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+            writer.setResolution(72)
 
             painter = QPainter(writer)
-            painter.scale(scale, scale)
-            doc.drawContents(painter, QRectF(0, 0, printable_pt.width(), printable_pt.height()))
+            fn_sans = "Segoe UI"
+            f_title = QFont(fn_sans, 15, QFont.Weight.Bold)
+            f_sub = QFont(fn_sans, 13, QFont.Weight.Bold)
+            f_sec = QFont(fn_sans, 11, QFont.Weight.Bold)
+            f_lbl = QFont(fn_sans, 9.5, QFont.Weight.Normal)
+            f_val = QFont(fn_sans, 9.5, QFont.Weight.Bold)
+            f_mono = QFont("Courier New", 10.5, QFont.Weight.Bold)
+            f_warn_t = QFont(fn_sans, 10, QFont.Weight.Bold)
+            f_warn_b = QFont(fn_sans, 9, QFont.Weight.Normal)
+
+            x_left = 50
+            x_val = 220
+            y = 55
+
+            painter.setPen(QColor("#000000"))
+            painter.setFont(f_title)
+            painter.drawText(x_left, y, "TAXISnet - Υπηρεσίες Πληρωμής")
+            y += 24
+            painter.setFont(f_sub)
+            painter.drawText(x_left, y, "Σημείωμα για Πληρωμή")
+            y += 35
+
+            painter.setFont(f_sec)
+            painter.drawText(x_left, y, "Στοιχεία Οφειλέτη")
+            y += 20
+
+            for lbl_t, val_t, is_m in [("Α.Φ.Μ.", afm, False), ("Ονοματεπώνυμο/ Επωνυμία", name, False)]:
+                painter.setFont(f_lbl)
+                painter.drawText(x_left, y, lbl_t)
+                painter.setFont(f_mono if is_m else f_val)
+                painter.drawText(x_val, y, val_t)
+                y += 18
+
+            y += 15
+            painter.setFont(f_sec)
+            painter.drawText(x_left, y, "Στοιχεία Οφειλής")
+            y += 20
+
+            rows_to = [
+                ("Τύπος Πληρωμής", "Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης", False),
+                ("ΔΟΥ", doy, False),
+                ("Είδος Φόρου", tax_kind, False),
+                ("Ημερολογιακή Περίοδος", period, False),
+                ("Συνολικό ποσό οφειλής δήλωσης", total_due, False),
+            ]
+            if installment and pay_by:
+                rows_to.append((f"Ποσό δόσης δήλωσης της {pay_by}", installment, False))
+            rows_to += [("Ταυτότητα Οφειλής", debt_id, True), ("Ημ/νία Έκδοσης", issued_at, False)]
+
+            for lbl_t, val_t, is_m in rows_to:
+                painter.setFont(f_lbl)
+                painter.drawText(x_left, y, lbl_t)
+                painter.setFont(f_mono if is_m else f_val)
+                painter.drawText(x_val, y, val_t)
+                y += 18
+
+            y += 25
+            painter.setFont(f_warn_t)
+            painter.drawText(x_left, y, "Προσοχή:")
+            y += 16
+            w_text = (
+                "Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε "
+                "μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι "
+                "συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.\n\n"
+                f"{inst_note.replace('<b>', '').replace('</b>', '')}"
+            )
+            painter.setFont(f_warn_b)
+            rect = QRectF(x_left, y, 480, 200)
+            painter.drawText(rect, Qt.TextWordWrap, w_text)
             painter.end()
             del writer
 
@@ -659,9 +824,10 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
                     decl_t = d_info.get("decl_type") or o.filter
                     d_id = d_info.get("db_id") or effective["db_id"]
                     r_view = d_info.get("ret_view") or ret_view_path
+                    fmy_t = d_info.get("fmy_type") or ""
                     base = f"{AADE}/taxisnet/{o.category}/protected/"
                     try:
-                        debt_page = fetch_debt_code_page(ctx, base, decl_t, d_id, r_view)
+                        debt_page = fetch_debt_code_page(ctx, base, decl_t, d_id, r_view, fmy_type=fmy_t)
                         if debt_page:
                             m_debt = label_map(debt_page)
                             if not amounts.get("total_due"):
@@ -796,7 +962,8 @@ def default_keys(business: dict[str, Any], withheld_keys: Optional[set[str]] = N
 
 
 def withheld_keys(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
-    """Δηλώσεις παρακράτησης που οφείλει ο πελάτης κατά τα παραστατικά myDATA του έτους."""
+    """Δηλώσεις παρακράτησης που οφείλει ο πελάτης κατά τα παραστατικά myDATA του έτους
+    ή που έχουν ήδη ελεγχθεί μία φορά (για να μην χάνονται)."""
     from .mydata.analysis import DECLARATION, PAYER_CATEGORIES
     out: set[str] = set()
     for r in conn.execute("SELECT withheld_json FROM mydata_docs WHERE afm=? AND direction='incoming' AND cancelled=0 "
@@ -804,6 +971,12 @@ def withheld_keys(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
         for cat in json.loads(r["withheld_json"] or "{}"):
             if cat in PAYER_CATEGORIES and DECLARATION.get(cat, ("",))[0]:
                 out.add(DECLARATION[cat][0])
+    try:
+        for r in conn.execute("SELECT DISTINCT obligation FROM obligation_checks WHERE afm=? AND year=? AND status!='error'", (afm, year)):
+            if r[0] in ("ΦΜΥ_ΕΠΙΧ", "ΕΡΓΟΛΑΒΩΝ", "ΦΜΥ_ΔΙΚΑΙΩΜΑΤΑ", "ΦΜΥ_ΤΟΚΟΙ", "ΦΜΥ_ΜΕΡΙΣΜΑΤΑ"):
+                out.add(r[0])
+    except Exception:
+        pass
     return out
 
 

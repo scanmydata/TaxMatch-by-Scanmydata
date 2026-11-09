@@ -577,9 +577,12 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
         if ref_month and opt["eligible_from"] > date(int(ref_month[:4]), int(ref_month[5:7]), 1):
             return "no", f"συμπληρώνει 24 μήνες από την έναρξη — επιλογή από {opt['eligible_from'].strftime('%m/%Y')}"
         return "yes", "μηνιαίος ΦΠΑ (Β΄ κατηγορία) — μπορεί να επανέλθει στο τρίμηνο"
-    if rule_id == "parepid_fee" and business.get("parepid") is not None:
-        return (("yes", "επιλογή «Τέλος παρεπιδημούντων» στο Προφίλ") if business["parepid"]
-                else ("no", "ρητά όχι στο Προφίλ («Τέλος παρεπιδημούντων»)"))
+    if rule_id == "parepid_fee":
+        if business.get("parepid") is not None:
+            return (("yes", "επιλογή «Τέλος παρεπιδημούντων» στο Προφίλ") if business["parepid"]
+                    else ("no", "ρητά όχι στο Προφίλ («Τέλος παρεπιδημούντων»)"))
+        if ref_month and _has_submission("parepid_fee", business, ref_month):
+            return "yes", "υποβλήθηκε δήλωση τέλους παρεπιδημούντων (έλεγχος υποβολών)"
     if rule_id == "intrastat":
         if business.get("intrastat") == 0:
             return "no", "ρητά όχι στο Προφίλ («Intrastat»)"
@@ -923,6 +926,8 @@ class Occurrence:
     source_url: str
     conditional: bool = False
     ref_month: str = ""                          # 'YYYY-MM' που αφορά η προθεσμία
+    due_month: int = 0
+    due_year: int = 0
 
 
 def occurrences(start: date, end: date, business: Optional[dict[str, Any]] = None) -> list[Occurrence]:
@@ -941,7 +946,7 @@ def occurrences(start: date, end: date, business: Optional[dict[str, Any]] = Non
                     seen.add(d)
                     period = rule.period(cy, cm) if rule.period else ""
                     out.append(Occurrence(rule.id, rule.title.format(period=period), d, rule.description,
-                                          rule.source_url, status == "maybe", ref))
+                                          rule.source_url, status == "maybe", ref, due_month=cm, due_year=cy))
             cy, cm = (cy + 1, 1) if cm == 12 else (cy, cm + 1)
     out.sort(key=lambda o: (o.date, o.rule_id))
     return out

@@ -390,13 +390,16 @@ def work_items(conn: sqlite3.Connection, year: int, afm: Optional[str] = None) -
         if afm and business["afm"] != afm:
             continue
         for oc in obligations.occurrences(start, end, business):
-            if obligations.check_year(oc.rule_id, oc.ref_month) != year:
+            due_y = getattr(oc, "due_year", 0) or oc.date.year
+            due_m = getattr(oc, "due_month", 0) or oc.date.month
+            if due_y != year and obligations.check_year(oc.rule_id, oc.ref_month) != year and oc.date.year != year:
                 continue
             status, reason = obligations.liability(oc.rule_id, business, oc.ref_month)
             if status == "no":
                 continue
             out.append({"afm": business["afm"], "name": business["name"] or business["afm"],
                         "rule_id": oc.rule_id, "title": oc.title, "date": oc.date.isoformat(),
+                        "due_year": due_y, "due_month": due_m,
                         "ref_month": oc.ref_month, "category": "Μισθοδοσία" if oc.rule_id in payroll else "ΑΑΔΕ",
                         "status": status, "reason": reason,
                         "submission": obligations.submission(oc.rule_id, business, oc.ref_month, due_date=oc.date),

@@ -125,8 +125,10 @@ def diff(known: Optional[dict[str, str]], now: list[dict[str, Any]]) -> dict[str
 
 
 def refresh(conn: sqlite3.Connection, afm: str,
-            login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
+            login_fn: Callable[[str, str], dict] = lookup_aade.aade_login,
+            fetch_files: bool = True) -> dict[str, Any]:
     """Λίστα αιτημάτων του πελάτη → `aade_requests` με σήμανση αλλαγών (αθέατες μέχρι να τις δει ο χρήστης).
+    Αυτόματη άντληση και των συνημμένων αρχείων (του πολίτη και των απαντητικών της ΑΑΔΕ).
     {ok, reason, n, changes: {id: είδος}}."""
     creds = credentials.get(conn, afm)
     if not creds:
@@ -160,6 +162,24 @@ def refresh(conn: sqlite3.Connection, afm: str,
             (afm, r["id"], r["case_no"], r["submitted"], r["updated"], r["status"], r["topic"], r["process"],
              r["service"], r["text"], r["answer"], int(r["rejected"]), r["stamp"], ch, 0 if ch else 1, now))
     _sync(conn, afm, "ok", "")
+
+    # Αυτόματη άντληση και των τυχόν συνημμένων αρχείων (του χρήστη και της ΑΑΔΕ):
+    if fetch_files and login.get("http"):
+        for r in items:
+            req_id = str(r["id"])
+            existing_files = conn.execute("SELECT files_json FROM aade_requests WHERE afm=? AND id=?", (afm, req_id)).fetchone()
+            cur_files = json.loads(existing_files[0]) if (existing_files and existing_files[0]) else None
+            needs_files = (
+                req_id in changes
+                or cur_files is None
+                or any(not Path(f.get("path", "")).exists() for f in cur_files if f.get("path"))
+            )
+            if needs_files:
+                try:
+                    sync_request_detail(conn, login["http"], afm, req_id, with_files=True, mark_seen=False)
+                except Exception as exc:
+                    log.warning("Auto-download files for request %s failed: %s", req_id, exc)
+
     return {"ok": True, "reason": "", "n": len(items), "changes": changes}
 
 
@@ -204,22 +224,16 @@ def requests_dir(afm: str, request_id: str) -> Path:
     return config.data_dir() / "requests" / afm / str(request_id)
 
 
-def open_request(conn: sqlite3.Connection, afm: str, request_id: str, with_files: bool = True,
-                 login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
+def sync_request_detail(conn: sqlite3.Connection, http: Any, afm: str, request_id: str,
+                        with_files: bool = True, mark_seen: bool = False) -> dict[str, Any]:
     """Πλήρες αίτημα + αλληλογραφία + συνημμένα (υποβολής ΚΑΙ απάντησης) σε `<data>/requests/<ΑΦΜ>/<id>/`."""
-    creds = credentials.get(conn, afm)
-    if not creds:
-        return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη."}
-    login = login_fn(*creds)
-    if not login.get("ok"):
-        return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")}
-    http = login["http"]
     http.follow("GET", API + "/getUser")
     r = _post_json(http, API + "/fetch", str(int(request_id)))
-    detail = _json(r["text"])
-    if r["status"] != 200 or not isinstance(detail, dict):
+    detail = _json(r.get("text", ""))
+    if r.get("status") != 200 or not isinstance(detail, dict):
         return {"ok": False, "reason": "Το αίτημα δεν βρέθηκε στην ΑΑΔΕ."}
-    comm = _json(http.follow("GET", f"{API}/getMessageComm/{request_id}")["text"]) or []
+    comm_resp = http.follow("GET", f"{API}/getMessageComm/{request_id}")
+    comm = _json(comm_resp.get("text", "")) or []
     files = files_of(detail.get("messageFiles")) + [f for f in files_of(comm, "commFile")
                                                     if not any(str(f["fileId"]) == str(x["fileId"])
                                                                for x in files_of(detail.get("messageFiles")))]
@@ -228,21 +242,42 @@ def open_request(conn: sqlite3.Connection, afm: str, request_id: str, with_files
         if not with_files:
             continue
         have = next(iter(folder.glob(f"{f['fileId']}_*")), None) if folder.exists() else None
-        if have is not None:                            # κατέβηκε ήδη — τα συνημμένα δεν αλλάζουν
+        if have is not None and have.stat().st_size > 0:
             f["path"] = str(have)
             continue
-        got = http.follow("GET", f"{API}/downloadFile/{f['fileId']}")
-        content = got.get("content") or b""
-        if got.get("status", 200) != 200 or not content:
-            f["error"] = f"HTTP {got.get('status')}"
-            continue
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{f['fileId']}_{safe_name(f['fileName'], got.get('ct', ''))}"
-        path.write_bytes(content)
-        f["path"] = str(path)
-    conn.execute("UPDATE aade_requests SET files_json=?, seen=1 WHERE afm=? AND id=?",
+        try:
+            got = http.follow("GET", f"{API}/downloadFile/{f['fileId']}")
+            content = got.get("content") or b""
+            if got.get("status", 200) != 200 or not content:
+                f["error"] = f"HTTP {got.get('status')}"
+                continue
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{f['fileId']}_{safe_name(f['fileName'], got.get('ct', ''))}"
+            path.write_bytes(content)
+            f["path"] = str(path)
+        except Exception as exc:
+            f["error"] = str(exc)[:80]
+            log.warning("Download request file %s failed: %s", f.get("fileId"), exc)
+
+    seen_sql = ", seen=1" if mark_seen else ""
+    conn.execute(f"UPDATE aade_requests SET files_json=?{seen_sql} WHERE afm=? AND id=?",
                  (json.dumps(files, ensure_ascii=False), afm, str(request_id)))
     return {"ok": True, "reason": "", "detail": detail, "comm": comm, "files": files}
+
+
+def open_request(conn: sqlite3.Connection, afm: str, request_id: str, with_files: bool = True,
+                 login_fn: Callable[[str, str], dict] = lookup_aade.aade_login,
+                 http: Any = None) -> dict[str, Any]:
+    """Πλήρες αίτημα + αλληλογραφία + συνημμένα (υποβολής ΚΑΙ απάντησης) σε `<data>/requests/<ΑΦΜ>/<id>/`."""
+    if http is None:
+        creds = credentials.get(conn, afm)
+        if not creds:
+            return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη."}
+        login = login_fn(*creds)
+        if not login.get("ok"):
+            return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")}
+        http = login["http"]
+    return sync_request_detail(conn, http, afm, request_id, with_files=with_files, mark_seen=True)
 
 
 def client_requests(conn: sqlite3.Connection, afm: str) -> list[dict[str, Any]]:
