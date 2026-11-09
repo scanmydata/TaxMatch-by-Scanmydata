@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
@@ -31,6 +31,8 @@ class _ToastItem(QFrame):
         super().__init__()
         self.setObjectName("toastItem")
         self.set_level(level)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setToolTip("Σύρετε για μετακίνηση της ειδοποίησης")
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 10, 6, 10)
         col = QVBoxLayout()
@@ -104,6 +106,38 @@ class _ToastItem(QFrame):
             f"border-left:4px solid {colour}; border-radius:10px; }}"
         )
 
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            p = self.parentWidget()
+            while p and not isinstance(p, ToastHost):
+                p = p.parentWidget()
+            if p and hasattr(p, "_start_drag"):
+                p._start_drag(event.globalPosition().toPoint())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            p = self.parentWidget()
+            while p and not isinstance(p, ToastHost):
+                p = p.parentWidget()
+            if p and hasattr(p, "_do_drag"):
+                p._do_drag(event.globalPosition().toPoint())
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        p = self.parentWidget()
+        while p and not isinstance(p, ToastHost):
+            p = p.parentWidget()
+        if p and getattr(p, "_dragging", False):
+            p._end_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 class ToastHost(QWidget):
     """Μία στοίβα toasts, πάνω-δεξιά μέσα στο παράθυρο-γονέα (ρητό αίτημα χρήστη, 2026-09-22 — πιο κοντά στο
@@ -115,12 +149,37 @@ class ToastHost(QWidget):
     def __init__(self, host: QWidget) -> None:
         super().__init__(host)
         self._host = host
+        self._custom_pos: Optional[QPoint] = None
+        self._dragging = False
+        self._drag_start: Optional[QPoint] = None
+        self._drag_start_pos: Optional[QPoint] = None
         self.setFixedWidth(self._WIDTH)
         self._box = QVBoxLayout(self)
         self._box.setContentsMargins(0, 0, 0, 0)
         self._box.setSpacing(8)
         self.hide()
         host.installEventFilter(self)
+
+    def _start_drag(self, global_pt: QPoint) -> None:
+        self._dragging = True
+        self._drag_start = global_pt
+        self._drag_start_pos = self.pos()
+
+    def _do_drag(self, global_pt: QPoint) -> None:
+        if not getattr(self, "_dragging", False) or not self._drag_start or not self._drag_start_pos:
+            return
+        delta = global_pt - self._drag_start
+        new_x = self._drag_start_pos.x() + delta.x()
+        new_y = self._drag_start_pos.y() + delta.y()
+        max_x = max(0, self._host.width() - self.width())
+        max_y = max(0, self._host.height() - self.height())
+        new_x = max(0, min(new_x, max_x))
+        new_y = max(0, min(new_y, max_y))
+        self._custom_pos = QPoint(new_x, new_y)
+        self.move(self._custom_pos)
+
+    def _end_drag(self) -> None:
+        self._dragging = False
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         # getattr: το φίλτρο μπορεί να κληθεί και κατά τη δημιουργία/καταστροφή, πριν οριστεί (ή αφού χαθεί) το `_host`
@@ -146,6 +205,15 @@ class ToastHost(QWidget):
             h = self._box.totalHeightForWidth(self._WIDTH)
         else:
             h = self._box.totalSizeHint().height()
+        if getattr(self, "_custom_pos", None) is not None:
+            max_x = max(0, self._host.width() - self._WIDTH)
+            max_y = max(0, self._host.height() - max(h, 1))
+            x = max(0, min(self._custom_pos.x(), max_x))
+            y = max(0, min(self._custom_pos.y(), max_y))
+            if self.geometry().getRect() != (x, y, self._WIDTH, max(h, 1)):
+                self.setGeometry(x, y, self._WIDTH, max(h, 1))
+            self.raise_()
+            return
         x = self._host.width() - self._WIDTH - self._MARGIN
         is_main = isinstance(self._host, QMainWindow)
         # Στο MainWindow αφήνουμε επαρκή απόσταση (68px) από το πάνω header/αναζήτηση ώστε να μη στριμώχνονται

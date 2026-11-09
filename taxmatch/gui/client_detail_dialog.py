@@ -155,6 +155,11 @@ class ClientDetailDialog(QDialog):
         self._reload()
         if tab in self._detail_tab_indices:                  # π.χ. από την ειδοποίηση αιτημάτων σε εκκρεμότητα
             tabs.setCurrentIndex(self._detail_tab_indices[tab])
+        if self.main is not None and getattr(self.main, "_active_client_lookups", None):
+            lookup_info = self.main._active_client_lookups.get(self.afm)
+            if lookup_info:
+                lookup_info.setdefault("dialogs", []).append(self)
+                self.busy.start(lookup_info.get("progress_text", "Ανάκτηση στοιχείων σε εξέλιξη…"))
 
     def _add_lazy_detail_tab(self, tabs: QTabWidget, name: str, label: str, tab_icon, factory) -> None:
         placeholder = QWidget()
@@ -1180,32 +1185,58 @@ class ClientDetailDialog(QDialog):
         afm = self.afm
         client_name = self.client_name_label.text() or afm
 
-        def work(_progress):
+        info = {
+            "status": "running",
+            "progress_text": "Ανάκτηση στοιχείων… (10%)",
+            "dialogs": [self],
+            "client_name": client_name,
+        }
+        if main_win is not None:
+            if not hasattr(main_win, "_active_client_lookups"):
+                main_win._active_client_lookups = {}
+            main_win._active_client_lookups[afm] = info
+
+        def work(progress):
             conn = dbmod.connect()  # δικό του thread — το self.conn δημιουργήθηκε στο UI thread
             try:
+                def on_prog(msg: str):
+                    progress(msg)
                 try:
-                    out = clients.lookup_and_store(conn, afm)
+                    out = clients.lookup_and_store(conn, afm, on_progress=on_prog)
                 except KeyError:
                     return None
+                progress("98% — Ενημέρωση υποχρεώσεων & αντιστοίχιση…")
                 engine.rematch(conn)
                 return out
             finally:
                 conn.close()
 
+        def prog_update(msg: str):
+            info["progress_text"] = f"Ανάκτηση στοιχείων…\n{msg}"
+            for d in list(info.get("dialogs", [])):
+                try:
+                    if d.isVisible():
+                        d.busy.start(info["progress_text"])
+                except Exception:
+                    pass
+
         def done(_out):
+            if main_win is not None and hasattr(main_win, "_active_client_lookups"):
+                main_win._active_client_lookups.pop(afm, None)
             dlg_alive = False
-            try:
-                if self.isVisible():
-                    dlg_alive = True
-                    self.busy.stop()
-                    toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
-                    self._reload()
-            except (RuntimeError, Exception):
-                dlg_alive = False
+            for d in list(info.get("dialogs", [])):
+                try:
+                    if d.isVisible():
+                        dlg_alive = True
+                        d.busy.stop()
+                        toast(d, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
+                        d._reload()
+                except Exception:
+                    pass
 
             if main_win is not None:
                 if not dlg_alive:
-                    toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) ολοκληρώθηκε.", "ok")
+                    toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) ολοκληρώθηκε (100%).", "ok")
                 try:
                     main_win._apply_client_filter()
                     main_win._render_calendar_from_db()
@@ -1214,22 +1245,25 @@ class ClientDetailDialog(QDialog):
                     pass
 
         def failed(m):
+            if main_win is not None and hasattr(main_win, "_active_client_lookups"):
+                main_win._active_client_lookups.pop(afm, None)
             dlg_alive = False
-            try:
-                if self.isVisible():
-                    dlg_alive = True
-                    self.busy.stop()
-                    toast(self, m, "danger")
-            except (RuntimeError, Exception):
-                dlg_alive = False
+            for d in list(info.get("dialogs", [])):
+                try:
+                    if d.isVisible():
+                        dlg_alive = True
+                        d.busy.stop()
+                        toast(d, m, "danger")
+                except Exception:
+                    pass
 
             if main_win is not None and not dlg_alive:
                 toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) απέτυχε: {m}", "danger")
 
         toast(self, "Ξεκίνησε η ανάκτηση στοιχείων του πελάτη…", "info")
-        self.busy.start("Ανάκτηση στοιχείων…")
+        self.busy.start(info["progress_text"])
         runner = main_win if main_win is not None else self
-        self._tasks.append(run_task(runner, work, on_done=done, on_error=failed))
+        self._tasks.append(run_task(runner, work, on_progress=prog_update, on_done=done, on_error=failed))
 
     def closeEvent(self, event) -> None:
         if getattr(self, "busy", None) and getattr(self.busy, "running", False) and self.main is not None:

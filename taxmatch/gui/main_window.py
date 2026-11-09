@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
         self.notice_btn.setToolTip("Κέντρο ειδοποιήσεων")
         self.notice_btn.toggled.connect(self._toggle_notice_panel)
         quick_row.insertWidget(quick_row.count() - 1, self.notice_btn)
-        self.notice_panel = QFrame(self)
+        self.notice_panel = QFrame(central)
         self.notice_panel.setObjectName("noticeCenter")
         panel = QVBoxLayout(self.notice_panel)
         panel.setContentsMargins(16, 12, 16, 14)
@@ -525,10 +525,12 @@ class MainWindow(QMainWindow):
     def _reposition_notice_panel(self) -> None:
         if not hasattr(self, "notice_btn") or not hasattr(self, "notice_panel"):
             return
-        btn_pos = self.notice_btn.mapTo(self, QPoint(0, self.notice_btn.height()))
-        panel_width = min(560, max(360, self.width() - 48))
+        parent_widget = self.notice_panel.parentWidget() or self
+        btn_pos = self.notice_btn.mapTo(parent_widget, QPoint(0, self.notice_btn.height()))
+        parent_width = parent_widget.width()
+        panel_width = min(560, max(360, parent_width - 48))
         x = btn_pos.x() + self.notice_btn.width() - panel_width
-        x = max(16, min(x, self.width() - panel_width - 16))
+        x = max(16, min(x, parent_width - panel_width - 16))
         y = btn_pos.y() + 6
         self.notice_panel.setGeometry(x, y, panel_width, min(420, max(130, self.notice_panel.sizeHint().height())))
         self.notice_panel.raise_()
@@ -1720,9 +1722,25 @@ class MainWindow(QMainWindow):
         dlg.exec()
         if dlg.choice not in ("lookup", "import"):
             return
-        backup_mod.create_backup(config.db_path(), reason="import")
-        out = clients.import_result(self.conn, res)
-        engine.rematch(self.conn)
+
+        self.busy.start(f"Εισαγωγή {len(res.rows)} πελατών και επεξεργασία…")
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        try:
+            self.busy.start("Δημιουργία αντιγράφου ασφαλείας βάσης…")
+            QApplication.processEvents()
+            backup_mod.create_backup(config.db_path(), reason="import")
+
+            self.busy.start(f"Εισαγωγή {len(res.rows)} πελατών στη βάση…")
+            QApplication.processEvents()
+            out = clients.import_result(self.conn, res)
+
+            self.busy.start("Αντιστοίχιση εγκυκλίων και υποχρεώσεων…")
+            QApplication.processEvents()
+            engine.rematch(self.conn)
+        finally:
+            self.busy.stop()
+
         existing = sum(1 for p in preview if p["action"] != "new")
         toast(self, f"Προστέθηκαν {out['added']} νέοι πελάτες"
                     + (f" · {existing} υπήρχαν ήδη ({sum(1 for p in preview if p['action'] == 'update')} ενημερώθηκαν)"
@@ -1732,6 +1750,8 @@ class MainWindow(QMainWindow):
                     + (f" Κωδικοί myDATA: {out['mydata']}." if out["mydata"] else "")
                     + (f" ΙΚΑ εργοδότη/ΑΜΕ: {out['ika']}." if out["ika"] else ""), "ok")
         self.reload_clients()
+        self._render_calendar_from_db()
+        self.reload_dashboard()
         self._refresh_status_bar()
         if dlg.choice == "lookup":
             self._start_lookup(lookup_afms)

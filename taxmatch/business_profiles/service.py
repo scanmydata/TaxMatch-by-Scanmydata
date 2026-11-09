@@ -310,7 +310,8 @@ def lookup_many(afms: list[str], on_each: Optional[Callable[[str, int, dict[str,
 def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[requests.Session] = None,
                      aade_fetch: Callable[..., dict] = lookup_aade.fetch_company_profile,
                      amka_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None,
-                     ame_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None) -> dict[str, Any]:
+                     ame_fetch: Optional[Callable[[sqlite3.Connection, str], dict]] = None,
+                     on_progress: Optional[Callable[[str], None]] = None) -> dict[str, Any]:
     """Ανάκτηση στοιχείων πελάτη. Σειρά: Μητρώο ΑΑΔΕ (ΚΑΔ, κατάσταση/διακοπή, ΔΟΥ, ΦΠΑ, βιβλία, είδος) → ΓΕΜΗ ως fallback
     (ΚΑΔ όταν λείπουν, νομική μορφή νομικών προσώπων) → VIES (επωνυμία). Κάθε πηγή είναι προαιρετική.
     Επιστρέφει {'status', 'errors', 'sources', 'issues'} και ενημερώνει τη γραμμή. `issues`: [{'code', 'message'}] με
@@ -325,6 +326,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     attempted = False
     definitive = False        # κάποια πηγή απάντησε οριστικά (όχι απλώς σφάλμα δικτύου)
 
+    if on_progress:
+        on_progress("15% — Σύνδεση στο Μητρώο ΑΑΔΕ…")
     # ---- 1. Μητρώο ΑΑΔΕ
     aade: Optional[dict[str, Any]] = None
     attempts = _aade_attempts(conn, afm)
@@ -378,6 +381,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
                        "legal_form": aade.get("legal_form") or "", "status": _aade_status_label(aade)}
         sources.append("ΑΑΔΕ")
 
+    if on_progress:
+        on_progress("50% — Επεξεργασία στοιχείων ΑΑΔΕ…")
     # ---- 2. ΓΕΜΗ: fallback (ΚΑΔ που λείπουν, νομική μορφή νομικών προσώπων, όταν η ΑΑΔΕ δεν απάντησε)
     gemi_fields: dict[str, Any] = {}
     gemi_state: dict[str, str] = {}
@@ -413,6 +418,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     if aade_fields.get("status"):
         fields["status"] = aade_fields["status"]
 
+    if on_progress:
+        on_progress("70% — Έλεγχος στοιχείων Γ.Ε.ΜΗ. / VIES…")
     # ---- 3. VIES: επωνυμία/διεύθυνση χωρίς key — μόνο αν καμία άλλη πηγή δεν έδωσε όνομα (και δεν υπάρχει ήδη)
     current = conn.execute("SELECT name, legal_form FROM businesses WHERE afm=?", (afm,)).fetchone()
     if not fields.get("name") and not current["name"]:
@@ -499,6 +506,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     if amka_fetch is None and aade_fetch is lookup_aade.fetch_company_profile:     # πραγματική ανάκτηση (όχι tests)
         from .. import efka
         amka_fetch = efka.retrieve_amka
+    if on_progress:
+        on_progress("85% — Έλεγχος ασφαλιστικών στοιχείων (myAMKA / e-ΕΦΚΑ)…")
     if amka_fetch is not None and aade and aade.get("kind") != "ΝΟΜΙΚΟ ΠΡΟΣΩΠΟ" and credentials.get(conn, afm):
         # Φυσικό πρόσωπο (ιδιώτης, μέλος, ατομική) με δικούς του κωδικούς: και ο ΑΜΚΑ από το myAMKA, αν λείπει — τον
         # θέλουν ΚΕΑΟ / εισφορές e-ΕΦΚΑ (ρητό αίτημα 2026-10-27). Ποτέ αποτυχία της ανάκτησης στοιχείων εξαιτίας του.
@@ -566,6 +575,8 @@ def lookup_and_store(conn: sqlite3.Connection, afm: str, session: Optional[reque
     sets += ["lookup_status=?", "lookup_error=?", "lookup_raw=?", "lookup_at=?", "updated_at=?"]
     args += [status, "; ".join(errors), json.dumps(raw, ensure_ascii=False)[:200_000], now, now, afm]
     conn.execute(f"UPDATE businesses SET {', '.join(sets)} WHERE afm=?", args)
+    if on_progress:
+        on_progress("100% — Ολοκλήρωση ανάκτησης")
     return {"status": status, "errors": errors, "sources": sources, "issues": issues}
 
 
