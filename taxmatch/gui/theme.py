@@ -171,9 +171,8 @@ QFrame#card {{
 QFrame#line {{ background: {p.line}; max-height: 1px; border: none; }}
 QFrame#noticeCenter {{
     background: {p.panel};
-    border: 1px solid {p.line};
+    border: 1.5px solid {p.accent_deep};
     border-radius: 12px;
-    margin: 8px 0px 12px 0px;
 }}
 QFrame#banner {{
     background: {p.chip};

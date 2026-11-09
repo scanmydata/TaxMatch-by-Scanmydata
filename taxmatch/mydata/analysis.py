@@ -319,9 +319,11 @@ def advert_docs(conn: sqlite3.Connection, afm: str, ym: str) -> list[dict[str, A
 def google_ads_docs(conn: sqlite3.Connection, afm: str, ym: str) -> int:
     """Πλήθος 14.3 (ενδοκοινοτική λήψη υπηρεσιών) από Google / Meta τον μήνα."""
     n = 0
-    for r in conn.execute("SELECT issuer_vat, counter_vat FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
+    for r in conn.execute("SELECT issuer_vat, counter_vat, issuer_name FROM mydata_docs WHERE afm=? AND cancelled=0 AND "
                           "substr(issue_date,1,7)=? AND invoice_type=?", (afm, ym, GOOGLE_TYPE)):
-        if {_vat_digits(r["issuer_vat"]), _vat_digits(r["counter_vat"])} & set(AD_PLATFORM_VATS):
+        vats = {_vat_digits(r["issuer_vat"]), _vat_digits(r["counter_vat"])}
+        name = (r["issuer_name"] or "").upper()
+        if (vats & set(AD_PLATFORM_VATS)) or any(k in name for k in ("GOOGLE", "META PLATFORMS", "FACEBOOK")):
             n += 1
     return n
 
@@ -342,6 +344,8 @@ def _month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]
                 "vies_in": bool(flows["goods_in"] or flows["services_in"]),
                 "intrastat": intra["any"],
                 "intrastat_reason": intra["reason"], "intrastat_flows": intra["flows_label"],
+                "goods_in": bool(flows["goods_in"] > 0),
+                "goods_out": bool(flows["goods_out"] > 0 or flows["goods_out_b2c"] > 0),
                 "withholding": bool(withholding(conn, afm, ym)),
                 "climate": fees["climate_docs"] > 0 or extra["stay"] > 0,
                 "digital_fee": fees["digital_fee"] > 0,

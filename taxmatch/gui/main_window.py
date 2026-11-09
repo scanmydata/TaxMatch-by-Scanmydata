@@ -465,14 +465,14 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QKeySequence, QShortcut
         QShortcut(QKeySequence("Ctrl+K"), self, activated=lambda: (self.quick_search.setFocus(), self.quick_search.selectAll()))
 
-        # Κέντρο ειδοποιήσεων (ρητό αίτημα 2026-11-04): αντί για banner που «έτρωγαν» την οθόνη, ένα κουμπί 🔔 με
-        # μετρητή στην πάνω μπάρα ανοίγει/κλείνει πάνελ με όλες τις ειδοποιήσεις και τις ενέργειές τους.
+        # Κέντρο ειδοποιήσεων (overlay πάνω από το περιεχόμενο, ρητό αίτημα): ένα κουμπί 🔔 με
+        # μετρητή στην πάνω μπάρα ανοίγει/κλείνει overlay πάνελ με όλες τις ειδοποιήσεις χωρίς να μετατοπίζει το layout.
         self.notice_btn = QPushButton("🔔")
         self.notice_btn.setCheckable(True)
         self.notice_btn.setToolTip("Κέντρο ειδοποιήσεων")
-        self.notice_btn.toggled.connect(lambda on: self.notice_panel.setVisible(on))
+        self.notice_btn.toggled.connect(self._toggle_notice_panel)
         quick_row.insertWidget(quick_row.count() - 1, self.notice_btn)
-        self.notice_panel = QFrame()
+        self.notice_panel = QFrame(self)
         self.notice_panel.setObjectName("noticeCenter")
         panel = QVBoxLayout(self.notice_panel)
         panel.setContentsMargins(16, 12, 16, 14)
@@ -489,7 +489,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMaximumHeight(300)
+        scroll.setMaximumHeight(320)
         holder = QWidget()
         self.notices_box = QVBoxLayout(holder)
         self.notices_box.setContentsMargins(2, 2, 2, 2)
@@ -497,7 +497,6 @@ class MainWindow(QMainWindow):
         scroll.setWidget(holder)
         panel.addWidget(scroll)
         self.notice_panel.hide()
-        root.addWidget(self.notice_panel)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -514,6 +513,30 @@ class MainWindow(QMainWindow):
         self.status.setObjectName("muted")
         root.addWidget(self.status)
         self.menu.set_active("dashboard")
+
+    def _toggle_notice_panel(self, on: bool) -> None:
+        if on:
+            self._reposition_notice_panel()
+            self.notice_panel.raise_()
+            self.notice_panel.show()
+        else:
+            self.notice_panel.hide()
+
+    def _reposition_notice_panel(self) -> None:
+        if not hasattr(self, "notice_btn") or not hasattr(self, "notice_panel"):
+            return
+        btn_pos = self.notice_btn.mapTo(self, QPoint(0, self.notice_btn.height()))
+        panel_width = min(560, max(360, self.width() - 48))
+        x = btn_pos.x() + self.notice_btn.width() - panel_width
+        x = max(16, min(x, self.width() - panel_width - 16))
+        y = btn_pos.y() + 6
+        self.notice_panel.setGeometry(x, y, panel_width, min(420, max(130, self.notice_panel.sizeHint().height())))
+        self.notice_panel.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "notice_panel") and self.notice_panel.isVisible():
+            self._reposition_notice_panel()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1275,7 +1298,7 @@ class MainWindow(QMainWindow):
             return
         actions = {"lookup": lambda: self._start_lookup(afms),
                    "submissions": lambda: self.on_check_submissions(want_pdf=dlg.want_pdf),
-                   "mydata": lambda: self.on_fetch_mydata(range_code=dlg.mydata_range, pdf_directions=dlg.mydata_pdf_directions),
+                   "mydata": lambda: self.on_fetch_mydata(range_code=dlg.mydata_range, pdf_directions=dlg.mydata_pdf_directions, unclassified_only=dlg.mydata_unclassified_only),
                    "debts": self.on_fetch_debts, "requests": self.on_fetch_requests}
         for key in dlg.chosen:
             actions[key]()
@@ -1558,7 +1581,7 @@ class MainWindow(QMainWindow):
         self.jobs.submit(f"αιτήματα ΑΑΔΕ — {total} {'πελάτης' if total == 1 else 'πελάτες'}", work, total=total,
                          window=window, on_done=done, afms=afms)
 
-    def on_fetch_mydata(self, range_code: str = "3m", pdf_directions: Optional[list[str]] = None) -> None:
+    def on_fetch_mydata(self, range_code: str = "3m", pdf_directions: Optional[list[str]] = None, unclassified_only: bool = False) -> None:
         """Μαζική λήψη myDATA: διάστημα επιλογής χρήστη και τυχόν λήψη PDF εσόδων/εξόδων."""
         from datetime import date
         from ..mydata import credentials as mydata_creds, store as mydata_store
@@ -1581,11 +1604,12 @@ class MainWindow(QMainWindow):
             months = mydata_store.previous_months(cur_ym, 24)
         else:
             months = None
-        self.run_mydata_sync(afms, months=months, pdf_directions=pdf_directions)
+        self.run_mydata_sync(afms, months=months, pdf_directions=pdf_directions, unclassified_only=unclassified_only)
 
     def run_mydata_sync(self, afms: list[str], months: Optional[list[str]] = None, window: Optional[QWidget] = None,
                         on_done: Optional[Callable[[], None]] = None, pdfs: bool = False,
-                        pdf_directions: Optional[list[str]] = None, title: str = "") -> None:
+                        pdf_directions: Optional[list[str]] = None, title: str = "",
+                        unclassified_only: bool = False) -> None:
         """Λήψη myDATA στην ουρά εργασιών, ένας πελάτης τη φορά (η ΑΑΔΕ απαντά 429 σε πολλά παράλληλα). `months=None`:
         έξυπνη επιλογή (`store.months_to_refresh`). `pdfs` / `pdf_directions`: κατεβαίνουν και τα PDF (εσόδων/εξόδων)."""
         from ..mydata import names as mydata_names, pdfs as mydata_pdfs, store as mydata_store
@@ -1623,7 +1647,7 @@ class MainWindow(QMainWindow):
                             if cancelled():
                                 break
                             report(f"Λήψη PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
-                            mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled)
+                            mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled, unclassified_only=unclassified_only)
                             cur_step += 1
                             report(f"Ολοκληρώθηκε PDF {ym} — {names.get(afm, afm)}", cur_step, total_steps)
                     state["done"] = 1 if not cancelled() else 0
@@ -1646,7 +1670,7 @@ class MainWindow(QMainWindow):
                                 if cancelled():
                                     break
                                 report(f"PDF {ym} — {names.get(afm, afm)}", i - 1, total)
-                                mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled)
+                                mydata_pdfs.download_month(conn, afm, ym, directions=pdf_directions, should_cancel=cancelled, unclassified_only=unclassified_only)
                         state["done"] = i
                         report(f"Λήψη myDATA {i}/{total} — {names.get(afm, afm)}", i, total)
                     report("Επωνυμίες αντισυμβαλλομένων (VIES)…", state["done"], total)

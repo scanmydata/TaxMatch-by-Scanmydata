@@ -106,15 +106,24 @@ class ChecksDialog(QDialog):
                 self.mydata_pdf_expenses_box = QCheckBox("και λήψη PDF παραστατικών εξόδων (ληφθέντα)")
                 self.mydata_pdf_expenses_box.setToolTip("Κατεβάζει τα PDF των ληφθέντων τιμολογίων στον φάκελο invoices")
                 self.mydata_pdf_expenses_box.setChecked(str(self._prefs.value("checks/mydata_pdf_expenses", "0")) == "1")
-                self.mydata_pdf_expenses_box.setContentsMargins(26, 0, 0, 4)
+                self.mydata_pdf_expenses_box.setContentsMargins(26, 0, 0, 2)
                 self.mydata_pdf_expenses_box.setStyleSheet("margin-left:26px;")
                 root.addWidget(self.mydata_pdf_expenses_box)
+
+                # Μόνο αχαρακτήριστα (τα υπόλοιπα σε αναμονή)
+                self.mydata_unclassified_box = QCheckBox("λήψη μόνο των αχαρακτήριστων εξόδων/εσόδων (τα υπόλοιπα σε αναμονή)")
+                self.mydata_unclassified_box.setToolTip("Κατεβάζει PDF ΜΟΝΟ για τα αχαρακτήριστα παραστατικά (έξοδα/έσοδα) — τα υπόλοιπα παραμένουν σε αναμονή για πολύ πιο γρήγορη διαδικασία")
+                self.mydata_unclassified_box.setChecked(str(self._prefs.value("checks/mydata_unclassified", "0")) == "1")
+                self.mydata_unclassified_box.setContentsMargins(26, 0, 0, 4)
+                self.mydata_unclassified_box.setStyleSheet("margin-left:26px;")
+                root.addWidget(self.mydata_unclassified_box)
 
                 def sync_mydata(on: bool) -> None:
                     range_lbl.setEnabled(on)
                     self.mydata_range_combo.setEnabled(on)
                     self.mydata_pdf_income_box.setEnabled(on)
                     self.mydata_pdf_expenses_box.setEnabled(on)
+                    self.mydata_unclassified_box.setEnabled(on)
 
                 box.toggled.connect(sync_mydata)
                 sync_mydata(box.isChecked())
@@ -164,6 +173,10 @@ class ChecksDialog(QDialog):
         return "3m"
 
     @property
+    def mydata_unclassified_only(self) -> bool:
+        return bool(self.boxes.get("mydata") and self.boxes["mydata"].isChecked() and hasattr(self, "mydata_unclassified_box") and self.mydata_unclassified_box.isChecked())
+
+    @property
     def mydata_pdf_directions(self) -> list[str]:
         dirs: list[str] = []
         if self.boxes.get("mydata") and self.boxes["mydata"].isChecked():
@@ -182,6 +195,8 @@ class ChecksDialog(QDialog):
             self._prefs.setValue("checks/mydata_pdf_income", "1" if self.mydata_pdf_income_box.isChecked() else "0")
         if hasattr(self, "mydata_pdf_expenses_box"):
             self._prefs.setValue("checks/mydata_pdf_expenses", "1" if self.mydata_pdf_expenses_box.isChecked() else "0")
+        if hasattr(self, "mydata_unclassified_box"):
+            self._prefs.setValue("checks/mydata_unclassified", "1" if self.mydata_unclassified_box.isChecked() else "0")
         for key, box in self.boxes.items():
             if key != "lookup":                          # η ανανέωση προτείνεται κάθε φορά από τα ελλιπή στοιχεία
                 self._prefs.setValue(f"checks/{key}", "1" if box.isChecked() else "0")

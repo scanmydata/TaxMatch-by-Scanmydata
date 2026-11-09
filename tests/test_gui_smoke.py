@@ -1188,7 +1188,7 @@ def test_client_mydata_tab_lists_documents_and_withholding(window, conn):
                  (AFM, "1", "incoming", "2.1", f"{ym}-05", "111111111", "ΣΥΜΒΟΥΛΟΣ", 1000, 1000, 200, '{"3": 200}', "x"))
     conn.execute("INSERT INTO mydata_sync(afm, ym, synced_at, n_docs) VALUES (?,?,?,1)", (AFM, ym, "x"))
     dlg.mydata.reload()
-    assert dlg.mydata.table.rowCount() == 1 and dlg.mydata.table.item(0, 3).text() == "ΣΥΜΒΟΥΛΟΣ"
+    assert dlg.mydata.table.rowCount() == 1 and dlg.mydata.table.item(0, 4).text() == "ΣΥΜΒΟΥΛΟΣ"
     assert "200,00 €" in dlg.mydata.summary.text() and "επιχειρηματικής" in dlg.mydata.summary.text()
     assert "δεκτοί" not in dlg.mydata.creds_status.text() and dlg.mydata.user.text() == "u"
     dlg.deleteLater()

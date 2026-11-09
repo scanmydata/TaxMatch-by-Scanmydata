@@ -106,12 +106,21 @@ def file_name(doc: dict) -> str:
     return "_".join(parts) + ".pdf"
 
 
+def _detail(d: dict[str, Any]) -> dict[str, Any]:
+    import json
+    try:
+        return json.loads(d.get("detail_json") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
 def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optional[Callable[[int, int], None]] = None,
                    fetch: Callable[[str], bytes] = None,
                    should_cancel: Optional[Callable[[], bool]] = None,
                    marks: Optional[list[str]] = None,
                    render: Optional[Callable[[list[str]], dict[str, bytes]]] = None,
-                   directions: Optional[list[str]] = None) -> dict[str, int]:
+                   directions: Optional[list[str]] = None,
+                   unclassified_only: bool = False) -> dict[str, int]:
     """PDF όλων των παραστατικών του μήνα ('2026-03') — ή όλης της χρήσης ('2026') — που δεν έχουν ήδη κατέβει
     (`marks`: μόνο αυτά — π.χ. «Λήψη PDF» από την καρτέλα παραστατικού).
     Επιστρέφει πλήθη ανά κατάσταση. Τα «μόνο online» (ο πάροχος δεν δίνει αρχείο) περνούν ΜΙΑ φορά από αόρατο
@@ -165,6 +174,16 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
                 if on_each:
                     on_each(processed, total_docs)
             else:
+                if unclassified_only:
+                    det = _detail(doc)
+                    has_cls = bool(det.get("summary_classifications") or [c for line in det.get("lines", []) for c in line.get("classifications", [])])
+                    if has_cls:
+                        # Ήδη χαρακτηρισμένο: τίθεται σε αναμονή (γρήγορη έξυπνη λήψη)
+                        counts["viewer"] += 1
+                        processed += 1
+                        if on_each:
+                            on_each(processed, total_docs)
+                        continue
                 to_fetch.append(doc)
 
         if to_fetch and not (should_cancel and should_cancel()):
@@ -231,17 +250,18 @@ def _headless_render(urls: list[str]) -> dict[str, bytes]:
     """Όσα από τα URL γίνονται PDF στον αόρατο browser (ένας browser για όλα). {} αν δεν υπάρχει Edge/Chrome."""
     from . import headless
     out: dict[str, bytes] = {}
-    if not urls or not headless.available():
+    if not urls:
         return out
-    try:
-        with headless.HeadlessRenderer() as renderer:
-            for url in dict.fromkeys(urls):
-                try:
-                    out[url] = renderer.render(url)
-                except (headless.RenderError, OSError, ValueError, KeyError) as exc:
-                    log.info("headless %s: %s", urlparse(url).netloc, exc)
-    except (headless.RenderError, OSError) as exc:
-        log.warning("headless browser: %s", exc)
+    if headless.available():
+        try:
+            with headless.HeadlessRenderer() as renderer:
+                for url in dict.fromkeys(urls):
+                    try:
+                        out[url] = renderer.render(url)
+                    except (headless.RenderError, OSError, ValueError, KeyError) as exc:
+                        log.info("headless %s: %s", urlparse(url).netloc, exc)
+        except (headless.RenderError, OSError) as exc:
+            log.warning("headless browser: %s", exc)
     # τρίτο πέρασμα (όπως το timologio): πραγματικός Chrome εκτός οθόνης μέσω undetected-chromedriver, για τα
     # παραστατικά πίσω από Cloudflare Turnstile (Epsilon DocViewer) που δεν στοιχειοθετούνται σε headless
     rest = [u for u in dict.fromkeys(urls) if u not in out]
@@ -252,14 +272,22 @@ def _headless_render(urls: list[str]) -> dict[str, bytes]:
 
 def _stealth_render(urls: list[str]) -> dict[str, bytes]:
     from . import stealth
+    import tempfile, shutil
     out: dict[str, bytes] = {}
-    if not stealth.available():
+    if not urls or not stealth.available():
         return out
+    download_dir = Path(tempfile.mkdtemp(prefix="tm_stealth_dl_"))
     try:
-        with stealth.StealthRenderer() as renderer:
-            for url in urls:
+        with stealth.StealthRenderer(hidden=True) as renderer:
+            for url in dict.fromkeys(urls):
                 try:
-                    data = renderer.render_pdf(url)
+                    data = None
+                    host = urlparse(url).netloc
+                    # Epsilon DocViewer / /fd/ links: save_via_button πρώτα (όπως το Timologio Downloader)
+                    if "epsilonnet.gr" in host or "/DocViewer/" in url or "/fd/" in url:
+                        data = renderer.save_via_button(url, download_dir)
+                    if not data:
+                        data = renderer.render_pdf(url)
                 except stealth.HeadlessCancelled:
                     break
                 except Exception as exc:                # noqa: BLE001 — κάθε παραστατικό ανεξάρτητο
@@ -269,6 +297,8 @@ def _stealth_render(urls: list[str]) -> dict[str, bytes]:
                     out[url] = data
     except Exception as exc:                            # noqa: BLE001 — χωρίς Chrome/driver: μένουν «μόνο online»
         log.warning("stealth browser: %s", exc)
+    finally:
+        shutil.rmtree(download_dir, ignore_errors=True)
     return out
 
 

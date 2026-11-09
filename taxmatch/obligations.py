@@ -510,10 +510,11 @@ def parepid_note(business: Optional[dict[str, Any]]) -> str:
 def is_private_person(b: Optional[dict[str, Any]], conn: Optional[Any] = None) -> bool:
     """Ιδιώτης: φυσικό πρόσωπο χωρίς (ενεργή) επιχείρηση — «ΙΔΙΩΤΗΣ» του Μητρώου, ατομική με διακοπή,
     ή μέλος/εκπρόσωπος εταιρείας χωρίς δική του ενεργή επιχείρηση. Δεν έχει myDATA, εργοδοτικές υποχρεώσεις κ.λπ."""
-    if not b or is_legal_entity(b.get("legal_form") or ""):
+    if not b or is_legal_entity(b.get("legal_form") or "") or is_legal_entity(b.get("name") or ""):
         return False
     form = strip_accents(b.get("legal_form") or "").upper().strip()
-    if any(k in form for k in ("ΙΔΙΩΤΙΚΗ", "ΙΚΕ", "ΕΤΑΙΡ", "ΚΕΦΑΛΑΙΟΥΧ", "ΣΥΣΤΑΣΗ", "ΚΟΙΝΟΠΡΑΞΙΑ")):
+    name = strip_accents(b.get("name") or "").upper().strip()
+    if any(k in form or k in name for k in ("ΙΔΙΩΤΙΚΗ", "ΙΚΕ", "ΕΤΑΙΡ", "ΚΕΦΑΛΑΙΟΥΧ", "ΣΥΣΤΑΣΗ", "ΚΟΙΝΟΠΡΑΞΙΑ")):
         return False
     state = (b.get("activity_state") or "").lower().strip()
     status = strip_accents(b.get("status") or "").upper().strip()
@@ -541,6 +542,20 @@ def is_private_person(b: Optional[dict[str, Any]], conn: Optional[Any] = None) -
     return False
 
 
+def _has_submission(rule_id: str, business: dict[str, Any], ref_month: str) -> bool:
+    if not business or not ref_month:
+        return False
+    if (rule_id, ref_month) in (business.get("done") or set()):
+        return True
+    checks = RULE_CHECKS.get(rule_id, ())
+    periods = ((business.get("checks") or {}).get("periods") or {})
+    for chk in checks:
+        p = periods.get((chk, ref_month))
+        if p and p.get("status") in ("submitted", "pending"):
+            return True
+    return False
+
+
 def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str = "") -> tuple[str, str]:
     """('yes' | 'maybe' | 'no', αιτιολογία) για ΕΝΑΝ πελάτη, από ό,τι ήδη ξέρουμε (Μητρώο ΑΑΔΕ): κατάσταση δραστηριότητας,
     υπαγωγή ΦΠΑ, περίοδος ΦΠΑ / κατηγορία βιβλίων — και εργοδότης/Intrastat από την εισαγωγή Excel. 'maybe' = εξαρτάται από κάτι που ΔΕΝ ξέρουμε — ποτέ εφεύρεση."""
@@ -565,6 +580,30 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     if rule_id == "parepid_fee" and business.get("parepid") is not None:
         return (("yes", "επιλογή «Τέλος παρεπιδημούντων» στο Προφίλ") if business["parepid"]
                 else ("no", "ρητά όχι στο Προφίλ («Τέλος παρεπιδημούντων»)"))
+    if rule_id == "intrastat":
+        if business.get("intrastat") == 0:
+            return "no", "ρητά όχι στο Προφίλ («Intrastat»)"
+        if not ref_month:
+            if business.get("intrastat") == 1:
+                return "yes", "υποβάλλει Intrastat"
+            return "maybe", _MAYBE_REASON.get("intrastat", "μόνο αν ξεπερνά το κατώφλι εξωτερικού εμπορίου της ΕΛ.ΣΤΑΤ — λείπουν στοιχεία myDATA")
+        info = (business.get("mydata") or {}).get(ref_month) or {}
+        has_goods_in = bool(info.get("goods_in"))
+        has_goods_out = bool(info.get("goods_out"))
+        has_intra = info.get("intrastat") is True or has_goods_in or has_goods_out
+        if has_intra:
+            flows_desc = []
+            if has_goods_in:
+                flows_desc.append("ενδοκοινοτική απόκτηση/εισαγωγή αγαθών (14.1)")
+            if has_goods_out:
+                flows_desc.append("ενδοκοινοτική αποστολή/παράδοση αγαθών (1.2)")
+            reason_text = " · ".join(flows_desc) if flows_desc else (info.get("intrastat_reason") or "κίνηση αγαθών στο myDATA")
+            return "yes", f"Intrastat: {reason_text}"
+        if _has_submission("intrastat", business, ref_month):
+            return "yes", "υποβλήθηκε δήλωση Intrastat (έλεγχος υποβολών)"
+        if business.get("intrastat"):
+            return "no", "υπόχρεος Intrastat, αλλά καμία ενδοκοινοτική εισαγωγή/κίνηση αγαθών τον μήνα στο myDATA"
+        return "no", "δεν έχει επιλεγεί στο Προφίλ και δεν προκύπτει υπέρβαση κατωφλίου" 
     if rule_id in PAYMENT_RULES:
         answer = _payment_liability(rule_id, business, ref_month)
         if answer:
@@ -606,6 +645,11 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
                     "Intrastat  — ", "Intrastat — ")
             if rule_id == "intrastat" and not value:
                 info = (business.get("mydata") or {}).get(ref_month) or {}
+                if business.get("intrastat"):
+                    reason_msg = "επιλογή «Intrastat» στο Προφίλ"
+                    if "καμία κίνηση" in (info.get("intrastat_reason") or ""):
+                        reason_msg += f" (μηδενική / {info['intrastat_reason'].split('; ')[-1]})"
+                    return "yes", reason_msg
                 if "καμία κίνηση" in (info.get("intrastat_reason") or ""):
                     no = "υπόχρεος Intrastat, αλλά " + info["intrastat_reason"].split("; ")[-1]
             if rule_id == "vies" and value:
@@ -623,11 +667,22 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
     # Σημαίες από την εισαγωγή Excel (db v11): «Μισθοδοσία» = εργοδότης· στοιχεία Intrastat = υποβάλλει Intrastat.
     # NULL = άγνωστο -> μένει «υπό προϋποθέσεις». Ποτέ «όχι» για Intrastat από απουσία στοιχείων.
     if rule_id == "internet_contribution":
-        # Την ορίζει ο ΧΡΗΣΤΗΣ (Προφίλ)· η εφαρμογή μόνο την ΠΡΟΤΕΙΝΕΙ όταν βρει 14.3 από Google τον μήνα
-        if business.get("internet_contribution"):
-            return "yes", "επιλογή «Ειδική εισφορά διαδικτύου» στο Προφίλ"
         info = (business.get("mydata") or {}).get(ref_month or "") or {}
-        if info.get("google_ads"):
+        has_ad = bool(info.get("advert"))
+        has_google = bool(info.get("google_ads"))
+        if business.get("internet_contribution"):
+            if not ref_month:
+                return "yes", "επιλογή «Ειδική εισφορά διαδικτύου» στο Προφίλ"
+            if has_google and has_ad:
+                return "yes", "έξοδα προβολής & διαφήμισης (E3_585_015) και Google/Meta (14.3) στο myDATA"
+            if has_google:
+                return "yes", "δαπάνη διαφήμισης Google / Meta (14.3) στο myDATA"
+            if has_ad:
+                return "yes", "έξοδα προβολής και διαφήμισης (E3_585_015) στο myDATA"
+            if _has_submission("internet_contribution", business, ref_month):
+                return "yes", "υποβλήθηκε δήλωση ΑΚΕΕΔ (ΕΔΟΕΑΠ)"
+            return "no", "καμία δαπάνη προβολής/διαφήμισης ή Google/Meta στο myDATA τον μήνα"
+        if has_google:
             return "maybe", ("14.3 από Google / Meta στο myDATA — αν είναι διαφήμιση, ενεργοποιήστε «Ειδική εισφορά "
                              "διαδικτύου» στο Προφίλ")
         return "no", "δεν έχει επιλεγεί στο Προφίλ"

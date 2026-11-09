@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from .. import db as dbmod
 from .. import easycheck, efka
 from .. import deadlines, obligations
+from ..textutil import strip_accents
 from ..aml import model as aml_model, store as aml_store
 from ..aml.content import ASSESSMENT_LABEL
 from ..business_profiles import credentials as client_creds, service as clients
@@ -190,9 +191,19 @@ class ClientDetailDialog(QDialog):
         for row in self._employer_rows:
             self._cred_form.setRowVisible(row, not private)
         self.fetch_ame_btn.setVisible(not private)
-        if hasattr(self, "_profile_form") and hasattr(self, "f_employer"):
-            self._profile_form.setRowVisible(self.f_employer, not private)
-            self._profile_form.setRowVisible(self.f_teka, not private)
+        if hasattr(self, "_profile_form"):
+            if hasattr(self, "f_employer"):
+                self._profile_form.setRowVisible(self.f_employer, not private)
+            if hasattr(self, "f_teka"):
+                self._profile_form.setRowVisible(self.f_teka, not private)
+            if hasattr(self, "f_intrastat"):
+                self._profile_form.setRowVisible(self.f_intrastat, not private)
+            if hasattr(self, "f_internet"):
+                self._profile_form.setRowVisible(self.f_internet, not private)
+                self._profile_form.setRowVisible(self.f_internet_note, not private and bool(self.f_internet_note.text()))
+            if hasattr(self, "f_parepid"):
+                self._profile_form.setRowVisible(self.f_parepid, not private)
+                self._profile_form.setRowVisible(self.f_parepid_note, not private and bool(self.f_parepid_note.text()))
         for name in ("mydata", "members_tab"):
             index = self._detail_tab_indices.get(name)
             if index is not None:
@@ -453,8 +464,15 @@ class ClientDetailDialog(QDialog):
             kads.append({"code": code.strip(" -–:"), "descr": descr.strip(" -–:"), "is_main": not kads})
         clients.set_kads(self.conn, self.afm, kads)
         engine.rematch(self.conn)
-        toast(self, "Τα στοιχεία αποθηκεύτηκαν.", "ok")
         self._reload()
+        if self.main is not None:
+            try:
+                self.main._render_calendar_from_db()
+                self.main.reload_dashboard()
+                self.main._apply_client_filter()
+            except Exception:
+                pass
+        toast(self, "Τα στοιχεία αποθηκεύτηκαν και οι υποχρεώσεις ενημερώθηκαν.", "ok")
 
     # ------------------------------------------------------------ Κωδικοί TAXISnet
     def _credentials_tab(self) -> QWidget:
@@ -1158,11 +1176,15 @@ class ClientDetailDialog(QDialog):
         self._start_lookup()
 
     def _start_lookup(self) -> None:
+        main_win = self.main
+        afm = self.afm
+        client_name = self.client_name_label.text() or afm
+
         def work(_progress):
             conn = dbmod.connect()  # δικό του thread — το self.conn δημιουργήθηκε στο UI thread
             try:
                 try:
-                    out = clients.lookup_and_store(conn, self.afm)
+                    out = clients.lookup_and_store(conn, afm)
                 except KeyError:
                     return None
                 engine.rematch(conn)
@@ -1171,17 +1193,49 @@ class ClientDetailDialog(QDialog):
                 conn.close()
 
         def done(_out):
-            self.busy.stop()
-            toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
-            self._reload()
+            dlg_alive = False
+            try:
+                if self.isVisible():
+                    dlg_alive = True
+                    self.busy.stop()
+                    toast(self, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
+                    self._reload()
+            except (RuntimeError, Exception):
+                dlg_alive = False
+
+            if main_win is not None:
+                if not dlg_alive:
+                    toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) ολοκληρώθηκε.", "ok")
+                try:
+                    main_win._apply_client_filter()
+                    main_win._render_calendar_from_db()
+                    main_win.reload_dashboard()
+                except Exception:
+                    pass
 
         def failed(m):
-            self.busy.stop()
-            toast(self, m, "danger")
+            dlg_alive = False
+            try:
+                if self.isVisible():
+                    dlg_alive = True
+                    self.busy.stop()
+                    toast(self, m, "danger")
+            except (RuntimeError, Exception):
+                dlg_alive = False
+
+            if main_win is not None and not dlg_alive:
+                toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) απέτυχε: {m}", "danger")
 
         toast(self, "Ξεκίνησε η ανάκτηση στοιχείων του πελάτη…", "info")
         self.busy.start("Ανάκτηση στοιχείων…")
-        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
+        runner = main_win if main_win is not None else self
+        self._tasks.append(run_task(runner, work, on_done=done, on_error=failed))
+
+    def closeEvent(self, event) -> None:
+        if getattr(self, "busy", None) and getattr(self.busy, "running", False) and self.main is not None:
+            client_name = self.client_name_label.text() or self.afm
+            toast(self.main, f"Η ανάκτηση στοιχείων για {client_name} συνεχίζεται στο παρασκήνιο…", "info")
+        super().closeEvent(event)
 
     def _delete_client(self) -> None:
         if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;\n\n"
@@ -1259,6 +1313,8 @@ class ClientDetailDialog(QDialog):
         self.f_status.setText(b["status"])
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
         self._mark_profile_saved()
+        self._apply_private_layout(full)
+        self._fill_ames()
         self._reload_checks()
         self.f_notes.setPlainText(b["notes"])
 

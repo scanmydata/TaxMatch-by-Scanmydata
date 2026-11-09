@@ -27,6 +27,7 @@ from .. import settings_store
 from ..mydata import pdfs
 from .table_kit import SortItem, TableKit
 from .theme import CURRENT
+from .icons import icon
 from .toast import toast
 from .widgets import fit_to_screen
 
@@ -109,6 +110,10 @@ class OnlineOnlyDialog(QDialog):
         self.open_btn.setObjectName("primary")
         self.open_btn.clicked.connect(self._open_next)
         buttons.addWidget(self.open_btn)
+        self.stealth_btn = QPushButton(icon("network", CURRENT.txt, 16), "  Αυτόματη λήψη (Stealth)")
+        self.stealth_btn.setToolTip("Αυτόματη ανάκτηση των παραστατικών «μόνο online» μέσω Stealth / Headless Browser (όπως το Timologio Downloader)")
+        self.stealth_btn.clicked.connect(self._run_auto_stealth)
+        buttons.addWidget(self.stealth_btn)
         scan = QPushButton("Έλεγχος φακέλου τώρα")
         scan.setToolTip("Ψάχνει αμέσως το PDF που αποθηκεύσατε")
         scan.clicked.connect(lambda: self._scan(force=True))
@@ -207,6 +212,41 @@ class OnlineOnlyDialog(QDialog):
             if self._pending(mark) and mark != self._watch:
                 return self._doc(mark)
         return None
+
+    def _run_auto_stealth(self) -> None:
+        pending_docs = [d for d in self._docs if self._pending(d["mark"])]
+        if not pending_docs:
+            toast(self, "Δεν υπάρχουν εκκρεμή παραστατικά για αυτόματη λήψη.", "info")
+            return
+        urls = [pdfs.openable_url(d["url"]) for d in pending_docs]
+        toast(self, f"Ξεκίνησε η αυτόματη λήψη ({len(urls)} παραστατικά) με Stealth Browser…", "info")
+        self.status.setText(f"Αυτόματη λήψη σε εξέλιξη ({len(urls)} παραστατικά)…")
+        self.stealth_btn.setEnabled(False)
+
+        def work(_progress):
+            return pdfs._headless_render(urls)
+
+        def done(results):
+            self.stealth_btn.setEnabled(True)
+            saved = 0
+            for d in pending_docs:
+                url = pdfs.openable_url(d["url"])
+                data = results.get(url)
+                if data:
+                    try:
+                        pdfs.save_online_pdf(self.conn, self.afm, d, data)
+                        self._done.add(d["mark"])
+                        saved += 1
+                    except Exception as exc:
+                        log.warning("save_online_pdf: %s", exc)
+            self._refresh()
+            if saved:
+                toast(self, f"Ολοκληρώθηκε: αποθηκεύτηκαν {saved}/{len(pending_docs)} PDF αυτόματα.", "ok")
+            else:
+                toast(self, "Η αυτόματη λήψη δεν μπόρεσε να ανακτήσει τα PDF — δοκιμάστε «Άνοιγμα στον browser».", "warn")
+
+        from .workers import run_task
+        run_task(self, work, on_done=done, on_error=lambda m: (self.stealth_btn.setEnabled(True), toast(self, f"Σφάλμα stealth browser: {m}", "danger")))
 
     # ------------------------------------------------------------------ ροή
     def _choose_folder(self) -> None:

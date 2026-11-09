@@ -17,7 +17,7 @@ from PySide6.QtGui import QColor, QDesktopServices
 import json
 
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -280,6 +280,14 @@ class MydataTab(QWidget):
                            "τα κατώφλια Intrastat (προηγούμενο έτος) και το Ημερολόγιο")
         history.clicked.connect(lambda: self._fetch(_months(HISTORY_MONTHS), pdf=False, only_missing=True))
         bar.addWidget(history)
+        self.unclassified_box = QCheckBox("Μόνο αχαρακτήριστα")
+        self.unclassified_box.setToolTip("Όταν είναι επιλεγμένο, κατεβαίνουν PDF ΜΟΝΟ για τα αχαρακτήριστα παραστατικά (έξοδα/έσοδα) "
+                                        "και τα υπόλοιπα τίθενται σε αναμονή, κάνοντας τη διαδικασία πολύ πιο γρήγορη")
+        bar.addWidget(self.unclassified_box)
+        self.unclassified_btn = QPushButton(icon("download", CURRENT.txt, 16), "  Λήψη αχαρακτήριστων")
+        self.unclassified_btn.setToolTip("Λήψη μόνο των αχαρακτήριστων εξόδων/εσόδων της περιόδου — τα υπόλοιπα τίθενται σε αναμονή για γρήγορη λήψη")
+        self.unclassified_btn.clicked.connect(lambda: self._fetch(self._period_months(), pdf=True, unclassified_only=True))
+        bar.addWidget(self.unclassified_btn)
         bar.addStretch()
         self.summary_btn = QPushButton(icon("calendar", CURRENT.txt, 16), "  Υποχρεώσεις μήνα…")
         self.summary_btn.setToolTip("Παρακρατήσεις, τέλη, VIES, Intrastat και ΦΠΑ της περιόδου, με την κατάσταση υποβολής")
@@ -313,6 +321,8 @@ class MydataTab(QWidget):
         self.kit = TableKit(self.table, list(zip(_COLS, (64, 48, 86, 120, 0, 90, 85, 85, 80, 85, 75))), "client_mydata",
                             prefs=getattr(main, "_prefs", None),
                             placeholder="Αναζήτηση παραστατικού (αντισυμβαλλόμενος, ΑΦΜ, τύπος, ποσό…)")
+        self.kit.clear_btn.setObjectName("danger")
+        self.kit.clear_btn.setStyleSheet(f"QPushButton {{ color: {CURRENT.bad}; border: 1.5px solid {CURRENT.bad}; font-weight: 600; border-radius: 8px; padding: 4px 10px; }} QPushButton:hover {{ background-color: {CURRENT.bad}; color: {CURRENT.on_accent}; }}")
         root.addWidget(self.kit.bar)
         self.table.itemSelectionChanged.connect(self._selection_note)
         self.table.doubleClicked.connect(lambda *_: self._open_selected())
@@ -482,10 +492,12 @@ class MydataTab(QWidget):
         self._reload_creds()
 
     # ------------------------------------------------------------------ λήψη (ουρά εργασιών του κύριου παραθύρου)
-    def _fetch(self, months: list[str], pdf: bool, only_missing: bool = False) -> None:
+    def _fetch(self, months: list[str], pdf: bool, only_missing: bool = False, unclassified_only: bool = False) -> None:
         if not mydata_creds.get(self.conn, self.afm):
             toast(self.window_, "Χρειάζονται οι κωδικοί myDATA του πελάτη.", "warn")
             return
+        if hasattr(self, "unclassified_box") and self.unclassified_box.isChecked():
+            unclassified_only = True
         if only_missing:
             have = store.synced_months(self.conn, self.afm).get(self.afm, set())
             current = _months(2)                                  # τρέχων και προηγούμενος ξαναζητούνται πάντα
@@ -495,10 +507,11 @@ class MydataTab(QWidget):
                 return
         n = len(months)
         what = analysis.month_label(months[0]) if n == 1 else f"{n} μήνες"
-        title = f"λήψη myDATA ({what}{', με PDF' if pdf else ''}) — {self.window_.windowTitle() or self.afm}"
+        tag = " (μόνο αχαρακτήριστα)" if unclassified_only else ""
+        title = f"λήψη myDATA ({what}{', με PDF' if pdf else ''}{tag}) — {self.window_.windowTitle() or self.afm}"
         if self.main is not None and hasattr(self.main, "run_mydata_sync"):
             self.main.run_mydata_sync([self.afm], months, window=self.window_, on_done=self._after_fetch, pdfs=pdf,
-                                      title=title)
+                                      title=title, unclassified_only=unclassified_only)
             return
         # Χωρίς κύριο παράθυρο (μόνο σε tests): απευθείας στο παρασκήνιο.
 
@@ -508,7 +521,7 @@ class MydataTab(QWidget):
                 out = store.sync_range(conn, self.afm, months)
                 if pdf and out["ok"]:
                     for ym in months:
-                        pdfs.download_month(conn, self.afm, ym)
+                        pdfs.download_month(conn, self.afm, ym, unclassified_only=unclassified_only)
                 return out
             finally:
                 conn.close()
