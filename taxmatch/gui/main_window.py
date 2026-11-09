@@ -3241,7 +3241,18 @@ class MainWindow(QMainWindow):
         for b in self._run_buttons:
             b.setEnabled(False)
         self.run_status.setText("Έναρξη…")
-        toast(self, "Ξεκίνησε ο έλεγχος νέων — μπορείτε να συνεχίσετε να δουλεύετε.", "info")
+        p_toast = ProgressToast(self, "Έναρξη ελέγχου νέων…", title="Έλεγχος & αντιστοίχιση νέων")
+
+        def on_step(msg: str) -> None:
+            self.run_status.setText(msg)
+            done_val, tot_val = None, None
+            m = re.search(r"(\d+)/(\d+)", msg)
+            if m:
+                try:
+                    done_val, tot_val = int(m.group(1)), int(m.group(2))
+                except (ValueError, TypeError):
+                    pass
+            p_toast.update(msg, done=done_val, total=tot_val)
 
         def work(progress):
             # ΧΩΡΙΣ conn=self.conn: αφήνουμε το pipeline να ανοίξει τη δική του σύνδεση σε αυτό το thread — το
@@ -3255,20 +3266,33 @@ class MainWindow(QMainWindow):
             errs = stats.get("errors") or []
             match = stats.get("match") or {}
             added = match.get("added", 0)
-            summary = (f"{added} νέα matches" if added else "καμία νέα αντιστοίχιση") + \
-                (f" · {match['updated']} ενημερώθηκαν" if match.get("updated") else "")
-            base = f"Ολοκληρώθηκε ✓ — {summary}." if not errs else f"Ολοκληρώθηκε με σημειώσεις ({summary}): " + "· ".join(errs)[:200]
+            updated = match.get("updated", 0)
+            ingest = stats.get("ingest") or {}
+            new_articles = sum(v.get("new", 0) for v in ingest.values() if isinstance(v, dict))
+
+            summary_parts = []
+            if new_articles:
+                summary_parts.append(f"{new_articles} νέα άρθρα")
+            if added:
+                summary_parts.append(f"{added} νέα matches")
+            elif not new_articles:
+                summary_parts.append("καμία νέα αντιστοίχιση")
+            if updated:
+                summary_parts.append(f"{updated} ενημερώθηκαν")
+            summary = " · ".join(summary_parts)
+
+            base = f"Ολοκληρώθηκε ✓ — {summary}." if not errs else f"Ολοκληρώθηκε με σημειώσεις ({summary}): " + " · ".join(errs)[:200]
             self.run_status.setText(base)
-            toast(self, base, "ok" if not errs else "warn")
+            p_toast.finish(base, level="ok" if not errs else "warn")
             self.reload_all()
 
         def failed(msg):
             for b in self._run_buttons:
                 b.setEnabled(True)
             self.run_status.setText(f"Σφάλμα: {msg}")
-            toast(self, f"Σφάλμα ελέγχου: {msg}", "danger")
+            p_toast.finish(f"Σφάλμα ελέγχου: {msg}", level="danger")
 
-        self._tasks.append(run_task(self, work, on_progress=self.run_status.setText, on_done=done, on_error=failed))
+        self._tasks.append(run_task(self, work, on_progress=on_step, on_done=done, on_error=failed))
 
     def _check_schedule(self) -> None:
         """Ο πραγματικός προγραμματισμός τρέχει από το Windows Task Scheduler (--daily), ανεξάρτητα από το παράθυρο·

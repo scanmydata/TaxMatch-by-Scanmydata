@@ -158,9 +158,9 @@ def ingest(conn: sqlite3.Connection, sources: list[Source], session: Optional[re
     """Ένα feed που αποτυγχάνει δεν σταματά τα υπόλοιπα. Επιστρέφει {source_id: {new, fetched | error}}."""
     s = session or make_session()
     stats: dict[str, dict] = {}
-    for src in sources:
+    for i, src in enumerate(sources, 1):
         if on_progress:
-            on_progress(f"Λήψη: {src.name}")
+            on_progress(f"Λήψη πηγής {i}/{len(sources)}: {src.name}")
         try:
             if src.scrape:
                 from . import taxheaven_calendar                    # lazy: αποφυγή κυκλικού import

@@ -84,13 +84,15 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
             errors: list[str] = []
             status = "error"        # γίνεται 'ok' μόνο αν ολοκληρωθούν τα βήματα χωρίς εξαίρεση/χωρίς πλήρη αποτυχία πηγών
             try:
-                progress("Λήψη πηγών…")
-                stats["ingest"] = rss_fetch.ingest(conn, enabled_sources(conn), session, progress)
+                active_sources = enabled_sources(conn)
+                progress(f"Λήψη πηγών (0/{len(active_sources)})…")
+                stats["ingest"] = rss_fetch.ingest(conn, active_sources, session, progress)
                 all_failed = bool(stats["ingest"]) and all("error" in v for v in stats["ingest"].values())
                 if all_failed:
                     errors.append("Καμία πηγή δεν ήταν προσβάσιμη (έλεγχος σύνδεσης).")
 
-                progress("Εμπλουτισμός πελατών…")
+                new_count = sum(v.get("new", 0) for v in stats["ingest"].values() if isinstance(v, dict))
+                progress(f"Λήφθηκαν {new_count} νέα άρθρα — Εμπλουτισμός πελατών…")
                 try:
                     stats["enrich"] = clients.enrich_pending(conn, session=session, on_progress=progress)
                 except Exception as exc:
@@ -108,9 +110,10 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
                     stats["ml"] = {"error": str(exc)[:200]}
 
                 stats["extract"] = _extract_step(conn, session, progress, errors, deadline)
+                extracted_done = stats["extract"].get("done", 0) if isinstance(stats.get("extract"), dict) else 0
 
-                progress("Αντιστοίχιση με πελάτες…")
-                stats["match"] = engine.rematch(conn)
+                progress(f"Ανάλυση LLM: {extracted_done} σχετικά άρθρα — Αντιστοίχιση με πελάτες…")
+                stats["match"] = engine.rematch(conn, on_progress=progress)
                 status = "error" if all_failed else "ok"
             except Exception as exc:
                 log.exception("Το pipeline απέτυχε")

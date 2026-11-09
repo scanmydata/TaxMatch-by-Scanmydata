@@ -15,15 +15,17 @@ MATCH_WINDOW_DAYS = 45
 _REMATCH_LOCK = threading.Lock()
 
 
-def rematch(conn: sqlite3.Connection, window_days: int = MATCH_WINDOW_DAYS) -> dict[str, int]:
+def rematch(conn: sqlite3.Connection, window_days: int = MATCH_WINDOW_DAYS,
+            on_progress: Optional[Callable[[str], None]] = None) -> dict[str, int]:
     """Ξαναϋπολογίζει τα matches για πρόσφατα άρθρα. Idempotent: προσθέτει νέα, ενημερώνει αιτιολογία/βεβαιότητα
     των υπαρχόντων (το feedback μένει) και αφαιρεί όσα δεν ισχύουν πια ΜΟΝΟ αν δεν έχουν feedback.
     Το lock σειριοποιεί τα rematch μέσα στο ίδιο process (ουρά ανάκτησης + έλεγχος + επεξεργασία πελάτη)."""
     with _REMATCH_LOCK:
-        return _rematch(conn, window_days)
+        return _rematch(conn, window_days, on_progress=on_progress)
 
 
-def _rematch(conn: sqlite3.Connection, window_days: int) -> dict[str, int]:
+def _rematch(conn: sqlite3.Connection, window_days: int,
+             on_progress: Optional[Callable[[str], None]] = None) -> dict[str, int]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     businesses = clients.for_matching(conn)
     arts = conn.execute("SELECT id, extracted_json FROM articles WHERE extraction_status='done' "
@@ -35,9 +37,15 @@ def _rematch(conn: sqlite3.Connection, window_days: int) -> dict[str, int]:
     now = db.utcnow()
     added = updated = removed = 0
     wanted: set[tuple[int, str]] = set()
+    total_arts = len(arts)
+    num_biz = len(businesses)
+    if on_progress:
+        on_progress(f"Αντιστοίχιση 0/{total_arts} άρθρων με {num_biz} πελάτες…")
     conn.execute("BEGIN")
     try:
-        for art in arts:
+        for i, art in enumerate(arts, 1):
+            if on_progress and (i == 1 or i % 5 == 0 or i == total_arts):
+                on_progress(f"Αντιστοίχιση άρθρου {i}/{total_arts} με {num_biz} πελάτες…")
             try:
                 extracted = json.loads(art["extracted_json"] or "{}")
             except ValueError:
