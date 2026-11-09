@@ -666,6 +666,26 @@ class MydataTab(QWidget):
             rows.append(self._row("Ψηφιακό τέλος ενοικίων",
                                   f"{office.money(fees['rent_fee'])} σε παραστατικά ενοικίου — <b>δεν</b> αποδίδεται μηνιαία: "
                                   "δηλώνεται ετησίως με τη δήλωση φορολογίας εισοδήματος (Ε2)", ""))
+        fee_t = analysis.fee_totals(self.conn, self.afm, ym)
+        parepid_amt = fee_t.get("parepid", 0.0)
+        is_parepid = bool(business.get("parepid")) or parepid_amt > 0
+        if is_parepid:
+            status, done = self._status_html("parepid_fee", ym, business)
+            amt_text = f" ({office.money(parepid_amt)} στα έσοδα)" if parepid_amt > 0 else ""
+            rows.append(self._row("Παρεπιδημούντες / Ακαθάριστα",
+                                  f"Τέλος παρεπιδημούντων / ακαθαρίστων εσόδων{amt_text} → δήλωση έως "
+                                  f"<b>{due.strftime('%d/%m/%Y')}</b> (dae.govapp.gr) · {status}",
+                                  "done" if done else "open"))
+        if fee_t.get("plastic_bag"):
+            status, done = self._status_html("plastic_bag_fee", ym, business)
+            rows.append(self._row("Πλαστική σακούλα",
+                                  f"Πλαστική σακούλα ({office.money(fee_t['plastic_bag'])}) → δήλωση έως "
+                                  f"<b>{due.strftime('%d/%m/%Y')}</b> · {status}", "done" if done else "open"))
+        if fee_t.get("plastics"):
+            status, done = self._status_html("plastics_fee", ym, business)
+            rows.append(self._row("Πλαστικά μιας χρήσης",
+                                  f"Πλαστικά μιας χρήσης ({office.money(fee_t['plastics'])}) → δήλωση έως "
+                                  f"<b>{due.strftime('%d/%m/%Y')}</b> · {status}", "done" if done else "open"))
         f = s["flows"]
         flows = (f"αποστολές αγαθών {office.money(f['goods_out'])} · παροχή υπηρεσιών {office.money(f['services_out'])} · "
                  f"αφίξεις αγαθών {office.money(f['goods_in'])} · λήψη υπηρεσιών {office.money(f['services_in'])}")

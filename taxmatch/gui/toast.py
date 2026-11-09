@@ -213,6 +213,8 @@ class ToastHost(QWidget):
             if self.geometry().getRect() != (x, y, self._WIDTH, max(h, 1)):
                 self.setGeometry(x, y, self._WIDTH, max(h, 1))
             self.raise_()
+            if hasattr(self._host, "notice_panel") and getattr(self._host, "notice_panel", None) and self._host.notice_panel.isVisible():
+                self._host.notice_panel.raise_()
             return
         x = self._host.width() - self._WIDTH - self._MARGIN
         is_main = isinstance(self._host, QMainWindow)
@@ -221,6 +223,8 @@ class ToastHost(QWidget):
         if self.geometry().getRect() != (max(0, x), y, self._WIDTH, max(h, 1)):
             self.setGeometry(max(0, x), y, self._WIDTH, max(h, 1))
         self.raise_()
+        if hasattr(self._host, "notice_panel") and getattr(self._host, "notice_panel", None) and self._host.notice_panel.isVisible():
+            self._host.notice_panel.raise_()
 
     def add(self, message: str, level: str, ms: int, progress: bool = False, title: str = "",
             actions: list | None = None, total: int | None = None, done: int | None = None) -> _ToastItem:
@@ -358,7 +362,7 @@ class ProgressToast:
     toast περνά σε άλλο παράθυρο (π.χ. από την καρτέλα πελάτη που κλείνει στο κύριο), με την ίδια πρόοδο."""
 
     def __init__(self, window: QWidget, message: str, on_cancel=None, afm: str = "",
-                 total: int | None = None, done: int | None = None) -> None:
+                 total: int | None = None, done: int | None = None, title: str = "") -> None:
         self.afm = afm                                   # πελάτης της εργασίας (αν είναι ένας) — βλ. `claim_for`
         _LIVE.append(self)
         self._window = window
@@ -367,7 +371,7 @@ class ProgressToast:
         self._message = message
         self._on_cancel, self._cancelled = on_cancel, False
         self._started = time.monotonic()
-        self._title = ""
+        self._title = title or ""
         self._host = _host_for(window)
         self._item = self._build()
         self._finished = False

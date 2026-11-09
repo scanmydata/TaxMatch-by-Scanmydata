@@ -77,52 +77,58 @@ def run_pipeline(trigger: str = "manual", on_progress: Optional[Callable[[str], 
     conn = conn or db.connect()
     progress = on_progress or (lambda _m: None)
     try:
-        with run_lock():
-            backup_mod.create_backup(config.db_path(), reason=trigger)  # πριν αγγίξουμε οτιδήποτε γράφει
-            run_id = conn.execute("INSERT INTO runs(trigger, started_at) VALUES (?,?)", (trigger, db.utcnow())).lastrowid
-            stats: dict = {}
-            errors: list[str] = []
-            status = "error"        # γίνεται 'ok' μόνο αν ολοκληρωθούν τα βήματα χωρίς εξαίρεση/χωρίς πλήρη αποτυχία πηγών
-            try:
-                active_sources = enabled_sources(conn)
-                progress(f"Λήψη πηγών (0/{len(active_sources)})…")
-                stats["ingest"] = rss_fetch.ingest(conn, active_sources, session, progress)
-                all_failed = bool(stats["ingest"]) and all("error" in v for v in stats["ingest"].values())
-                if all_failed:
-                    errors.append("Καμία πηγή δεν ήταν προσβάσιμη (έλεγχος σύνδεσης).")
-
-                new_count = sum(v.get("new", 0) for v in stats["ingest"].values() if isinstance(v, dict))
-                progress(f"Λήφθηκαν {new_count} νέα άρθρα — Εμπλουτισμός πελατών…")
+        try:
+            with run_lock():
+                progress("Δημιουργία αντιγράφου ασφαλείας…")
+                backup_mod.create_backup(config.db_path(), reason=trigger)  # πριν αγγίξουμε οτιδήποτε γράφει
+                run_id = conn.execute("INSERT INTO runs(trigger, started_at) VALUES (?,?)", (trigger, db.utcnow())).lastrowid
+                stats: dict = {}
+                errors: list[str] = []
+                status = "error"        # γίνεται 'ok' μόνο αν ολοκληρωθούν τα βήματα χωρίς εξαίρεση/χωρίς πλήρη αποτυχία πηγών
                 try:
-                    stats["enrich"] = clients.enrich_pending(conn, session=session, on_progress=progress)
+                    active_sources = enabled_sources(conn)
+                    progress(f"Λήψη πηγών (0/{len(active_sources)})…")
+                    stats["ingest"] = rss_fetch.ingest(conn, active_sources, session, progress)
+                    all_failed = bool(stats["ingest"]) and all("error" in v for v in stats["ingest"].values())
+                    if all_failed:
+                        errors.append("Καμία πηγή δεν ήταν προσβάσιμη (έλεγχος σύνδεσης).")
+
+                    new_count = sum(v.get("new", 0) for v in stats["ingest"].values() if isinstance(v, dict))
+                    progress(f"Λήφθηκαν {new_count} νέα άρθρα — Εμπλουτισμός πελατών…")
+                    try:
+                        stats["enrich"] = clients.enrich_pending(conn, session=session, on_progress=progress)
+                    except Exception as exc:
+                        log.exception("enrich απέτυχε")
+                        errors.append(f"Εμπλουτισμός πελατών: {exc}")
+
+                    # ML (στο πρότυπο του paperless-ngx): σειρά ανάλυσης κατά πιθανότητα σχετικότητας και παράκαμψη LLM για
+                    # τα σχεδόν σίγουρα άσχετα — ΑΝ το μοντέλο έχει αποδείξει ότι τα πάει καλά (matching/ml.py). Ποτέ δεν
+                    # σταματά τον έλεγχο: σε σφάλμα απλώς συνεχίζουμε όπως πριν.
+                    try:
+                        progress("Ταξινόμηση άρθρων (ML)…")
+                        stats["ml"] = ml.prioritize_and_gate(conn, ml.train_if_needed(conn))
+                    except Exception as exc:
+                        log.exception("ML απέτυχε")
+                        stats["ml"] = {"error": str(exc)[:200]}
+
+                    stats["extract"] = _extract_step(conn, session, progress, errors, deadline)
+                    extracted_done = stats["extract"].get("done", 0) if isinstance(stats.get("extract"), dict) else 0
+
+                    progress(f"Ανάλυση LLM: {extracted_done} σχετικά άρθρα — Αντιστοίχιση με πελάτες…")
+                    stats["match"] = engine.rematch(conn, on_progress=progress)
+                    status = "error" if all_failed else "ok"
                 except Exception as exc:
-                    log.exception("enrich απέτυχε")
-                    errors.append(f"Εμπλουτισμός πελατών: {exc}")
-
-                # ML (στο πρότυπο του paperless-ngx): σειρά ανάλυσης κατά πιθανότητα σχετικότητας και παράκαμψη LLM για
-                # τα σχεδόν σίγουρα άσχετα — ΑΝ το μοντέλο έχει αποδείξει ότι τα πάει καλά (matching/ml.py). Ποτέ δεν
-                # σταματά τον έλεγχο: σε σφάλμα απλώς συνεχίζουμε όπως πριν.
-                try:
-                    progress("Ταξινόμηση άρθρων (ML)…")
-                    stats["ml"] = ml.prioritize_and_gate(conn, ml.train_if_needed(conn))
-                except Exception as exc:
-                    log.exception("ML απέτυχε")
-                    stats["ml"] = {"error": str(exc)[:200]}
-
-                stats["extract"] = _extract_step(conn, session, progress, errors, deadline)
-                extracted_done = stats["extract"].get("done", 0) if isinstance(stats.get("extract"), dict) else 0
-
-                progress(f"Ανάλυση LLM: {extracted_done} σχετικά άρθρα — Αντιστοίχιση με πελάτες…")
-                stats["match"] = engine.rematch(conn, on_progress=progress)
-                status = "error" if all_failed else "ok"
-            except Exception as exc:
-                log.exception("Το pipeline απέτυχε")
-                errors.append(str(exc))
-            finally:
-                conn.execute("UPDATE runs SET finished_at=?, status=?, stats_json=?, error=? WHERE id=?",
-                             (db.utcnow(), status, json.dumps(stats, ensure_ascii=False), "; ".join(errors), run_id))
-            stats["errors"] = errors
-            return stats
+                    log.exception("Το pipeline απέτυχε")
+                    errors.append(str(exc))
+                finally:
+                    conn.execute("UPDATE runs SET finished_at=?, status=?, stats_json=?, error=? WHERE id=?",
+                                 (db.utcnow(), status, json.dumps(stats, ensure_ascii=False), "; ".join(errors), run_id))
+                stats["errors"] = errors
+                return stats
+        except AlreadyRunning:
+            msg = AlreadyRunning.message_el
+            progress(msg)
+            return {"errors": [msg]}
     finally:
         if own_conn:
             conn.close()

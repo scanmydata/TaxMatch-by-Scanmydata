@@ -20,6 +20,7 @@ MYDATA_BASE = "https://mydatapi.aade.gr/myDATA"
 URL_REQUEST_DOCS = f"{MYDATA_BASE}/RequestDocs"
 URL_REQUEST_TRANSMITTED_DOCS = f"{MYDATA_BASE}/RequestTransmittedDocs"
 URL_REQUEST_MY_EXPENSES = f"{MYDATA_BASE}/RequestMyExpenses"
+URL_REQUEST_E3_INFO = f"{MYDATA_BASE}/RequestE3Info"
 AADE_HOST = "mydatapi.aade.gr"
 
 #: Αναμονές σε «πολλά αιτήματα» (429) — η ΑΑΔΕ ζητά από 10″ μέχρι ~4½′ (μετρημένο στο timologio).
@@ -123,6 +124,36 @@ class MydataClient:
         seen: set[str] = set()
         while True:
             payload = self.get(url, dict(params))
+            pages.append(payload)
+            c = cursors(ET.fromstring(payload))
+            if c["nextPartitionKey"] or c["nextRowKey"]:
+                sig = c["nextPartitionKey"] + "|" + c["nextRowKey"]
+                if sig in seen:
+                    break
+                seen.add(sig)
+                params.pop("nextPartitionToken", None)
+                params.update(nextPartitionKey=c["nextPartitionKey"], nextRowKey=c["nextRowKey"])
+                continue
+            if c["nextPartitionToken"] and c["nextPartitionToken"] not in seen:
+                seen.add(c["nextPartitionToken"])
+                params.pop("nextPartitionKey", None)
+                params.pop("nextRowKey", None)
+                params["nextPartitionToken"] = c["nextPartitionToken"]
+                continue
+            break
+        return pages
+
+    def fetch_e3_pages(self, date_from: str, date_to: str,
+                       should_cancel: Optional[Callable[[], bool]] = None) -> list[bytes]:
+        """Όλες οι σελίδες XML του RequestE3Info για ένα διάστημα (dd/mm/yyyy).
+        Περιέχει τις εγγραφές E3 (V_Class_Category, V_Class_Type, V_Class_Value) για κάθε παραστατικό."""
+        params = {"dateFrom": date_from, "dateTo": date_to}
+        pages: list[bytes] = []
+        seen: set[str] = set()
+        while True:
+            if should_cancel and should_cancel():
+                break
+            payload = self.get(URL_REQUEST_E3_INFO, dict(params))
             pages.append(payload)
             c = cursors(ET.fromstring(payload))
             if c["nextPartitionKey"] or c["nextRowKey"]:

@@ -233,12 +233,17 @@ def parse_classifications_doc(payload: bytes) -> dict[str, list[dict[str, Any]]]
         tag = _local(exp)
         if tag in ("expensesInvoiceClassification", "incomeInvoiceClassification"):
             kind = "expense" if tag == "expensesInvoiceClassification" else "income"
+            # Βρίσκουμε πρώτα το invoiceMark σε όλο το subtree του exp
             inv_mark = ""
+            for node in exp.iter():
+                if _local(node) == "invoiceMark" and (node.text or "").strip():
+                    inv_mark = (node.text or "").strip()
+                    break
+            if not inv_mark:
+                continue
             for c in exp:
                 ctag = _local(c)
-                if ctag == "invoiceMark":
-                    inv_mark = (c.text or "").strip()
-                elif ctag in ("invoicesExpensesClassificationDetails", "invoicesIncomeClassificationDetails"):
+                if ctag in ("invoicesExpensesClassificationDetails", "invoicesIncomeClassificationDetails"):
                     line_no = ""
                     for sc in c:
                         sctag = _local(sc)
@@ -263,4 +268,35 @@ def parse_classifications_doc(payload: bytes) -> dict[str, list[dict[str, Any]]]
                                     "amount": amt,
                                     "vat_type": vat_type,
                                 })
+    return out
+
+
+def parse_e3_info(payload: bytes) -> dict[str, list[dict[str, Any]]]:
+    """Εξαγωγή εγγραφών E3 (V_Class_Category, V_Class_Type, V_Class_Value) από RequestedE3Info.
+    Επιστρέφει { invoiceMark: [ {"kind": "expense"|"income", "line": "1", "type": typ, "category": cat, "amount": amt, "vat_type": ""}, ... ] }"""
+    root = ET.fromstring(payload)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for node in root.iter():
+        if _local(node) != "E3Info":
+            continue
+        fields = {_local(s): (s.text or "").strip() for s in node}
+        mark = fields.get("V_Mark", "")
+        cat = fields.get("V_Class_Category", "")
+        typ = fields.get("V_Class_Type", "")
+        val_str = fields.get("V_Class_Value", "0")
+        if not mark or not cat or "ΜΗ ΧΑΡΑΚΤΗΡΙΣΜΕΝΑ" in cat.upper():
+            continue
+        try:
+            amt = round(float(val_str), 2)
+        except ValueError:
+            amt = 0.0
+        kind = "income" if cat.startswith("category1") else "expense"
+        out.setdefault(mark, []).append({
+            "kind": kind,
+            "line": "1",
+            "type": typ,
+            "category": cat,
+            "amount": abs(amt),
+            "vat_type": "",
+        })
     return out

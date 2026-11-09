@@ -80,12 +80,16 @@ def missing_ids(conn: sqlite3.Connection, latest: Optional[int] = None) -> list[
 
 
 def backfill(conn: sqlite3.Connection, session: requests.Session, max_fetch: int = MAX_FETCH,
-             sleep: Callable[[float], None] = time.sleep) -> dict[str, int]:
+             sleep: Callable[[float], None] = time.sleep,
+             on_progress: Optional[Callable[[str], None]] = None) -> dict[str, int]:
     """Κατεβάζει τα άρθρα που λείπουν και τα αποθηκεύει όπως το RSS (ίδιο dedup / ίδια ροή προς το LLM)."""
     ids = missing_ids(conn)
     items: list[FeedItem] = []
     gone: list[int] = []
-    for i in ids[:max_fetch]:
+    to_fetch = ids[:max_fetch]
+    for idx, i in enumerate(to_fetch, 1):
+        if on_progress:
+            on_progress(f"Συμπλήρωση Taxheaven ({idx}/{len(to_fetch)})…")
         url = NEWS_URL.format(id=i)
         try:
             resp = session.get(url, timeout=DEFAULT_TIMEOUT, allow_redirects=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import logging
 import sqlite3
 from datetime import date
 from typing import Any, Callable, Optional
@@ -10,7 +11,9 @@ from typing import Any, Callable, Optional
 from .. import db
 from . import credentials
 from .client import AuthError, MydataClient
-from .parse import parse_classifications_doc, parse_page
+from .parse import parse_classifications_doc, parse_e3_info, parse_page
+
+log = logging.getLogger(__name__)
 
 
 def month_range(ym: str) -> tuple[str, str]:
@@ -75,6 +78,13 @@ def sync_range(conn: sqlite3.Connection, afm: str, months: list[str],
                         docs += parse_page(page, "incoming" if incoming else "outgoing")
                         for mark, items in parse_classifications_doc(page).items():
                             cls_by_mark.setdefault(mark, []).extend(items)
+                if hasattr(client, "fetch_e3_pages"):
+                    try:
+                        for page in client.fetch_e3_pages(date_from, date_to, should_cancel=should_cancel):
+                            for mark, items in parse_e3_info(page).items():
+                                cls_by_mark.setdefault(mark, []).extend(items)
+                    except Exception as e3_exc:
+                        log.warning("RequestE3Info failed for %s (%s-%s): %s", afm, date_from, date_to, e3_exc)
             except AuthError:
                 credentials.record_check(conn, afm, "invalid")
                 return {"ok": False, "reason": "Το myDATA απέρριψε τους κωδικούς (όνομα χρήστη / κλειδί API).",
@@ -109,9 +119,11 @@ def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], month
                                             "amount": it["amount"], "vat_type": it.get("vat_type", "")})
                             existing_sigs.add(sig)
                     lines = det.setdefault("lines", [])
+                    if not lines:
+                        lines.append({"n": "1", "classifications": []})
                     for it in cls_items:
                         line_str = str(it.get("line") or "1")
-                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0] if lines else None)
+                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0])
                         if target_line is not None:
                             line_cls = target_line.setdefault("classifications", [])
                             lsig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))
@@ -159,9 +171,11 @@ def _store(conn: sqlite3.Connection, afm: str, docs: list[dict[str, Any]], month
                             existing_sigs.add(sig)
                             changed = True
                     lines = det.setdefault("lines", [])
+                    if not lines:
+                        lines.append({"n": "1", "classifications": []})
                     for it in cls_items:
                         line_str = str(it.get("line") or "1")
-                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0] if lines else None)
+                        target_line = next((l for l in lines if str(l.get("n", "")) == line_str), lines[0])
                         if target_line is not None:
                             line_cls = target_line.setdefault("classifications", [])
                             lsig = (it.get("kind"), it.get("type"), it.get("category"), it.get("amount"))

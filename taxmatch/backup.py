@@ -47,8 +47,10 @@ def create_backup(db_path: Path, reason: str = "manual") -> Optional[Path]:
     target = target_dir / f"{_PREFIX}-{stamp}-{reason}.db"
 
     try:
-        source = sqlite3.connect(str(db_path))
-        dest = sqlite3.connect(str(target))
+        source = sqlite3.connect(str(db_path), timeout=5.0)
+        source.execute("PRAGMA busy_timeout = 5000")
+        dest = sqlite3.connect(str(target), timeout=5.0)
+        dest.execute("PRAGMA busy_timeout = 5000")
         with dest:
             source.backup(dest)  # συνεπές snapshot ακόμη και σε WAL
         dest.close()

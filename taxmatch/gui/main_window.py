@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
         self.notice_btn.setToolTip("Κέντρο ειδοποιήσεων")
         self.notice_btn.toggled.connect(self._toggle_notice_panel)
         quick_row.insertWidget(quick_row.count() - 1, self.notice_btn)
-        self.notice_panel = QFrame(central)
+        self.notice_panel = QFrame(self)
         self.notice_panel.setObjectName("noticeCenter")
         panel = QVBoxLayout(self.notice_panel)
         panel.setContentsMargins(16, 12, 16, 14)
@@ -489,7 +489,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMaximumHeight(320)
+        scroll.setMaximumHeight(480)
         holder = QWidget()
         self.notices_box = QVBoxLayout(holder)
         self.notices_box.setContentsMargins(2, 2, 2, 2)
@@ -525,14 +525,16 @@ class MainWindow(QMainWindow):
     def _reposition_notice_panel(self) -> None:
         if not hasattr(self, "notice_btn") or not hasattr(self, "notice_panel"):
             return
-        parent_widget = self.notice_panel.parentWidget() or self
-        btn_pos = self.notice_btn.mapTo(parent_widget, QPoint(0, self.notice_btn.height()))
-        parent_width = parent_widget.width()
-        panel_width = min(560, max(360, parent_width - 48))
+        btn_pos = self.notice_btn.mapTo(self, QPoint(0, self.notice_btn.height()))
+        parent_width = self.width()
+        parent_height = self.height()
+        panel_width = min(680, max(460, parent_width - 48))
         x = btn_pos.x() + self.notice_btn.width() - panel_width
         x = max(16, min(x, parent_width - panel_width - 16))
         y = btn_pos.y() + 6
-        self.notice_panel.setGeometry(x, y, panel_width, min(420, max(130, self.notice_panel.sizeHint().height())))
+        max_h = min(560, max(180, parent_height - y - 24))
+        target_h = min(max_h, max(140, self.notice_panel.sizeHint().height()))
+        self.notice_panel.setGeometry(x, y, panel_width, target_h)
         self.notice_panel.raise_()
 
     def resizeEvent(self, event) -> None:
@@ -638,6 +640,7 @@ class MainWindow(QMainWindow):
             text.setStyleSheet(f"color:{CURRENT.txt}; font-size:12.5px; border:none; background:transparent;")
             row.addWidget(text, 1)
             btn = QPushButton(n["label"])
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             if n.get("afms"):
                 btn.setToolTip("Ανοίγει τους Πελάτες φιλτραρισμένους σε αυτούς της ειδοποίησης")
             btn.clicked.connect(lambda _=False, endpoint=n["endpoint"], afms=n.get("afms"):
@@ -645,11 +648,14 @@ class MainWindow(QMainWindow):
             row.addWidget(btn)
             if n.get("dismiss"):
                 read = QPushButton("Αναγνώστηκε")
+                read.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
                 read.setToolTip("Κρύβει την ειδοποίηση· οι πελάτες κρατούν έναν αστερίσκο «*» στη στήλη ΦΠΑ ώς την "
                                 "επόμενη εκκίνηση (ή μόνιμα: Ρυθμίσεις → «Μόνιμος αστερίσκος ΦΠΑ»)")
                 read.clicked.connect(lambda _=False, key=n["dismiss"]: self._dismiss_notice(key))
                 row.addWidget(read)
             self.notices_box.addWidget(frame)
+        if self.notice_panel.isVisible():
+            self._reposition_notice_panel()
 
     def _aml_notices(self) -> list[dict]:
         """Ειδοποίηση μόνο για ΕΚΠΡΟΘΕΣΜΕΣ επανεξετάσεις δέουσας επιμέλειας (όχι για «χωρίς αξιολόγηση»: θα ήταν
@@ -3241,7 +3247,7 @@ class MainWindow(QMainWindow):
         for b in self._run_buttons:
             b.setEnabled(False)
         self.run_status.setText("Έναρξη…")
-        p_toast = ProgressToast(self, "Έναρξη ελέγχου νέων…", title="Έλεγχος & αντιστοίχιση νέων")
+        p_toast = ProgressToast(self, "Ξεκίνησε ο έλεγχος νέων…", title="Έλεγχος & αντιστοίχιση νέων")
 
         def on_step(msg: str) -> None:
             self.run_status.setText(msg)
@@ -3255,9 +3261,7 @@ class MainWindow(QMainWindow):
             p_toast.update(msg, done=done_val, total=tot_val)
 
         def work(progress):
-            # ΧΩΡΙΣ conn=self.conn: αφήνουμε το pipeline να ανοίξει τη δική του σύνδεση σε αυτό το thread — το
-            # self.conn δημιουργήθηκε στο UI thread (δες σχόλιο στο _start_lookup). Το backup γίνεται μέσα στο
-            # ίδιο το pipeline (πριν από κάθε έλεγχο, χειροκίνητο ή προγραμματισμένο).
+            progress("Έναρξη: έλεγχος διεργασιών και προετοιμασία…")
             return pipeline.run_pipeline("manual", on_progress=progress)
 
         def done(stats):
