@@ -54,6 +54,24 @@ KAD_PAREPID: list[tuple[str, str, str, str, str]] = [
 ]
 
 
+_DIGITS: list[tuple[str, tuple[str, ...]]] = []
+
+
+def _best(d: str) -> Optional[tuple[str, ...]]:
+    """Ο πιο συγκεκριμένος κωδικός της λίστας για τα ψηφία ΚΑΔ `d` (με cache — καλείται για κάθε πελάτη σε κάθε
+    σχεδίαση Ημερολογίου: 328.000 κλήσεις `kad_digits` σε μία εκκίνηση πριν, 2026-11-10)."""
+    if d in _BEST:
+        return _BEST[d]
+    if not _DIGITS:
+        _DIGITS.extend((kad_digits(row[0]), row) for row in KAD_PAREPID)
+    best = max(((pd, row) for pd, row in _DIGITS if pd and d.startswith(pd)), key=lambda x: len(x[0]), default=None)
+    _BEST[d] = best[1] if best else None
+    return _BEST[d]
+
+
+_BEST: dict[str, Optional[tuple[str, ...]]] = {}
+
+
 def kad_matches(kads: Iterable[Any]) -> list[dict[str, str]]:
     """ΚΑΔ του πελάτη που ανήκουν στη λίστα (πρόθεμα ψηφίων· π.χ. 56.10.11.02 ⊂ 56.10). Ο πιο συγκεκριμένος κωδικός της
     λίστας ανά ΚΑΔ πελάτη. [{kad, code, description, tax_type, rate}]."""
@@ -62,8 +80,7 @@ def kad_matches(kads: Iterable[Any]) -> list[dict[str, str]]:
         d = kad_digits(kad)
         if not d:
             continue
-        best = max((row for row in KAD_PAREPID if d.startswith(kad_digits(row[0]))),
-                   key=lambda row: len(kad_digits(row[0])), default=None)
+        best = _best(d)
         if best:
             out.append({"kad": format_kad(kad), "code": best[0], "description": best[2], "tax_type": best[3],
                         "rate": best[4]})

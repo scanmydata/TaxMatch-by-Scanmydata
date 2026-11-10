@@ -8,8 +8,8 @@ from taxmatch.mydata import pdfs
 
 def test_chargeline_is_legal_entity_and_not_private():
     b_chargeline = {
-        "afm": "802499326",
-        "name": "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε",
+        "afm": "800000002",
+        "name": "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε",
         "legal_form": "ΜΟΝΟΠΡΟΣ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ",
         "activity_state": "active",
         "status": "ΕΝΕΡΓΗ",
@@ -23,43 +23,32 @@ def test_chargeline_is_legal_entity_and_not_private():
 def test_mallis_is_private_person(conn):
     now = db.utcnow()
     # Setup company and member using service.add
-    service.add(conn, "802499326", "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
-    conn.execute("UPDATE businesses SET legal_form='ΜΟΝΟΠΡΟΣ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ', status='ΕΝΕΡΓΗ', activity_state='active' WHERE afm='802499326'")
+    service.add(conn, "800000002", "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    conn.execute("UPDATE businesses SET legal_form='ΜΟΝΟΠΡΟΣ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ', status='ΕΝΕΡΓΗ', activity_state='active' WHERE afm='800000002'")
 
-    service.add(conn, "079629198", "ΜΑΛΛΗΣ ΕΛΕΥΘΕΡΙΟΣ ΑΓΓΕΛΟΣ", source="member")
-    conn.execute("UPDATE businesses SET legal_form='', status='ΔΙΑΚΟΠΗ', activity_state='ceased' WHERE afm='079629198'")
+    service.add(conn, "070000005", "ΜΑΡΚΟΥ ΝΙΚΟΛΑΟΣ ΑΓΓΕΛΟΣ", source="member")
+    conn.execute("UPDATE businesses SET legal_form='', status='ΔΙΑΚΟΠΗ', activity_state='ceased' WHERE afm='070000005'")
     conn.execute("INSERT OR REPLACE INTO company_members(company_afm, member_afm, name, role, updated_at) VALUES (?,?,?,?,?)",
-                 ("802499326", "079629198", "ΜΑΛΛΗΣ ΕΛΕΥΘΕΡΙΟΣ ΑΓΓ", "ΔΙΑΧΕΙΡΙΣΤΗΣ · ΝΟΜΙΜΟΣ ΕΚΠΡΟΣΩΠΟΣ", now))
+                 ("800000002", "070000005", "ΜΑΡΚΟΥ ΝΙΚΟΛΑΟΣ ΑΓΓ", "ΔΙΑΧΕΙΡΙΣΤΗΣ · ΝΟΜΙΜΟΣ ΕΚΠΡΟΣΩΠΟΣ", now))
 
-    b_mallis = dict(conn.execute("SELECT * FROM businesses WHERE afm='079629198'").fetchone())
-    assert obligations.is_legal_entity(b_mallis.get("legal_form") or "") is False
-    assert obligations.is_private_person(b_mallis, conn) is True
+    b_markou = dict(conn.execute("SELECT * FROM businesses WHERE afm='070000005'").fetchone())
+    assert obligations.is_legal_entity(b_markou.get("legal_form") or "") is False
+    assert obligations.is_private_person(b_markou, conn) is True
 
     # Even if activity_state is not ceased yet, if they are a company member without active business traits
-    b_mallis_pending = dict(b_mallis)
-    b_mallis_pending["activity_state"] = ""
-    b_mallis_pending["status"] = ""
-    assert obligations.is_private_person(b_mallis_pending, conn) is True
+    b_markou_pending = dict(b_markou)
+    b_markou_pending["activity_state"] = ""
+    b_markou_pending["status"] = ""
+    assert obligations.is_private_person(b_markou_pending, conn) is True
 
-def test_debt_voucher_pdf_generation():
-    pdf_bytes = easycheck._debt_voucher_pdf(
-        debt_id="802499326 910102249 629062401277",
-        total_due="3.517,92 €",
-        period="01/09/2026-30/09/2026",
-        doy="ΚΕ.Β.ΕΙΣ. ΑΤΤΙΚΗΣ",
-        tax_kind="ΧΡΕΩΣΤΙΚΕΣ ΔΗΛΩΣΕΙΣ ΦΠΑ ΜΕΣΩ INTERNET",
-        installment="1.758,96 €",
-        pay_by="30/10/2026",
-        afm="802499326",
-        name="CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε",
-        issued_at="21/10/2026"
-    )
-    assert pdf_bytes.startswith(b"%PDF")
-    assert len(pdf_bytes) > 1000
+def test_no_synthetic_debt_voucher_any_more():
+    """Η ταυτότητα οφειλής είναι ΠΑΝΤΑ το πρωτότυπο της ΑΑΔΕ (ρητό αίτημα 2026-11-10) — όχι δικό μας έντυπο."""
+    assert not hasattr(easycheck, "_debt_voucher_pdf")
+
 
 def test_parallel_pdf_download_month(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(pdfs.config, "data_dir", lambda: tmp_path)
-    afm = "802499326"
+    afm = "800000002"
     ym = "2026-09"
     now = db.utcnow()
 
@@ -68,7 +57,7 @@ def test_parallel_pdf_download_month(conn, tmp_path, monkeypatch):
         conn.execute("INSERT INTO mydata_docs (afm, mark, issue_date, direction, issuer_name, issuer_vat, "
                      "counter_name, counter_vat, series, aa, total, url, pdf_status, pdf_path, render_tried, fetched_at) "
                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (afm, f"MARK{i}", f"2026-09-0{i}", "incoming", "SUPPLIER", "123456789", "CHARGELINE", afm,
+                     (afm, f"MARK{i}", f"2026-09-0{i}", "incoming", "SUPPLIER", "123456789", "CHRONOTEST", afm,
                       "A", str(i), 100.0 * i, f"https://example.com/inv{i}", "", "", 0, now))
 
     def fake_fetch(u):
@@ -87,8 +76,8 @@ def test_parallel_pdf_download_month(conn, tmp_path, monkeypatch):
 def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(conn, tmp_path, monkeypatch):
     from taxmatch import config
     monkeypatch.setattr(config, "data_dir", lambda: tmp_path)
-    afm = "802499326"
-    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    afm = "800000002"
+    service.add(conn, afm, "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
 
     user_html_snippet = '''
     <table class="displayTable">
@@ -113,7 +102,7 @@ def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(co
     <html>
     <body>
     <table>
-        <tr><td>Ταυτότητα Οφειλής</td><td>802499326 910102202 629053900890</td></tr>
+        <tr><td>Ταυτότητα Οφειλής</td><td>800000002 910102202 629053900890</td></tr>
         <tr><td>Συνολικό ποσό οφειλής</td><td>3.543,17 €</td></tr>
         <tr><td>Ποσό δόσης δήλωσης της 30/09/2026</td><td>1.771,59 €</td></tr>
         <tr><td>ΔΟΥ</td><td>ΚΕ.ΦΟ.ΔΕ. ΑΤΤΙΚΗΣ</td></tr>
@@ -135,12 +124,17 @@ def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(co
                 return {"ok": True, "text": debt_code_html, "content": debt_code_html.encode("utf-8")}
             return {"ok": True, "text": user_html_snippet, "content": user_html_snippet.encode("utf-8")}
 
-    class FakeCtx:
+    class FakeCtx(easycheck._Ctx):
+        printed: list = []
+
         def __init__(self):
-            self.http = FakeHttp()
-            self.afm = afm
-            self.want_pdf = True
+            super().__init__(FakeHttp(), afm, True)
             self.conn = conn
+
+        def print_page(self, url, must_contain=""):          # ο αόρατος browser τυπώνει τη σελίδα της ΑΑΔΕ
+            self.printed.append(url)
+            return b"%PDF-1.4 AADE printed page"
+
         def get(self, url):
             if "displayDebtCode.htm" in url:
                 return debt_code_html
@@ -154,7 +148,7 @@ def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(co
 
     assert submitted is None or submitted is True
     assert amounts.get("result") == "Χρεωστική"
-    assert amounts.get("debt_id") == "802499326 910102202 629053900890"
+    assert amounts.get("debt_id") == "800000002 910102202 629053900890"
 
     # Ελέγχουμε ότι ΚΑΙ το έντυπο ΚΑΙ η ταυτότητα οφειλής κατέβηκαν ως PDF
     sub_pdf = amounts.get("submission_pdf")
@@ -163,13 +157,14 @@ def test_display_declarations_list_with_doDisplayDebtCode_downloads_both_pdfs(co
     assert debt_pdf is not None and Path(debt_pdf).exists()
     assert "submission_pdfs" in amounts
     assert len(amounts["submission_pdfs"]) == 2
+    assert amounts.get("pdf_src") == "aade" and "displayDebtCode.htm" in ctx.printed[-1]
 
 
 def test_html_only_displayDebtCode_generates_and_saves_both_pdfs(conn, tmp_path, monkeypatch):
     from taxmatch import config
     monkeypatch.setattr(config, "data_dir", lambda: tmp_path)
-    afm = "802499326"
-    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    afm = "800000002"
+    service.add(conn, afm, "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
 
     user_html_snippet = '''
     <table class="displayTable">
@@ -194,7 +189,7 @@ def test_html_only_displayDebtCode_generates_and_saves_both_pdfs(conn, tmp_path,
     <html>
     <body>
     <table>
-        <tr><td>Ταυτότητα Οφειλής</td><td>802499326 910102202 629053900890</td></tr>
+        <tr><td>Ταυτότητα Οφειλής</td><td>800000002 910102202 629053900890</td></tr>
         <tr><td>Συνολικό ποσό οφειλής</td><td>3.543,17 €</td></tr>
         <tr><td>Ποσό δόσης δήλωσης της 30/09/2026</td><td>1.771,59 €</td></tr>
         <tr><td>ΔΟΥ</td><td>ΚΕ.ΦΟ.ΔΕ. ΑΤΤΙΚΗΣ</td></tr>
@@ -216,12 +211,17 @@ def test_html_only_displayDebtCode_generates_and_saves_both_pdfs(conn, tmp_path,
                 return {"ok": True, "text": debt_code_html, "content": debt_code_html.encode("utf-8")}
             return {"ok": True, "text": user_html_snippet, "content": user_html_snippet.encode("utf-8")}
 
-    class FakeCtx:
+    class FakeCtx(easycheck._Ctx):
+        printed: list = []
+
         def __init__(self):
-            self.http = FakeHttpHtmlOnly()
-            self.afm = afm
-            self.want_pdf = True
+            super().__init__(FakeHttpHtmlOnly(), afm, True)
             self.conn = conn
+
+        def print_page(self, url, must_contain=""):          # ο αόρατος browser τυπώνει τη σελίδα της ΑΑΔΕ
+            self.printed.append(url)
+            return b"%PDF-1.4 AADE printed page"
+
         def get(self, url):
             if "displayDebtCode.htm" in url:
                 return debt_code_html
@@ -235,7 +235,7 @@ def test_html_only_displayDebtCode_generates_and_saves_both_pdfs(conn, tmp_path,
 
     assert submitted is None or submitted is True
     assert amounts.get("result") == "Χρεωστική"
-    assert amounts.get("debt_id") == "802499326 910102202 629053900890"
+    assert amounts.get("debt_id") == "800000002 910102202 629053900890"
 
     sub_pdf = amounts.get("submission_pdf")
     debt_pdf = amounts.get("pdf")
@@ -246,4 +246,5 @@ def test_html_only_displayDebtCode_generates_and_saves_both_pdfs(conn, tmp_path,
     assert Path(debt_pdf).name.startswith("TO_")
     assert "submission_pdfs" in amounts
     assert len(amounts["submission_pdfs"]) == 2
+    assert amounts.get("pdf_src") == "aade" and "displayDebtCode.htm" in ctx.printed[-1]
 

@@ -41,7 +41,7 @@ def test_parse_classifications_doc():
 
 
 def test_store_updates_existing_and_new_docs_with_classifications(conn):
-    afm = "802499326"
+    afm = "800000002"
     now = db.utcnow()
 
     # Create dummy doc in DB with empty classifications

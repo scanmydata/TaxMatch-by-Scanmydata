@@ -120,11 +120,21 @@ class HeadlessRenderer:
         if self._profile is not None:
             shutil.rmtree(self._profile, ignore_errors=True)
 
-    def render(self, url: str) -> bytes:
+    def render(self, url: str, cookies: Optional[dict[str, dict[str, str]]] = None, min_text: int = MIN_TEXT,
+               must_contain: str = "") -> bytes:
+        """`cookies` ({host: {όνομα: τιμή}} — η συνεδρία του δικού μας HTTP client, ΜΟΝΟ στη μνήμη): η σελίδα ανοίγει
+        ήδη συνδεδεμένη (π.χ. «Ταυτότητα Οφειλής» της ΑΑΔΕ, που το «Εκτύπωση» της είναι `window.print()`).
+        `must_contain`: κείμενο που πρέπει να υπάρχει (αλλιώς π.χ. τυπώθηκε η σελίδα σύνδεσης)."""
         from ..aml.gemi_browser import Cdp
         tab = _json(f"http://127.0.0.1:{self._port}/json/new?about:blank", method="PUT")   # νέος Chrome: μόνο PUT
         cdp = Cdp(tab["webSocketDebuggerUrl"])
         try:
+            if cookies:
+                cdp.call("Network.enable")
+                for host, kv in cookies.items():
+                    for name, value in kv.items():
+                        cdp.call("Network.setCookie", {"name": name, "value": value, "url": f"https://{host}/",
+                                                       "secure": True})
             cdp.call("Page.navigate", {"url": url})
             deadline = time.monotonic() + self.timeout
             text = 0
@@ -133,11 +143,13 @@ class HeadlessRenderer:
                 if cdp.evaluate("document.readyState") != "complete":
                     continue
                 text = cdp.evaluate("document.body ? document.body.innerText.trim().length : 0") or 0
-                if text >= MIN_TEXT:
+                if text >= min_text:
                     time.sleep(0.4)                     # γραμματοσειρές/εικόνες
                     break
-            if text < MIN_TEXT:
+            if text < min_text:
                 raise RenderError("η σελίδα δεν στοιχειοθετήθηκε (κενή προβολή — πιθανός έλεγχος «είστε άνθρωπος»)")
+            if must_contain and must_contain not in (cdp.evaluate("document.body.innerText") or ""):
+                raise RenderError("η σελίδα δεν είναι η αναμενόμενη (ίσως έληξε η σύνδεση)")
             res = cdp.call("Page.printToPDF", {"printBackground": True, "preferCSSPageSize": True})
             data = base64.b64decode(res.get("data") or "")
             if not data.startswith(b"%PDF"):

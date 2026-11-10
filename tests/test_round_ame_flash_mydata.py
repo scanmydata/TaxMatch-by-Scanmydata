@@ -1,5 +1,5 @@
 """Έλεγχοι για τις νέες λειτουργίες:
-1. Αναγνώριση νομικής μορφής (π.χ. ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ - CHARGELINE) ως νομικό πρόσωπο
+1. Αναγνώριση νομικής μορφής (π.χ. ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ - CHRONOTEST) ως νομικό πρόσωπο
    (και όχι ιδιώτης), ώστε να εμφανίζεται η καρτέλα myDATA.
 2. Αυτόματη ανάκτηση ΑΜΕ (e-ΕΦΚΑ) στην ενημέρωση στοιχείων πελάτη (lookup_and_store) και σωστή δημιουργία υποχρεώσεων μισθοδοσίας.
 3. Βελτιωμένη απεικόνιση και ενημέρωση των ποσοστών στα flash messages (ProgressToast / JobQueue).
@@ -14,7 +14,7 @@ from taxmatch.gui.toast import ProgressToast
 
 def test_chargeline_is_legal_entity_not_private():
     form = "ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ"
-    b = {"afm": "802499326", "legal_form": form, "activity_state": "active"}
+    b = {"afm": "800000002", "legal_form": form, "activity_state": "active"}
     assert obligations.is_legal_entity(form) is True
     assert obligations.is_private_person(b) is False
 
@@ -30,8 +30,8 @@ def test_chargeline_is_legal_entity_not_private():
 
 
 def test_lookup_and_store_automatically_retrieves_ame_and_sets_employer(conn):
-    afm = "802499326"
-    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ")
+    afm = "800000002"
+    service.add(conn, afm, "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ")
     credentials.set_(conn, afm, "user", "pass")
 
     # Αρχικά employer είναι None (άγνωστο)
@@ -42,7 +42,7 @@ def test_lookup_and_store_automatically_retrieves_ame_and_sets_employer(conn):
     def fake_aade(*args, **kwargs):
         return {
             "ok": True,
-            "name": "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ",
+            "name": "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ",
             "legal_form": "ΜΟΝΟΠΡΟΣΩΠΗ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ",
             "doy": "ΙΒ' ΑΘΗΝΩΝ",
             "address": "Δοκιμή 1",
@@ -129,8 +129,8 @@ def test_client_table_keyboard_search_jumps_past_arrows():
     table = _ClientTableWidget(3, len(_CLIENT_COLS))
 
     item0 = QTableWidgetItem("ΑΛΦΑ ΑΕ")
-    item1 = QTableWidgetItem("▼ CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
-    item2 = QTableWidgetItem("↳ ΜΑΛΛΗΣ ΕΛΕΥΘΕΡΙΟΣ")
+    item1 = QTableWidgetItem("▼ CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    item2 = QTableWidgetItem("↳ ΜΑΡΚΟΥ ΝΙΚΟΛΑΟΣ")
 
     table.setItem(0, _C_NAME, item0)
     table.setItem(1, _C_NAME, item1)
@@ -139,7 +139,7 @@ def test_client_table_keyboard_search_jumps_past_arrows():
     table.setCurrentCell(0, _C_NAME)
     assert table.currentRow() == 0
 
-    # Πάτημα 'C' οδηγεί απευθείας στην CHARGELINE παρόλο που έχει το '▼ ' μπροστά
+    # Πάτημα 'C' οδηγεί απευθείας στην CHRONOTEST παρόλο που έχει το '▼ ' μπροστά
     table.keyboardSearch("C")
     assert table.currentRow() == 1
 
@@ -157,4 +157,24 @@ def test_client_table_keyboard_search_jumps_past_arrows():
     table.keyboardSearch("Χ")
     assert table.currentRow() == 1
 
+    table.deleteLater()
+
+
+def test_client_table_letter_goes_to_first_client_with_that_letter():
+    """Αναφορά χρήστη 2026-11-10: το γράμμα πάει στον ΠΡΩΤΟ πελάτη με αυτό το γράμμα, όχι στον επόμενο από τη θέση μας."""
+    from PySide6.QtWidgets import QApplication, QTableWidgetItem
+    from taxmatch.gui.main_window import _ClientTableWidget, _C_NAME, _CLIENT_COLS
+
+    app = QApplication.instance() or QApplication([])
+    names = ["ΑΛΦΑ", "ΚΑΠΠΑ ΕΝΑ", "ΛΑΜΔΑ", "ΚΑΠΠΑ ΔΥΟ", "ΜΙ"]
+    table = _ClientTableWidget(len(names), len(_CLIENT_COLS))
+    for i, n in enumerate(names):
+        table.setItem(i, _C_NAME, QTableWidgetItem(n))
+    table.setCurrentCell(2, _C_NAME)                   # στη μέση της λίστας (ΛΑΜΔΑ)
+    table.keyboardSearch("Κ")
+    assert table.currentRow() == 1                      # ο πρώτος με Κ — όχι ο ΚΑΠΠΑ ΔΥΟ μετά τη θέση μας
+    table.keyboardSearch("Κ")
+    assert table.currentRow() == 3                      # ξανά το ίδιο γράμμα → επόμενος με Κ
+    table.keyboardSearch("Κ")
+    assert table.currentRow() == 1                      # κυκλικά
     table.deleteLater()

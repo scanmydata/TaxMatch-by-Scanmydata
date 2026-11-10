@@ -27,6 +27,7 @@ import re
 import sqlite3
 import time
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config
@@ -234,8 +235,27 @@ def _dae_period(p: dict[str, Any]) -> tuple[str, str, str]:
     return f"{MONTHS_NOM[m - 1]} {y}", end or month_end(y, m).isoformat(), "month"
 
 
-def parepid_entry(http: _HyperHttp, year: int, today: Optional[date] = None) -> dict[str, Any]:
-    """Εγγραφή «ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ» της χρήσης (ήδη συνδεδεμένο `http`, βλ. `dae_login`)."""
+def _parepid_pdf(http: _HyperHttp, sub_id: Any, period_id: Any, target: Path) -> str:
+    """Το έντυπο «Δήλωση Απόδοσης» μιας υποβολής (`/ViewReports/ReportStatementYpovoli/{id}/{periodId}`, runner
+    `dae-parepid-check.js`) → `target`. Μία φορά ανά υποβολή. '' αν η πύλη δεν δίνει PDF (π.χ. μηδενική δήλωση)."""
+    if target.exists() and target.stat().st_size > 500:
+        return str(target)
+    try:
+        r = http.follow("GET", f"{DAE}/ViewReports/ReportStatementYpovoli/{sub_id}/{period_id}")
+    except Exception as exc:                            # noqa: BLE001
+        log.warning("dae pdf %s: %s", sub_id, exc)
+        return ""
+    if not r.get("is_pdf"):
+        return ""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(r["content"])
+    return str(target)
+
+
+def parepid_entry(http: _HyperHttp, year: int, today: Optional[date] = None,
+                  pdf_folder: Optional[Path] = None, afm: str = "") -> dict[str, Any]:
+    """Εγγραφή «ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ» της χρήσης (ήδη συνδεδεμένο `http`, βλ. `dae_login`). `pdf_folder`: και το έντυπο
+    κάθε υποβολής (αναφορά χρήστη 2026-11-10: «δεν έρχεται το έντυπο, μόνο η κατάσταση»)."""
     today = today or date.today()
     periods_all = _dae_json(http, "GET", "/api/Helper/Periodoi") or []
     pending = _dae_json(http, "GET", "/api/StatementsEpixirisi/GetPendingPeriodikes") or []
@@ -276,6 +296,14 @@ def parepid_entry(http: _HyperHttp, year: int, today: Optional[date] = None) -> 
                        if s.get("teleutaiaImeraPrinProstimo")), "")
         if pay_by:
             amounts["pay_by"] = pay_by
+        if pdf_folder is not None:
+            tag = end[:7] if ptype == "month" else f"{end[:4]}-Q{(int(end[5:7]) - 1) // 3 + 1}" if end else str(p["id"])
+            pdfs = [f for f in (_parepid_pdf(http, s.get("id"), p["id"],
+                                             pdf_folder / f"ΠΑΡΕΠΙΔΗΜΟΥΝΤΕΣ_{afm}_{tag}_{s.get('id')}.pdf")
+                                for s in subs if s.get("id")) if f]
+            if pdfs:
+                amounts["submission_pdf"] = pdfs[-1]
+                amounts["submission_pdfs"] = pdfs
         out.append({**base, "status": "submitted", "amounts": amounts,
                     "detail": f"{len(subs)} δήλωση(-εις) τέλους" + (" · ανεξόφλητο" if unpaid else "")})
     status = ("not_obligated" if not out else
@@ -311,7 +339,7 @@ def wanted(conn: sqlite3.Connection, afm: str, year: int) -> set[str]:
 
 def check_entries(conn: sqlite3.Connection, afm: str, year: int,
                   aade_login: Callable[[str, str], dict] = lookup_aade.aade_login,
-                  http_factory: Callable[[], _HyperHttp] = _HyperHttp) -> list[dict[str, Any]]:
+                  http_factory: Callable[[], _HyperHttp] = _HyperHttp, want_pdf: bool = False) -> list[dict[str, Any]]:
     """Έλεγχος των πυλών που αφορούν τον πελάτη (`wanted`) με τους κωδικούς TAXISnet ΤΟΥ ΠΕΛΑΤΗ → εγγραφές για το
     `obligation_checks`. Σφάλμα = εγγραφή με status 'error' (όχι εξαίρεση)."""
     keys = wanted(conn, afm, year)
@@ -342,7 +370,9 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int,
             login = dae_login(http, *creds)
             if not login["ok"]:
                 raise RuntimeError(login["reason"])
-            out.append(parepid_entry(http, year))
+            from . import config
+            out.append(parepid_entry(http, year, afm=afm, pdf_folder=(
+                config.data_dir() / "submissions" / afm / str(year)) if want_pdf else None))
         except Exception as exc:                        # noqa: BLE001
             log.warning("dae %s/%s: %s", afm, year, exc)
             if login and login.get("ok"):

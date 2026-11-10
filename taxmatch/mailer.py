@@ -29,7 +29,7 @@ from . import db, debts, office, settings_store
 
 log = logging.getLogger(__name__)
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$")
-KIND_LABEL = {"debts": "Οφειλές", "news": "Νέα", "test": "Δοκιμή"}
+KIND_LABEL = {"debts": "Οφειλές", "news": "Νέα", "test": "Δοκιμή", "traffic": "Τέλη κυκλοφορίας"}
 MAX_ATTACH_BYTES = 15 * 1024 * 1024            # τα περισσότερα SMTP κόβουν στα 20-25MB μετά το base64
 
 
@@ -240,6 +240,18 @@ def compose_debts(conn: sqlite3.Connection, afm: str) -> Optional[Message]:
     text, page = _wrap(intro, blocks_t, blocks_h, closing, _signature(conn))
     return Message(c.get("email") or c.get("email_assistant") or "", f"Οφειλές — {c.get('name') or afm}", text, page, files,
                    debts.fingerprint(rows), len(rows))
+
+
+def compose_traffic(conn: sqlite3.Connection, afm: str, fee_year: int, pdf: str) -> Message:
+    """Email με το ειδοποιητήριο τελών κυκλοφορίας του `fee_year` (myCAR) ως συνημμένο."""
+    c = _client(conn, afm)
+    intro = (f"Αγαπητέ/ή {c.get('name') or ''},\n\nσας αποστέλλουμε το ειδοποιητήριο τελών κυκλοφορίας {fee_year} "
+             f"(ΑΦΜ {afm}), όπως εκδόθηκε στο myCAR της ΑΑΔΕ. Η πληρωμή γίνεται έως 31/12/{fee_year - 1} με την "
+             "ταυτότητα οφειλής που αναγράφεται στο ειδοποιητήριο (e-banking / ΔΙΑΣ).")
+    closing = "Για οποιαδήποτε διευκρίνιση είμαστε στη διάθεσή σας."
+    text, page = _wrap(intro, [], [], closing, _signature(conn))
+    return Message(c.get("email") or c.get("email_assistant") or "", f"Τέλη κυκλοφορίας {fee_year} — {c.get('name') or afm}",
+                   text, page, [Path(pdf)] if pdf and Path(pdf).exists() else [], f"traffic:{fee_year}", 1)
 
 
 def _sent_articles(conn: sqlite3.Connection, afm: str) -> set[str]:

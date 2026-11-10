@@ -132,7 +132,7 @@ def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int]
         result["ok"] = result["ok"] and r.get("ok")
         result["entries"] += r.get("entries", [])
         result["entries"] += efka.check_apd_entries(conn, afm, y, want_pdf=want_pdf)
-        fees = fee_portals.check_entries(conn, afm, y)
+        fees = fee_portals.check_entries(conn, afm, y, want_pdf=want_pdf)
         fees += intrastat.check_entries(conn, afm, y, want_pdf=want_pdf)
         fees += advertising.check_akeed(conn, afm, y, ask_captcha=ask_captcha, want_pdf=want_pdf)
         if fees:

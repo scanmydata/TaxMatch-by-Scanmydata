@@ -881,8 +881,16 @@ def submission(rule_id: str, business: Optional[dict[str, Any]], ref_month: str,
     amounts = next((f["amounts"] for f in found if f.get("amounts")), {})
     detail = next((f.get("detail") for f in found if f.get("detail")), "")
     out.update(status=status, label=label, amounts=amounts, detail=detail)
-    if rule_id in PAYMENT_RULES and status == "pending":
-        out["label"] = "Εκδόθηκε — η εξόφληση στις οφειλές ΑΑΔΕ"
+    if rule_id in PAYMENT_RULES and status in ("pending", "not_submitted") and business:
+        # Πληρωμές (ΕΝΦΙΑ, τέλη κυκλοφορίας, δόσεις φόρου εισοδήματος — και για ατομικές επιχειρήσεις): με πετυχημένη
+        # λήψη οφειλών ΑΑΔΕ ξέρουμε αν εξοφλήθηκε — ανοιχτή οφειλή με σχετικό τίτλο = εκκρεμεί, καμία = εξοφλήθηκε
+        # (ρητό αίτημα 2026-11-10: «να υπάρχει έλεγχος ότι έχουν πληρωθεί οι δόσεις ή η πλήρης εξόφληση»).
+        if _debt_hit(rule_id, business):
+            out.update(status="pending", label="Ανοιχτή οφειλή ΑΑΔΕ — εκκρεμεί πληρωμή")
+        elif business.get("debt_sync_status") == "ok":
+            out.update(status="submitted", label="Εξοφλήθηκε (καμία ανοιχτή οφειλή ΑΑΔΕ)")
+        else:
+            out["label"] = "Εκδόθηκε — η εξόφληση φαίνεται με «Λήψη οφειλών»"
     return out
 
 

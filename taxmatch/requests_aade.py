@@ -260,8 +260,9 @@ def sync_request_detail(conn: sqlite3.Connection, http: Any, afm: str, request_i
             log.warning("Download request file %s failed: %s", f.get("fileId"), exc)
 
     seen_sql = ", seen=1" if mark_seen else ""
-    conn.execute(f"UPDATE aade_requests SET files_json=?{seen_sql} WHERE afm=? AND id=?",
-                 (json.dumps(files, ensure_ascii=False), afm, str(request_id)))
+    conn.execute(f"UPDATE aade_requests SET files_json=?, comm_json=?{seen_sql} WHERE afm=? AND id=?",
+                 (json.dumps(files, ensure_ascii=False), json.dumps(comm if isinstance(comm, list) else [],
+                                                                    ensure_ascii=False), afm, str(request_id)))
     return {"ok": True, "reason": "", "detail": detail, "comm": comm, "files": files}
 
 
@@ -278,6 +279,62 @@ def open_request(conn: sqlite3.Connection, afm: str, request_id: str, with_files
             return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")}
         http = login["http"]
     return sync_request_detail(conn, http, afm, request_id, with_files=with_files, mark_seen=True)
+
+
+#: Η σελίδα ενός αιτήματος στο SPA της πύλης (React router του eticketaade — `path: "/preview/:messageId"`, ζωντανά
+#: 2026-11-10): εκεί ο χρήστης απαντά / συμπληρώνει από τον browser.
+PORTAL = lookup_aade.AADE + "/saadekef/eticketaade/preview/{id}"
+COMM_LABEL = {"CLAR_REQ": "Η ΑΑΔΕ ζητά διευκρινίσεις", "CLAR_ANS": "Απάντηση στις διευκρινίσεις",
+              "CITIZEN": "Επικοινωνία με πρωτοβουλία του πελάτη", "PREVIOUS_ANSWER": "Προηγούμενη απάντηση της ΑΑΔΕ"}
+
+
+def thread(r: dict[str, Any]) -> list[dict[str, Any]]:
+    """Η αλληλεπίδραση ως συνομιλία, παλαιότερο πρώτο: το αίτημα (πελάτης) → ενδιάμεση επικοινωνία (`getMessageComm`:
+    `{messageText, type, createdAt, isIncoming}` — τύποι CLAR_REQ/CLAR_ANS/CITIZEN/PREVIOUS_ANSWER, όπως το Tax Center
+    `RequestDetail.Note`) → η απάντηση της ΑΑΔΕ. [{who: 'client'|'aade', label, date, text}]."""
+    out = [{"who": "client", "label": "Αίτημα", "date": r.get("submitted", ""), "text": r.get("text", "")}]
+    try:
+        comm = json.loads(r.get("comm_json") or "[]")
+    except ValueError:
+        comm = []
+    for n in comm if isinstance(comm, list) else []:
+        if not isinstance(n, dict):
+            continue
+        kind = str(n.get("type") or "")
+        incoming = n.get("isIncoming")
+        aade = kind in ("CLAR_REQ", "PREVIOUS_ANSWER") or (incoming is True and kind not in ("CLAR_ANS", "CITIZEN"))
+        text = str(n.get("messageText") or n.get("text") or "")
+        out.append({"who": "aade" if aade else "client", "label": COMM_LABEL.get(kind, "Επικοινωνία"),
+                    "date": str(n.get("createdAt") or n.get("date") or ""), "text": text})
+    if r.get("answer"):
+        out.append({"who": "aade", "label": "Απάντηση ΑΑΔΕ", "date": r.get("updated", ""), "text": r["answer"]})
+    first, rest = out[0], sorted(out[1:-1] if r.get("answer") else out[1:], key=lambda n: n["date"])
+    return [first, *rest] + ([out[-1]] if r.get("answer") else [])
+
+
+def last_message(r: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Το τελευταίο μήνυμα της συνομιλίας (για τις ειδοποιήσεις) — None αν υπάρχει μόνο το αίτημα."""
+    t = thread(r)
+    return t[-1] if len(t) > 1 else None
+
+
+def open_in_browser(conn: sqlite3.Connection, afm: str, request_id: str,
+                    login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
+    """Σύνδεση με τους κωδικούς του πελάτη ΕΔΩ και άνοιγμα του αιτήματος στον browser (Chrome/Edge, προσωρινό προφίλ,
+    cookies μόνο στη μνήμη — `handoff.py`), ώστε ο χρήστης να απαντήσει από εκεί. Ποτέ δεν υποβάλλει τίποτα η εφαρμογή."""
+    from . import handoff
+    creds = credentials.get(conn, afm)
+    if not creds:
+        return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη."}
+    login = login_fn(*creds)
+    if not login.get("ok"):
+        return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")}
+    http = login["http"]
+    http.follow("GET", API + "/getUser")                # συνεδρία του eticketaade
+    entry = handoff.remember(f"Αίτημα ΑΑΔΕ {request_id}", afm, http, PORTAL.format(id=request_id))
+    if not entry:
+        return {"ok": False, "reason": "Η συνεδρία δεν κρατήθηκε."}
+    return handoff.open_in_browser(entry)
 
 
 def client_requests(conn: sqlite3.Connection, afm: str) -> list[dict[str, Any]]:
@@ -298,7 +355,7 @@ def mark_seen(conn: sqlite3.Connection, afm: str, request_id: Optional[str] = No
 
 def unseen(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Αλλαγές που δεν έχει δει ο χρήστης — για την ειδοποίηση στην κορυφή της εφαρμογής."""
-    return [dict(r) for r in conn.execute("SELECT r.afm, r.id, r.change, r.process, r.topic, b.name FROM aade_requests r "
+    return [dict(r) for r in conn.execute("SELECT r.*, b.name FROM aade_requests r "
                                           "LEFT JOIN businesses b ON b.afm=r.afm WHERE r.seen=0 ORDER BY r.afm")]
 
 
@@ -306,9 +363,23 @@ def waiting_on_client(conn: sqlite3.Connection, afms: Optional[list[str]] = None
     """Αιτήματα «Σε εκκρεμότητα από τον συναλλασσόμενο» (η ΑΑΔΕ περιμένει ενέργεια του πελάτη) — είτε τα έχει δει ο
     χρήστης είτε όχι: μένουν στις ειδοποιήσεις ώσπου να αλλάξει η κατάσταση στην ΑΑΔΕ (ρητό αίτημα 2026-10-29)."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT r.afm, r.id, r.case_no, r.status, r.process, r.topic, r.updated, b.name FROM aade_requests r "
+        "SELECT r.*, b.name FROM aade_requests r "
         "LEFT JOIN businesses b ON b.afm=r.afm ORDER BY r.afm, r.updated DESC")]
     return [r for r in rows if stage(r["status"]) == "waiting_client" and (afms is None or r["afm"] in afms)]
+
+
+def chat_line(r: dict[str, Any], limit: int = 140) -> str:
+    """Μία γραμμή «συνομιλίας» για ειδοποιήσεις: «Πελάτης — διαδικασία · ΑΑΔΕ (Απάντηση, 12/11): «…»»."""
+    who = r.get("name") or r.get("afm", "")
+    what = r.get("process") or r.get("topic") or "αίτημα"
+    last = last_message(r)
+    if not last:
+        return f"{who} — {what}" + (f" · {r['status']}" if r.get("status") else "")
+    snippet = re.sub(r"\s+", " ", last["text"]).strip()
+    snippet = (snippet[:limit] + "…") if len(snippet) > limit else snippet
+    side = "ΑΑΔΕ" if last["who"] == "aade" else "Πελάτης"
+    when = date_text(last["date"]).split(" ")[0] if last.get("date") else ""
+    return f"{who} — {what} · {side} ({last['label']}{', ' + when if when else ''}): «{snippet}»"
 
 
 def date_text(raw: str) -> str:

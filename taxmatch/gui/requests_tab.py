@@ -85,17 +85,13 @@ class RequestCard(QDialog):
         body = QWidget()
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
-        for head, text in (("Αίτημα", r["text"]), ("Απάντηση ΑΑΔΕ", r["answer"])):
-            h = QLabel(head)
-            h.setObjectName("h2")
-            lay.addWidget(h)
-            t = QLabel(html.escape(text).replace("\n", "<br>") if text else
-                       f"<span style='color:{CURRENT.muted}'>— χωρίς κείμενο —</span>")
-            t.setObjectName("card")
-            t.setWordWrap(True)
-            t.setTextFormat(Qt.TextFormat.RichText)
-            t.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lay.addWidget(t)
+        h = QLabel("Συνομιλία")
+        h.setObjectName("h2")
+        lay.addWidget(h)
+        self.chat_box = QVBoxLayout()
+        self.chat_box.setSpacing(8)
+        lay.addLayout(self.chat_box)
+        self._fill_chat()
         self.files_box = QVBoxLayout()
         lay.addLayout(self.files_box)
         lay.addStretch()
@@ -109,6 +105,11 @@ class RequestCard(QDialog):
         self.fetch_btn.setToolTip("Φέρνει από το myAADE το πλήρες αίτημα και τα συνημμένα (υποβολής και απάντησης)")
         self.fetch_btn.clicked.connect(self.fetch)
         buttons.addWidget(self.fetch_btn)
+        self.web_btn = QPushButton(icon("link", CURRENT.txt, 16), "  Απάντηση στον browser…")
+        self.web_btn.setToolTip("Συνδέεται με τους κωδικούς TAXISnet του πελάτη και ανοίγει ΑΥΤΟ το αίτημα στο myAADE "
+                                "(Chrome/Edge), για να απαντήσετε ή να συμπληρώσετε από εκεί")
+        self.web_btn.clicked.connect(self.open_web)
+        buttons.addWidget(self.web_btn)
         buttons.addStretch()
         close = QPushButton("Κλείσιμο")
         close.setDefault(True)
@@ -119,6 +120,59 @@ class RequestCard(QDialog):
         fit_to_screen(self, 760, 640)
         if not r.get("opened") or any(not f.get("path") for f in r["files"]):
             self.fetch()                               # συνημμένα που δεν έχουν κατέβει → αυτόματα
+
+    def _fill_chat(self) -> None:
+        """Αίτημα → ενδιάμεση επικοινωνία → απάντηση ως «φούσκες»: πελάτης δεξιά, ΑΑΔΕ αριστερά (ρητό αίτημα 2026-11-10)."""
+        while self.chat_box.count():
+            item = self.chat_box.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                while item.layout().count():
+                    sub_item = item.layout().takeAt(0)
+                    if sub_item.widget() is not None:
+                        sub_item.widget().deleteLater()
+        for n in req.thread(self.r):
+            mine = n["who"] == "client"
+            bubble = QLabel(
+                f"<div style='color:{CURRENT.muted}; font-size:11px'>{html.escape(n['label'])}"
+                f"{' · ' + html.escape(req.date_text(n['date'])) if n['date'] else ''}</div>"
+                + (html.escape(n["text"]).replace("\n", "<br>") if n["text"]
+                   else f"<span style='color:{CURRENT.muted}'>— χωρίς κείμενο —</span>"))
+            bubble.setWordWrap(True)
+            bubble.setTextFormat(Qt.TextFormat.RichText)
+            bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            colour = CURRENT.accent if mine else (CURRENT.warn if "διευκρινίσεις" in n["label"] else CURRENT.ok)
+            bubble.setStyleSheet(f"background:{CURRENT.chip}; border:1px solid {CURRENT.line}; border-radius:10px; "
+                                 f"border-{'right' if mine else 'left'}:4px solid {colour}; padding:8px 10px;")
+            row = QHBoxLayout()
+            if mine:
+                row.addStretch(1)
+            row.addWidget(bubble, 5)
+            if not mine:
+                row.addStretch(1)
+            self.chat_box.addLayout(row)
+
+    def open_web(self) -> None:
+        self.web_btn.setEnabled(False)
+        toast(self, "Σύνδεση στο myAADE και άνοιγμα του αιτήματος στον browser…", "info")
+
+        def work(_p):
+            conn = dbmod.connect()
+            try:
+                return req.open_in_browser(conn, self.tab.afm, self.r["id"])
+            finally:
+                conn.close()
+
+        def done(res: dict[str, Any]) -> None:
+            self.web_btn.setEnabled(True)
+            toast(self, "Το αίτημα άνοιξε στον browser." if res.get("ok") else res.get("reason", "Αποτυχία."),
+                  "ok" if res.get("ok") else "danger")
+
+        def failed(m: str) -> None:
+            self.web_btn.setEnabled(True)
+            toast(self, m, "danger")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _fill_files(self, files: list[dict[str, Any]]) -> None:
         while self.files_box.count():
@@ -162,8 +216,11 @@ class RequestCard(QDialog):
             if not res.get("ok"):
                 toast(self, res.get("reason", "Αποτυχία λήψης."), "danger")
                 return
-            self.r = {**self.r, "opened": True, "files": res.get("files") or []}
+            import json as _json
+            self.r = {**self.r, "opened": True, "files": res.get("files") or [],
+                      "comm_json": _json.dumps(res.get("comm") or [], ensure_ascii=False)}
             self._fill_files(self.r["files"])
+            self._fill_chat()
             self.tab.reload()
         self._tasks.append(run_open_request(self, self, self.tab.afm, self.r["id"], done))
 

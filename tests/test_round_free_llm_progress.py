@@ -43,7 +43,7 @@ def test_openrouter_complete_json_adds_models_fallback_array():
     assert "models" in posted_json
     assert posted_json["models"][0] == "liquid/lfm-2.5-2.6b:free"
     assert "openrouter/free" in posted_json["models"]
-    assert "google/gemma-4-31b-it:free" in posted_json["models"]
+    assert len(posted_json["models"]) <= 3            # όριο του OpenRouter (αλλιώς HTTP 400 σε κάθε αίτημα)
 
 
 def test_extract_pending_multi_model_rotation_on_upstream_congestion(conn):

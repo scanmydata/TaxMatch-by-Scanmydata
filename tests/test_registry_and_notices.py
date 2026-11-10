@@ -196,7 +196,7 @@ def test_gemi_is_the_fallback_when_aade_has_no_kads_or_no_access(conn):
 
 def test_legal_form_from_name():
     f = legal_form.from_name
-    assert f("CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε") == "ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ"
+    assert f("CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε") == "ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ"
     assert f("ΧΧΧ Ι.Κ.Ε.") == "ΙΚΕ" and f("ΧΧΧ ΑΕ") == "ΑΕ" and f("ΧΧΧ Α.Ε.") == "ΑΕ" and f("ΧΧΧ Ο.Ε.") == "ΟΕ"
     assert f("ΧΧΧ ΙΔΙΩΤΙΚΗ ΚΕΦΑΛΑΙΟΥΧΙΚΗ ΕΤΑΙΡΕΙΑ") == "ΙΚΕ" and f("XXX EPE") == "ΕΠΕ"
     assert f("ΓΕΩΡΓΙΟΣ ΠΑΠΑΔΟΠΟΥΛΟΣ") == "" and f("") == ""                # δεν εφευρίσκει

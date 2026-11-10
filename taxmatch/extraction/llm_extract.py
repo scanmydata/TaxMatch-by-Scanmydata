@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -71,19 +71,84 @@ PRIMARY_SOURCES = ("taxheaven_new", "taxheaven_law", "taxheaven_laws", "taxheave
 _COURT_RE = re.compile(r"^\s*(ΣτΕ|ΣΤΕ|ΑΠ|Α\.Π\.|ΔΕφ|ΔΠρ|ΔΕΕ|ΓενΔΕΕ|Υπόθεση\s+[CT][‑-]|Απόφαση\s+ΔΕΕ|ΕλΣυν)(?![Α-Ωα-ωA-Za-z])")
 
 
+#: Το OpenRouter δέχεται έως 3 μοντέλα στη λίστα εφεδρικών (`models`).
+MAX_FALLBACK_MODELS = 3
+
+
 class LLMError(Exception):
     """kind: auth | model | rate_limit | credits | network | bad_response
     (`model`: το μοντέλο δεν υπάρχει ή δεν επιτρέπεται για αυτό το API key — ρύθμιση, όχι σφάλμα του άρθρου.
     `credits`: εξαντλήθηκε το υπόλοιπο/όριο χρήσης του λογαριασμού — ούτε αυτό είναι σφάλμα του άρθρου.)"""
 
-    def __init__(self, kind: str, message: str, retry_after: float = 0.0):
+    def __init__(self, kind: str, message: str, retry_after: float = 0.0, scope: str = ""):
         super().__init__(message)
         self.kind = kind
         self.retry_after = retry_after
+        self.scope = scope              # 'daily' = ημερήσιο όριο μοντέλου · 'account' = όριο όλου του λογαριασμού
 
 
 class NotConfigured(Exception):
     pass
+
+
+# ------------------------------------------------------------------ όρια δωρεάν μοντέλων (2026-11-10)
+# Αναφορά χρήστη: «η ανάλυση νέων γεμίζει τα δωρεάν όρια του κάθε μοντέλου — φτιάξε μηχανισμό να κάνει switching».
+# Η εναλλαγή γινόταν μόνο ΜΕΣΑ σε μια εκτέλεση (`failed_models`)· η επόμενη ξεκινούσε πάλι από το εξαντλημένο μοντέλο.
+# Τώρα κάθε μοντέλο που απορρίπτεται για όριο μπαίνει σε «ψυγείο» (ρύθμιση `llm_cooldowns`, {μοντέλο: λήξη ISO UTC})
+# και δεν ξαναδοκιμάζεται ώσπου να λήξει: ημερήσιο όριο → ως την επόμενη μέρα (00:00 UTC — ώρα επαναφοράς του
+# OpenRouter), συνωστισμός upstream / 429 → λίγα λεπτά. Όριο ΛΟΓΑΡΙΑΣΜΟΥ (OpenRouter «free-models-per-day»: όλα τα
+# δωρεάν μαζί) → ψυγείο για ΟΛΟ τον πάροχο και, αν υπάρχει κλειδί και για τον άλλο πάροχο, η ανάλυση συνεχίζει εκεί.
+COOLDOWN_KEY = "llm_cooldowns"
+SHORT_COOLDOWN_MIN = 20
+PROVIDER_MARK = "*provider:"
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def cooldowns(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        data = json.loads(settings_store.get(conn, COOLDOWN_KEY) or "{}")
+    except ValueError:
+        data = {}
+    now = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {k: v for k, v in data.items() if isinstance(v, str) and v > now}
+
+
+def cool_down(conn: sqlite3.Connection, model: str, daily: bool = False, provider: str = "") -> None:
+    """Βάζει το `model` (ή όλο τον `provider`) σε ψυγείο: `daily` → ως τα μεσάνυχτα UTC, αλλιώς λίγα λεπτά."""
+    until = ((_now() + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0) if daily
+             else _now() + timedelta(minutes=SHORT_COOLDOWN_MIN))
+    data = cooldowns(conn)
+    data[PROVIDER_MARK + provider if provider else model] = until.strftime("%Y-%m-%dT%H:%M:%SZ")
+    settings_store.set_value(conn, COOLDOWN_KEY, json.dumps(data))
+    log.info("LLM: %s σε αναμονή έως %s", provider or model, until.strftime("%d/%m %H:%M UTC"))
+
+
+def cooled(conn: sqlite3.Connection) -> set[str]:
+    return set(cooldowns(conn))
+
+
+def provider_cooled(conn: sqlite3.Connection, provider: str) -> bool:
+    return PROVIDER_MARK + provider in cooldowns(conn)
+
+
+def other_provider_client(conn: sqlite3.Connection, current: "LLMClient") -> Optional["LLMClient"]:
+    """Ο ΑΛΛΟΣ πάροχος (OpenRouter ↔ Groq), αν έχει κλειδί και δεν είναι κι αυτός σε ψυγείο — με δωρεάν μοντέλο."""
+    for provider, cfg in PROVIDERS.items():
+        if provider == current.provider or provider_cooled(conn, provider):
+            continue
+        key = settings_store.get(conn, cfg["key"])
+        if not key:
+            continue
+        cold = cooled(conn)
+        model = settings_store.get(conn, cfg["model"])
+        if not model or model in cold or not is_free_model(provider, model):
+            model = pick_model(provider, [], avoid=cold, free_only=True)
+        if model:
+            return LLMClient(provider, key, model, cfg["url"], current.session)
+    return None
 
 
 @dataclass
@@ -93,6 +158,7 @@ class LLMClient:
     model: str
     url: str
     session: requests.Session
+    avoid: set = field(default_factory=set)          # μοντέλα σε «ψυγείο» — όχι ως εφεδρικά στο ίδιο αίτημα
 
     @classmethod
     def from_settings(cls, conn: sqlite3.Connection, session: Optional[requests.Session] = None) -> "LLMClient":
@@ -119,13 +185,13 @@ class LLMClient:
             "response_format": {"type": "json_object"},
         }
         if self.provider == "openrouter" and is_free_model(self.provider, self.model):
-            fallbacks = [self.model]
-            for candidate in PREFERRED_MODELS.get("openrouter", []):
-                if is_free_model("openrouter", candidate) and candidate not in fallbacks:
-                    fallbacks.append(candidate)
-            if "openrouter/free" not in fallbacks:
-                fallbacks.append("openrouter/free")
-            body["models"] = fallbacks
+            # Εφεδρικά μοντέλα στον ίδιο γύρο (OpenRouter «models»). ΟΡΙΟ 3 — ζωντανά 2026-11-10: με περισσότερα
+            # ΚΑΘΕ αίτημα έπαιρνε HTTP 400 «'models' array must have 3 items or fewer» (60/60 άρθρα «απέτυχαν»).
+            skip = self.avoid | {self.model}
+            fallbacks = [self.model] + [c for c in PREFERRED_MODELS.get("openrouter", [])
+                                        if is_free_model("openrouter", c) and c not in skip][:1]
+            fallbacks.append("openrouter/free")
+            body["models"] = fallbacks[:MAX_FALLBACK_MODELS]
         try:
             resp = self.session.post(self.url, headers=self._headers(), json=body, timeout=timeout)
             if resp.status_code == 400 and "response_format" in resp.text.lower() and "json_validate" not in resp.text.lower():
@@ -156,10 +222,12 @@ class LLMClient:
                                           f"του (upstream), όχι όριο του λογαριασμού σας — δοκιμάζεται αυτόματα "
                                           f"άλλο δωρεάν μοντέλο.")
             if _is_quota_error(resp.text):
+                account = "free-models-per-day" in resp.text.lower() or "add 10 credits" in resp.text.lower()
                 raise LLMError("credits", f"Ξεπεράσατε το όριο χρήσης (quota) του λογαριασμού {self.provider} — "
                                           f"δεν είναι απλή καθυστέρηση, το όριο ανανεώνεται αργότερα (π.χ. ανά "
                                           f"ημέρα/μήνα). Δείτε το πρόγραμμα/υπόλοιπό σας στον πάροχο· δοκιμάζεται "
-                                          f"αυτόματα άλλο δωρεάν μοντέλο πρώτα, μήπως δεν είναι όριο ανά λογαριασμό.")
+                                          f"αυτόματα άλλο δωρεάν μοντέλο πρώτα, μήπως δεν είναι όριο ανά λογαριασμό.",
+                               scope="account" if account else "daily")
             raise LLMError("rate_limit", "HTTP 429: όριο αιτημάτων — προσωρινό, θα ξαναδοκιμαστεί.", _retry_after(resp))
         if resp.status_code >= 400:
             raise LLMError("bad_response", f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -467,6 +535,9 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     (`time.monotonic()`), αν δοθεί: τα υπόλοιπα μένουν για την επόμενη φορά (ΔΕΝ μετρά ως σφάλμα)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     reanalyze_for_prompt(conn)
+    # v0.15: τα άρθρα που «απέτυχαν» μόνο λόγω του ορίου 3 εφεδρικών μοντέλων (δικό μας σφάλμα) ξαναμπαίνουν στην ουρά
+    conn.execute("UPDATE articles SET extraction_status='pending', extraction_tries=0, extraction_error='' "
+                 "WHERE extraction_status='failed' AND extraction_error LIKE '%models%array must have%'")
     rows = conn.execute(
         "SELECT * FROM articles WHERE extraction_status IN ('pending','failed') AND extraction_tries < ? "
         # ml_score (matching/ml.py): πρώτα όσα είναι πιθανότερο να αφορούν πελάτες — τα matches φαίνονται νωρίτερα.
@@ -483,6 +554,18 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     failed_models: set[str] = set()
     model_switches = 0
     MAX_MODEL_SWITCHES = 6
+    # μοντέλο / πάροχος σε «ψυγείο» από προηγούμενη εκτέλεση (εξαντλημένο όριο): αλλαγή ΠΡΙΝ το πρώτο αίτημα
+    if rows and (provider_cooled(conn, getattr(client, "provider", "")) or client.model in cooled(conn)):
+        other = other_provider_client(conn, client) if provider_cooled(conn, client.provider) else None
+        if other:
+            client = other
+        else:
+            new = _switch_model(conn, client, avoid=cooled(conn))
+            if not new and provider_cooled(conn, client.provider):
+                stats["stopped"] = "Τα δωρεάν όρια του παρόχου LLM εξαντλήθηκαν για σήμερα — η ανάλυση συνεχίζει αύριο."
+                stats["stopped_kind"] = "limits"
+                return _finish(conn, stats, cutoff)
+        stats["model"] = client.model
     for i, art in enumerate(rows, 1):
         if deadline is not None and time.monotonic() >= deadline:
             stats["time_limit"] = True
@@ -493,6 +576,7 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
         while True:
             attempts += 1
             try:
+                client.avoid = failed_models | cooled(conn)
                 started = time.monotonic()
                 status = extract_article(conn, art, client, system, session, use_full_text, sleep=sleep)
                 took = time.monotonic() - started
@@ -533,11 +617,30 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                     return _finish(conn, stats, cutoff)
                 if exc.kind == "credits":
                     failed_models.add(client.model)
+                    cool_down(conn, client.model, daily=bool(exc.scope))
+                    if exc.scope == "account":          # όριο όλου του λογαριασμού: άλλο μοντέλο δεν βοηθά
+                        cool_down(conn, "", daily=True, provider=client.provider)
+                        other = other_provider_client(conn, client)
+                        if other and model_switches < MAX_MODEL_SWITCHES:
+                            model_switches += 1
+                            client = other
+                            stats["model"] = client.model
+                            if on_progress:
+                                on_progress(f"Όριο δωρεάν χρήσης — συνέχεια με {client.provider} ({client.model})…")
+                            attempts = 0
+                            continue
+                        stats["stopped"] = str(exc)
+                        stats["stopped_kind"] = "limits"
+                        return _finish(conn, stats, cutoff)
                     if model_switches < MAX_MODEL_SWITCHES:
                         try:
-                            new = recover_model(conn, client, avoid=failed_models)
+                            new = recover_model(conn, client, avoid=failed_models | cooled(conn))
                         except LLMError:
                             new = ""
+                        if not new:
+                            other = other_provider_client(conn, client)
+                            if other:
+                                client, new = other, other.model
                         if new:
                             model_switches += 1
                             stats["model"] = new
@@ -547,6 +650,7 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                             sleep(1.0)
                             continue
                     stats["stopped"] = str(exc)
+                    stats["stopped_kind"] = "limits"
                     return _finish(conn, stats, cutoff)
                 if exc.kind == "auth":
                     stats["stopped"] = f"Σφάλμα πιστοποίησης LLM: {exc}"
@@ -559,9 +663,10 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                         sleep(wait)
                         continue
                     failed_models.add(client.model)
+                    cool_down(conn, client.model)
                     if model_switches < MAX_MODEL_SWITCHES:
                         try:
-                            new = recover_model(conn, client, avoid=failed_models)
+                            new = recover_model(conn, client, avoid=failed_models | cooled(conn))
                         except LLMError:
                             new = ""
                         if new:
@@ -573,6 +678,7 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
                             sleep(1.0)
                             continue
                     stats["stopped"] = "Όριο αιτημάτων LLM — τα υπόλοιπα άρθρα θα αναλυθούν στον επόμενο έλεγχο."
+                    stats["stopped_kind"] = "limits"
                     return _finish(conn, stats, cutoff)
                 # network / bad_response: μετράει προσπάθεια στο άρθρο
                 consecutive_network = consecutive_network + 1 if exc.kind == "network" else 0

@@ -164,9 +164,15 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "text": f"Δεν έχει οριστεί API key για {provider} — τα άρθρα δεν αναλύονται, άρα δεν υπάρχουν matches."})
     else:
         err = settings_store.get(conn, "llm_last_error")
-        if err:
+        limits = settings_store.get(conn, "llm_limits")
+        if err and not _transient_llm(err):
             out.append({"level": "danger", "endpoint": "main.settings", "label": "Ρυθμίσεις",
                         "text": f"Η ανάλυση άρθρων με LLM δεν δουλεύει: {err} Ώσπου να λυθεί δεν δημιουργούνται matches."})
+        elif limits or err:
+            out.append({"level": "info", "endpoint": "main.settings", "label": "Ρυθμίσεις",
+                        "text": "Ανάλυση νέων: τα δωρεάν όρια των μοντέλων LLM καλύφθηκαν προσωρινά — η εφαρμογή αλλάζει "
+                                "μόνη της μοντέλο/πάροχο και συνεχίζει στον επόμενο έλεγχο. (Με κλειδί και για δεύτερο "
+                                "πάροχο, Groq ή OpenRouter, η ανάλυση δεν σταματά.)"})
 
     # ---- κωδικοί TAXISnet γραφείου
     if settings_store.get(conn, "aade_office_status") == "invalid":
@@ -186,13 +192,15 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if eligible and settings_store.get(conn, "notice_vat_quarter_read") == _vat_quarter_stamp(eligible, deadline):
         eligible = []                                   # «Αναγνώστηκε» για αυτούς τους πελάτες / αυτή την προθεσμία
     # ---- «Τα Αιτήματά μου» ΑΑΔΕ: απαντήσεις/αλλαγές που δεν έχει δει ο χρήστης (requests_aade.py)
-    from .requests_aade import CHANGE_LABEL, unseen, waiting_on_client
+    from .requests_aade import CHANGE_LABEL, chat_line, unseen, waiting_on_client
     waiting_rows = waiting_on_client(conn)
     if waiting_rows:                                    # η ΑΑΔΕ περιμένει ενέργεια — μένει ώσπου να αλλάξει η κατάσταση
         afms = list(dict.fromkeys(r["afm"] for r in waiting_rows))
         out.append({"level": "warn", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες", "afms": afms,
                     "text": f"{len(waiting_rows)} {'αίτημα' if len(waiting_rows) == 1 else 'αιτήματα'} ΑΑΔΕ σε "
-                            f"εκκρεμότητα από τον πελάτη (χρειάζεται ενέργεια): {_names(conn, afms)}."})
+                            f"εκκρεμότητα από τον πελάτη (χρειάζεται ενέργεια):\n"
+                            + "\n".join("• " + chat_line(r) for r in waiting_rows[:4])
+                            + (f"\n… και άλλα {len(waiting_rows) - 4}" if len(waiting_rows) > 4 else "")})
     pending = [r for r in unseen(conn) if r["change"] != "waiting_client"
                or not any(w["id"] == r["id"] and w["afm"] == r["afm"] for w in waiting_rows)]
     if pending:
@@ -200,10 +208,12 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         answered = sum(1 for r in pending if r["change"] == "answered")
         waiting = sum(1 for r in pending if r["change"] == "waiting_client")
         parts = [f"{answered} απαντήθηκαν" if answered else "", f"{waiting} περιμένουν ενέργεια του πελάτη" if waiting else ""]
+        lines = "\n".join("• " + chat_line(r) for r in pending[:4]) + (f"\n… και άλλα {len(pending) - 4}"
+                                                                       if len(pending) > 4 else "")
         out.append({"level": "warn" if waiting else "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
                     "afms": afms,
-                    "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}): "
-                            f"{_names(conn, afms)} — καρτέλα πελάτη → «Αιτήματα ΑΑΔΕ»."})
+                    "text": f"Αιτήματα ΑΑΔΕ με αλλαγές ({', '.join(p for p in parts if p) or CHANGE_LABEL['status']}):\n"
+                            + lines})
     # ---- ΦΠΑ σε παραστατικά πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ (καρτέλα myDATA → και εδώ)
     mismatch = vat_mismatch_clients(conn)
     stamp = ",".join(f"{a}:{n}" for a, n in sorted(mismatch.items()))
@@ -258,3 +268,10 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                             f"στον τριμηνιαίο (24 μήνες από την έναρξη) — δήλωση επιλογής στο myAADE έως "
                             f"{deadline.strftime('%d/%m/%Y')}: {_names(conn, eligible)}."})
     return out
+
+
+def _transient_llm(err: str) -> bool:
+    """Μηνύματα που γράφτηκαν από παλιότερες εκδόσεις για όρια/συνωστισμό (όχι βλάβη) — δεν είναι κόκκινο σφάλμα."""
+    t = (err or "").lower()
+    return any(k in t for k in ("υπερφορτωμένο", "όριο", "quota", "δοκιμάζεται αυτόματα", "εκτός λειτουργίας",
+                                "429", "rate"))

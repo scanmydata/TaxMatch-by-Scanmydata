@@ -31,7 +31,7 @@ _SHORT = [
 
 
 def from_name(name: str) -> str:
-    """'CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε' -> 'ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ'· 'ΧΧΧ Α.Ε.' -> 'ΑΕ'· αλλιώς ''."""
+    """'CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε' -> 'ΜΟΝΟΠΡΟΣΩΠΗ ΙΚΕ'· 'ΧΧΧ Α.Ε.' -> 'ΑΕ'· αλλιώς ''."""
     text = strip_accents(str(name or "")).upper().translate(_LATIN)
     text = re.sub(r"[.,()\-]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()

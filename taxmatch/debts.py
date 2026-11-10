@@ -395,6 +395,15 @@ def check_client(conn: sqlite3.Connection, afm: str, want_pdf: bool = False,
         result = fetch(login["http"], afm, want_pdf, client, office)
         store(conn, afm, result, "aade")
         out.update(ok=True, n=len(result["debts"]), overdue=result["overdue"], non_overdue=result["non_overdue"])
+        # έλεγχος πληρωμών (payments.py): ίδια συνεδρία — πληρωμές 12 μηνών ↔ ταυτότητες των ανοιχτών οφειλών
+        from . import payments
+        try:
+            pay = payments.check(login["http"], result["debts"])
+            payments.store(conn, afm, pay)
+            out["payments"] = pay["summary"]
+        except Exception as exc:                        # noqa: BLE001 — οι οφειλές έχουν ήδη αποθηκευτεί
+            log.warning("payments %s: %s", afm, exc)
+            payments.fail(conn, afm, f"Ο έλεγχος πληρωμών δεν ολοκληρώθηκε ({str(exc)[:120]})")
     plan = efka_plan(conn, afm)
     if plan and ("keao" in sources or "efka" in sources):
         try:

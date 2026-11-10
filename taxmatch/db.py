@@ -635,6 +635,36 @@ MIGRATIONS: list[str] = [
     """
     UPDATE mydata_docs SET direction='incoming' WHERE invoice_type IN ('17.1', '17.2', '17.5', '17.6') OR invoice_type LIKE '13.%' OR invoice_type LIKE '14.%';
     """,
+    # v26 — έλεγχος πληρωμών ΑΑΔΕ (payments.py, 2026-11-10): πληρωμές 12 μηνών ανά ταυτότητα οφειλής και αντιστοίχιση με
+    # τις ανοιχτές οφειλές (result_json: κατάσταση ανά οφειλή, σύνοψη, ανωμαλίες).
+    """
+    CREATE TABLE aade_payments (
+        afm        TEXT NOT NULL,
+        seq        INTEGER NOT NULL,
+        pay_date   TEXT NOT NULL DEFAULT '',
+        amount     REAL NOT NULL DEFAULT 0,
+        doy        TEXT NOT NULL DEFAULT '',
+        type       TEXT NOT NULL DEFAULT '',
+        code       TEXT NOT NULL DEFAULT '',
+        matched    INTEGER NOT NULL DEFAULT 0,
+        repeated   INTEGER NOT NULL DEFAULT 0,
+        debt_title TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (afm, seq)
+    );
+    CREATE TABLE payment_sync (
+        afm         TEXT PRIMARY KEY,
+        synced_at   TEXT NOT NULL,
+        date_from   TEXT NOT NULL DEFAULT '',
+        date_to     TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT '',
+        message     TEXT NOT NULL DEFAULT '',
+        result_json TEXT NOT NULL DEFAULT '{}'
+    );
+    """,
+    # v27 — ενδιάμεση επικοινωνία αιτήματος ΑΑΔΕ (`getMessageComm`) για την προβολή ως συνομιλία (2026-11-10)
+    """
+    ALTER TABLE aade_requests ADD COLUMN comm_json TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 

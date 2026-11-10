@@ -105,3 +105,13 @@ def test_notice_panel_above_toasts(conn, monkeypatch):
     win._reposition_notice_panel()
     assert win.notice_panel.width() >= 460
     win.close()
+    # όπως το fixture `window` του test_gui_smoke: πρώτα τα νήματα παρασκηνίου (ημερολόγιο), μετά διαγραφή — αλλιώς
+    # το Python έσκαγε στο ΚΛΕΙΣΙΜΟ της σουίτας (0xC0000409) και το build.ps1 έβγαζε «Τα tests απέτυχαν» με 551 passed.
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for task in list(getattr(win, "_tasks", [])):
+        task.thread.wait(5000)
+    for _ in range(5):
+        app.processEvents()
+    win.conn.close()
+    win.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

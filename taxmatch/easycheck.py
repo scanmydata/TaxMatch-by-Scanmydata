@@ -166,17 +166,50 @@ def income_submission(menu_text: str, o: Obligation, raw: str = "") -> tuple[boo
 
 
 # ------------------------------------------------------------------ μηχανή (με τη σύνδεση του lookup_aade)
+#: Για τα tests: εργοστάσιο αόρατου browser (context manager με `render(url, cookies=…)`).
+RENDERER_FACTORY: Optional[Callable[[], Any]] = None
+
+
 class _Ctx:
     def __init__(self, http, afm: str = "", want_pdf: bool = False) -> None:
         self.http = http
         self.afm = afm                     # για την αποθήκευση PDF ταυτοτήτων οφειλής (κενό = χωρίς PDF)
         self.want_pdf = want_pdf           # και το PDF κάθε υποβληθείσας δήλωσης (viewPdf.htm) — επιλογή του χρήστη
+        self._renderer: Any = None         # αόρατος browser για τις ταυτότητες οφειλής (print_page)
+        self.debt_url = ""                 # η σελίδα «Ταυτότητα Οφειλής» που φόρτωσε τελευταία (fetch_debt_code_page)
 
     def get(self, url: str) -> str:
         return self.http.follow("GET", url)["text"]
 
     def post(self, url: str, form: dict[str, str]) -> str:
         return self.http.follow("POST", url, form)["text"]
+
+    def print_page(self, url: str, must_contain: str = "") -> bytes:
+        """Η σελίδα της ΑΑΔΕ ΟΠΩΣ την τυπώνει το «Εκτύπωση» της (`window.print()` + printer.css): αόρατος Edge/Chrome με
+        τα cookies ΑΥΤΗΣ της συνεδρίας (μόνο στη μνήμη) → PDF. Ένας browser για όλο τον έλεγχο (`close()`). b'' αν
+        δεν γίνεται (χωρίς browser / ψεύτικο http στα tests)."""
+        jar = getattr(self.http, "jar", None)
+        if not jar or self._renderer is False:
+            return b""
+        try:
+            if self._renderer is None:
+                from .mydata.headless import HeadlessRenderer
+                self._renderer = (RENDERER_FACTORY or HeadlessRenderer)().__enter__()
+            return self._renderer.render(url, cookies={h: dict(kv) for h, kv in jar.items() if kv}, min_text=80,
+                                         must_contain=must_contain)
+        except Exception as exc:                        # noqa: BLE001 — χωρίς PDF, όχι αποτυχία ελέγχου
+            log.info("easycheck print_page: %s", exc)
+            if self._renderer is None:
+                self._renderer = False                  # ο browser δεν ξεκίνησε: όχι νέα προσπάθεια ανά δήλωση
+            return b""
+
+    def close(self) -> None:
+        if self._renderer:
+            try:
+                self._renderer.__exit__(None, None, None)
+            except Exception:                           # noqa: BLE001
+                pass
+        self._renderer = None
 
 
 def _set_as_myself(ctx: _Ctx, page: str, category: str) -> bool:
@@ -305,6 +338,7 @@ def _declarations(ctx: _Ctx, o: Obligation, args: dict[str, str]) -> Optional[li
 
 def fetch_debt_code_page(ctx: _Ctx, base_url: str, decl_type: str, db_id: str, ret_view: str, fmy_type: str = "") -> str:
     """Ανάκτηση της σελίδας displayDebtCode.htm μέσω GET (όπως στον browser / URL TAXISnet) ή fallback POST."""
+    ctx.debt_url = ""
     target_url = urljoin(base_url, "displayDebtCode.htm")
     data = {"declarationType": decl_type, "declarationDatabaseId": db_id, "returnView": ret_view}
     if fmy_type:
@@ -313,6 +347,7 @@ def fetch_debt_code_page(ctx: _Ctx, base_url: str, decl_type: str, db_id: str, r
         q = urlencode(data)
         txt = ctx.get(f"{target_url}?{q}")
         if txt and ("Ταυτότητα" in txt or "Συνολικό" in txt or "debtCode" in txt or "displayDebtCode" in txt):
+            ctx.debt_url = f"{target_url}?{q}"
             return txt
     except Exception as exc:
         log.debug("GET displayDebtCode failed: %s", exc)
@@ -390,269 +425,19 @@ def declaration_amounts(ctx: _Ctx, o: Obligation, db_id: str, ret_view: str,
     return out
 
 
-def _debt_voucher_pdf(debt_id: str, total_due: str, period: str, doy: str, tax_kind: str,
-                      installment: str, pay_by: str, afm: str, name: str, issued_at: str) -> bytes:
-    """Παραγωγή του επίσημου σημειώματος πληρωμής TAXISnet (πιστό αντίγραφο του original ΑΑΔΕ PDF)."""
-    import os
-    import sys
-    import tempfile
-    import subprocess
-
-    dose_row = f'<tr><td class="lbl">Ποσό δόσης δήλωσης της {pay_by}</td><td class="val">{installment}</td></tr>' if installment else ""
-    inst_note = (f'Θα πρέπει να πληρώσετε το ποσό της 1ης δόσης μέχρι τις <b>{pay_by}</b>. Η καθυστέρηση πληρωμής '
-                 f'του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).'
-                 if pay_by else 'Η καθυστέρηση πληρωμής του οφειλόμενου ποσού συνεπάγεται τις νόμιμες επιβαρύνσεις (Ν. 4174/13, αρθρ. 53 & 57).')
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-    @page {{
-        size: A4 portrait;
-        margin: 20mm 20mm 20mm 20mm;
-    }}
-    body {{
-        font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
-        color: #000000;
-        margin: 0;
-        padding: 0;
-        font-size: 13.5px;
-        line-height: 1.4;
-    }}
-    .header-main {{
-        font-size: 20px;
-        font-weight: bold;
-        margin-bottom: 3px;
-    }}
-    .header-sub {{
-        font-size: 16px;
-        font-weight: bold;
-        margin-bottom: 25px;
-    }}
-    .sec-head {{
-        font-size: 14.5px;
-        font-weight: bold;
-        margin-top: 18px;
-        margin-bottom: 8px;
-    }}
-    table.data-tbl {{
-        width: 100%;
-        border-collapse: collapse;
-        margin-bottom: 12px;
-    }}
-    table.data-tbl td {{
-        padding: 3px 0;
-        vertical-align: top;
-        font-size: 13px;
-    }}
-    table.data-tbl td.lbl {{
-        width: 38%;
-        color: #111;
-        font-weight: normal;
-    }}
-    table.data-tbl td.val {{
-        width: 62%;
-        color: #000;
-        font-weight: bold;
-    }}
-    .debt-code-box {{
-        font-family: "Courier New", Courier, monospace;
-        font-size: 15px;
-        font-weight: bold;
-        letter-spacing: 1px;
-    }}
-    .warn-title {{
-        font-size: 13.5px;
-        font-weight: bold;
-        margin-top: 25px;
-        margin-bottom: 6px;
-    }}
-    .warn-body {{
-        font-size: 12px;
-        line-height: 1.5;
-        color: #111;
-    }}
-</style>
-</head>
-<body>
-    <div class="header-main">TAXISnet - Υπηρεσίες Πληρωμής</div>
-    <div class="header-sub">Σημείωμα για Πληρωμή</div>
-
-    <div class="sec-head">Στοιχεία Οφειλέτη</div>
-    <table class="data-tbl">
-        <tr><td class="lbl">Α.Φ.Μ.</td><td class="val">{afm}</td></tr>
-        <tr><td class="lbl">Ονοματεπώνυμο/ Επωνυμία</td><td class="val">{name}</td></tr>
-    </table>
-
-    <div class="sec-head">Στοιχεία Οφειλής</div>
-    <table class="data-tbl">
-        <tr><td class="lbl">Τύπος Πληρωμής</td><td class="val">Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης</td></tr>
-        <tr><td class="lbl">ΔΟΥ</td><td class="val">{doy}</td></tr>
-        <tr><td class="lbl">Είδος Φόρου</td><td class="val">{tax_kind}</td></tr>
-        <tr><td class="lbl">Ημερολογιακή Περίοδος</td><td class="val">{period}</td></tr>
-        <tr><td class="lbl">Συνολικό ποσό οφειλής δήλωσης</td><td class="val">{total_due}</td></tr>
-        {dose_row}
-        <tr><td class="lbl">Ταυτότητα Οφειλής</td><td class="val debt-code-box">{debt_id}</td></tr>
-        <tr><td class="lbl">Ημ/νία Έκδοσης</td><td class="val">{issued_at}</td></tr>
-    </table>
-
-    <div class="warn-title">Προσοχή:</div>
-    <div class="warn-body">
-        Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.<br><br>
-        {inst_note}
-    </div>
-</body>
-</html>"""
-
-    # 1. Προσπάθεια παραγωγής original Chromium/Skia PDF μέσω headless Edge/Chrome
-    browser_exes = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
-    browser = next((b for b in browser_exes if os.path.exists(b)), None)
-    if browser:
-        tmp_html = ""
-        tmp_pdf = ""
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as tf:
-                tf.write(html)
-                tmp_html = tf.name
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-                tmp_pdf = tf.name
-            cmd = [browser, "--headless", "--disable-gpu", f"--print-to-pdf={tmp_pdf}", tmp_html]
-            res = subprocess.run(cmd, capture_output=True, timeout=15)
-            if res.returncode == 0 and os.path.exists(tmp_pdf) and os.path.getsize(tmp_pdf) > 1000:
-                with open(tmp_pdf, "rb") as f:
-                    return f.read()
-        except Exception as exc:
-            log.debug("Headless browser print-to-pdf failed: %s", exc)
-        finally:
-            for p_file in (tmp_html, tmp_pdf):
-                if p_file and os.path.exists(p_file):
-                    try:
-                        os.remove(p_file)
-                    except Exception:
-                        pass
-
-    # 2. Fallback: PySide6 QPainter PDF rendering με ακριβείς στήλες
-    try:
-        from PySide6.QtWidgets import QApplication
-        from PySide6.QtGui import QPdfWriter, QPageSize, QPageLayout, QPainter, QFont, QColor
-        from PySide6.QtCore import QMarginsF, QRectF, Qt
-
-        app = QApplication.instance()
-        if app is None:
-            app = QApplication(sys.argv)
-
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-            tmp_path = tf.name
-
-        try:
-            writer = QPdfWriter(tmp_path)
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
-            writer.setResolution(72)
-
-            painter = QPainter(writer)
-            fn_sans = "Segoe UI"
-            f_title = QFont(fn_sans, 15, QFont.Weight.Bold)
-            f_sub = QFont(fn_sans, 13, QFont.Weight.Bold)
-            f_sec = QFont(fn_sans, 11, QFont.Weight.Bold)
-            f_lbl = QFont(fn_sans, 9.5, QFont.Weight.Normal)
-            f_val = QFont(fn_sans, 9.5, QFont.Weight.Bold)
-            f_mono = QFont("Courier New", 10.5, QFont.Weight.Bold)
-            f_warn_t = QFont(fn_sans, 10, QFont.Weight.Bold)
-            f_warn_b = QFont(fn_sans, 9, QFont.Weight.Normal)
-
-            x_left = 50
-            x_val = 220
-            y = 55
-
-            painter.setPen(QColor("#000000"))
-            painter.setFont(f_title)
-            painter.drawText(x_left, y, "TAXISnet - Υπηρεσίες Πληρωμής")
-            y += 24
-            painter.setFont(f_sub)
-            painter.drawText(x_left, y, "Σημείωμα για Πληρωμή")
-            y += 35
-
-            painter.setFont(f_sec)
-            painter.drawText(x_left, y, "Στοιχεία Οφειλέτη")
-            y += 20
-
-            for lbl_t, val_t, is_m in [("Α.Φ.Μ.", afm, False), ("Ονοματεπώνυμο/ Επωνυμία", name, False)]:
-                painter.setFont(f_lbl)
-                painter.drawText(x_left, y, lbl_t)
-                painter.setFont(f_mono if is_m else f_val)
-                painter.drawText(x_val, y, val_t)
-                y += 18
-
-            y += 15
-            painter.setFont(f_sec)
-            painter.drawText(x_left, y, "Στοιχεία Οφειλής")
-            y += 20
-
-            rows_to = [
-                ("Τύπος Πληρωμής", "Πληρωμή Βεβαιωμένων Οφειλών εκτός Ρύθμισης", False),
-                ("ΔΟΥ", doy, False),
-                ("Είδος Φόρου", tax_kind, False),
-                ("Ημερολογιακή Περίοδος", period, False),
-                ("Συνολικό ποσό οφειλής δήλωσης", total_due, False),
-            ]
-            if installment and pay_by:
-                rows_to.append((f"Ποσό δόσης δήλωσης της {pay_by}", installment, False))
-            rows_to += [("Ταυτότητα Οφειλής", debt_id, True), ("Ημ/νία Έκδοσης", issued_at, False)]
-
-            for lbl_t, val_t, is_m in rows_to:
-                painter.setFont(f_lbl)
-                painter.drawText(x_left, y, lbl_t)
-                painter.setFont(f_mono if is_m else f_val)
-                painter.drawText(x_val, y, val_t)
-                y += 18
-
-            y += 25
-            painter.setFont(f_warn_t)
-            painter.drawText(x_left, y, "Προσοχή:")
-            y += 16
-            w_text = (
-                "Η «Ταυτότητα Οφειλής» ακολουθεί την οφειλή μέχρι την εξόφλησή της. Μπορείτε να πληρώνετε "
-                "μέρος ή το σύνολο αυτής, κάνοντας χρήση των τρόπων πληρωμής που διαθέτουν οι "
-                "συνεργαζόμενες με το Υπουργείο Οικονομικών τράπεζες και τα ΕΛ.ΤΑ.\n\n"
-                f"{inst_note.replace('<b>', '').replace('</b>', '')}"
-            )
-            painter.setFont(f_warn_b)
-            rect = QRectF(x_left, y, 480, 200)
-            painter.drawText(rect, Qt.TextWordWrap, w_text)
-            painter.end()
-            del writer
-
-            with open(tmp_path, "rb") as f:
-                return f.read()
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-    except Exception as exc:
-        log.warning("_debt_voucher_pdf failed: %s", exc)
-        return b""
-
 def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optional[dict[str, Any]] = None,
               decl_type: str = "", dest_path: Optional[Path | str] = None) -> str:
-    """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — λήψη του επίσημου PDF από την ΑΑΔΕ
-    (κουμπί «Εκτύπωση» / debtCodePdf.htm / print_form), ή παραγωγή επίσημου δελτίου πληρωμής
-    αν η σελίδα της ΑΑΔΕ είναι HTML (window.print)."""
+    """PDF της ταυτότητας οφειλής μιας χρεωστικής δήλωσης — ΠΑΝΤΑ το πρωτότυπο της ΑΑΔΕ, ποτέ δικό μας έντυπο (ρητό
+    αίτημα χρήστη 2026-11-10: «να φέρνει την original»). Δύο περιπτώσεις (ζωντανά 2026-11-10):
+    * η σελίδα έχει φόρμα εκτύπωσης PDF (`doViewPdf` κ.λπ., όπως οι οφειλές) → το PDF του server·
+    * η σελίδα «Ταυτότητα Οφειλής» των δηλώσεων (`displayDebtCode.htm`): το «Εκτύπωση» είναι `window.print()` με το
+      printer.css της ΑΑΔΕ — το ίδιο ακριβώς κάνει ο αόρατος browser με τη συνεδρία μας (`_Ctx.print_page`).
+    Οι v0.14.x έφτιαχναν «πιστό αντίγραφο» με δικό μας HTML — καταργήθηκε· `pdf_src='aade'` σημαδεύει τα πρωτότυπα,
+    ώστε τα παλιά να ξανακατέβουν μία φορά."""
     from . import debts
     if not ctx.afm:
         return ""
-
     pdf_content = b""
-
-    # 1. Προσπάθεια μέσω print_form (doViewPdf, doViewArrPdf, doPrint, κ.λπ.)
     if hasattr(ctx.http, "follow"):
         for fn in ("doViewPdf", "doViewArrPdf", "doPrint", "doPrintDebtCode"):
             pf = debts.print_form(page, fn)
@@ -662,100 +447,20 @@ def _debt_pdf(ctx: _Ctx, url: str, page: str, key: str, db_id: str, out: Optiona
                     if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
                         pdf_content = res["content"]
                         break
-                except Exception as exc:
+                except Exception as exc:                # noqa: BLE001
                     log.debug("print_form debt PDF failed (%s): %s", fn, exc)
-
-        # 2. Αναζήτηση απευθείας φόρμας εκτύπωσης / action μέσα στο page (π.χ. debtCodePdf.htm, viewPdf.htm)
-        if not pdf_content:
-            m_action = re.search(r'''action=['"]([^'"]*(?:debtCodePdf|debtInfoPdf|viewPdf|print)[^'"]*)['"]''', page or "", re.I)
-            if m_action:
-                action_url = urljoin(url, m_action.group(1))
-                form_fields: dict[str, str] = {"declarationDatabaseId": db_id}
-                if decl_type:
-                    form_fields["declarationType"] = decl_type
-                for m_inp in re.finditer(r'''<input[^>]*name=['"]([^'"]+)['"][^>]*value=['"]([^'"]*)['"]''', page or "", re.I):
-                    form_fields[m_inp.group(1)] = m_inp.group(2)
-                try:
-                    res = ctx.http.follow("POST", action_url, form_fields)
-                    if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
-                        pdf_content = res["content"]
-                except Exception as exc:
-                    log.debug("form action debt PDF failed: %s", exc)
-
-        # 3. Απευθείας λήψη του επίσημου PDF από το endpoint debtCodePdf.htm / debtInfoPdf.htm
-        if not pdf_content:
-            base_folder = url.rsplit("/", 1)[0] + "/"
-            for target in ("debtCodePdf.htm", "debtInfoPdf.htm"):
-                target_url = urljoin(base_folder, target)
-                attempts = []
-                if decl_type:
-                    attempts.append({"declarationDatabaseId": db_id, "declarationType": decl_type})
-                attempts.append({"declarationDatabaseId": db_id})
-                for post_data in attempts:
-                    try:
-                        res = ctx.http.follow("POST", target_url, post_data)
-                        if res.get("is_pdf") or (res.get("content") or b"")[:4] == b"%PDF":
-                            pdf_content = res["content"]
-                            break
-                    except Exception as exc:
-                        log.debug("direct %s failed: %s", target, exc)
-                if pdf_content:
-                    break
-
-    # 4. Fallback: Αν η ΑΑΔΕ επιστρέφει σελίδα HTML (όπως στο Φ2 displayDebtCode.htm που έχει window.print),
-    # παράγουμε το επίσημο δελτίο πληρωμής της ταυτότητας οφειλής
-    if not pdf_content:
-        m = label_map(page) if page else {}
-        debt_id = (out or {}).get("debt_id") or ""
-        if not debt_id and page:
-            m_id = re.search(r"[\d ]{10,}", _find(m, r"Ταυτότητα Οφειλής"))
-            if not m_id:
-                m_id = re.search(r"Ταυτότητα\s*Οφειλής[^0-9<]{0,50}([\d\s]{12,35})", page, re.I)
-            debt_id = m_id.group(0 if not hasattr(m_id, "group") else (1 if m_id.lastindex else 0)).strip() if m_id else ""
-        if not debt_id:
-            return ""
-
-        doy = (out or {}).get("doy") or _find(m, r"^ΔΟΥ$|Δ\.?Ο\.?Υ")
-        period = (out or {}).get("period") or _find(m, r"Ημερολογιακή Περίοδος")
-        tax_kind = (out or {}).get("tax_kind") or _find(m, r"Είδος Φόρου") or key
-        issued_at = (out or {}).get("issued_at") or _find(m, r"Ημ/νία Έκδοσης") or ""
-        total = (out or {}).get("total_due")
-        total_str = f"{total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if total is not None else (_find(m, r"Συνολικό ποσό οφειλής") or "")
-        inst = (out or {}).get("installment")
-        inst_str = f"{inst:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if inst is not None else ""
-        if not inst_str and page:
-            inst_str = _find(m, r"Ποσό\s*δόσης") or ""
-        pay_by = (out or {}).get("pay_by") or ""
-        if not pay_by and page:
-            m_pb = re.search(r"Ποσό\s*δόσης.*?(?:της|έως|μέχρι)\s*(\d{1,2}/\d{1,2}/\d{4})", page, re.I) or re.search(r"μέχρι\s*τις\s*(\d{1,2}/\d{1,2}/\d{4})", page, re.I)
-            if m_pb:
-                pay_by = m_pb.group(1)
-
-        name = _find(m, r"Ονοματεπώνυμο|Επωνυμία")
-        if (not name or not doy) and ctx.afm and hasattr(ctx, "conn") and ctx.conn:
-            b_row = ctx.conn.execute("SELECT name, trade_name, doy FROM businesses WHERE afm=?", (ctx.afm,)).fetchone()
-            if b_row:
-                if not name:
-                    name = b_row["name"] or b_row["trade_name"] or ""
-                if not doy:
-                    doy = b_row["doy"] or ""
-
-        pdf_content = _debt_voucher_pdf(debt_id, total_str, period, doy, tax_kind, inst_str, pay_by, ctx.afm, name, issued_at)
-
+    if not pdf_content and ctx.debt_url:
+        pdf_content = ctx.print_page(ctx.debt_url, must_contain="Ταυτότητα Οφειλής")
     if not pdf_content:
         return ""
-
-    filename = f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf"
+    if out is not None:
+        out["pdf_src"] = "aade"
+    filename = f"TO_{debts._safe(key)}_{debts._safe(db_id)}.pdf"                   # noqa: SLF001
     if dest_path:
-        p = Path(dest_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(pdf_content)
-        try:
-            debts._save_pdf(ctx.afm, filename, pdf_content)  # noqa: SLF001
-        except Exception:
-            pass
-        return str(p)
-
+        target = Path(dest_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pdf_content)
+        return str(target)
     return debts._save_pdf(ctx.afm, filename, pdf_content)  # noqa: SLF001
 
 
@@ -780,8 +485,9 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
         amounts: dict[str, Any] = {}
     elif known and known.get("registration_no") == effective["db_id"] and (
             not is_debt or not ctx.afm
-            or (known.get("pdf") and Path(known["pdf"]).exists())
-            or (known.get("pdf_checked") and not ctx.want_pdf)):
+            or (known.get("pdf") and Path(known["pdf"]).exists()
+                and known.get("pdf_src") == "aade")
+            or (known.get("pdf_checked") and not known.get("pdf") and not ctx.want_pdf)):
         amounts = dict(known)
         if eff_result and not amounts.get("result"):
             amounts["result"] = eff_result
@@ -812,13 +518,17 @@ def _period_details(ctx: _Ctx, o: Obligation, args: dict[str, str], known: Optio
         # 2. Ταυτότητα Οφειλής (κουμπί doDisplayDebtCode ή χρεωστική δήλωση)
         has_debt = bool(effective.get("has_debt_code") or amounts.get("result") == "Χρεωστική" or effective.get("result") == "Χρεωστική" or amounts.get("debt_id"))
         if has_debt:
-            if to_path.exists():
+            original = amounts.get("pdf_src") == "aade"     # τα παλιά «αντίγραφα» ξανακατεβαίνουν μία φορά
+            if to_path.exists() and original:
                 amounts["pdf"] = str(to_path)
                 amounts["pdf_checked"] = True
             else:
                 old_to = amounts.get("pdf") or (known or {}).get("pdf", "")
-                if old_to and Path(old_to).exists() and (known or {}).get("registration_no") == effective["db_id"]:
-                    amounts["pdf"] = old_to
+                if original and old_to and Path(old_to).exists():
+                    if Path(old_to) != to_path:                 # ίδιο πρωτότυπο και στον φάκελο της χρήσης (submissions)
+                        to_path.write_bytes(Path(old_to).read_bytes())
+                    amounts["pdf"] = str(to_path)
+                    amounts["pdf_checked"] = True
                 else:
                     d_info = effective.get("debt_info") or {}
                     decl_t = d_info.get("decl_type") or o.filter
@@ -1051,15 +761,18 @@ def check_client(conn: sqlite3.Connection, afm: str, year: Optional[int] = None,
     for r in conn.execute("SELECT obligation, period, amounts_json FROM obligation_checks WHERE afm=? AND year=? "
                           "AND status='submitted'", (afm, year)):
         stored.setdefault(r["obligation"], {})[r["period"]] = json.loads(r["amounts_json"] or "{}")
-    for key in keys:
-        try:
-            entries.append(check_obligation(ctx, key, year, cache, stored.get(key)))
-        except Exception as exc:                        # noqa: BLE001 — μία υποχρέωση δεν ρίχνει τις υπόλοιπες
-            log.error("Σφάλμα ελέγχου υποχρέωσης %s για ΑΦΜ %s χρήση %s: %s", key, afm, year, exc, exc_info=True)
-            from . import handoff
-            handoff.remember(f"ΑΑΔΕ — {OBLIGATIONS[key].label}", afm, login["http"])
-            entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
-                            "detail": f"Σφάλμα ελέγχου ({type(exc).__name__}: {str(exc)[:120]})"})
+    try:
+        for key in keys:
+            try:
+                entries.append(check_obligation(ctx, key, year, cache, stored.get(key)))
+            except Exception as exc:                        # noqa: BLE001 — μία υποχρέωση δεν ρίχνει τις υπόλοιπες
+                log.error("Σφάλμα ελέγχου υποχρέωσης %s για ΑΦΜ %s χρήση %s: %s", key, afm, year, exc, exc_info=True)
+                from . import handoff
+                handoff.remember(f"ΑΑΔΕ — {OBLIGATIONS[key].label}", afm, login["http"])
+                entries.append({"obligation": key, "label": OBLIGATIONS[key].label, "status": "error", "periods": [],
+                                "detail": f"Σφάλμα ελέγχου ({type(exc).__name__}: {str(exc)[:120]})"})
+    finally:
+        ctx.close()
     entries = [_only_liable_fee_periods(conn, afm, year, e) for e in entries]
     store_results(conn, afm, year, entries)
     vat_type = next((vat_period_from_checks(e) for e in entries if e["obligation"] == "Φ2"), "")

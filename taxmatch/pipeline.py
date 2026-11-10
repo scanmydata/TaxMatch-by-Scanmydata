@@ -151,10 +151,17 @@ def _extract_step(conn: sqlite3.Connection, session: Optional[requests.Session],
     if out.get("stopped"):
         errors.append(out["stopped"])
     # Για την ειδοποίηση μέσα στην εφαρμογή: μόνιμο μήνυμα όσο η ανάλυση δεν δουλεύει, σβήνει με την πρώτη επιτυχία
-    if out.get("stopped") or (out.get("failed") and not (out.get("done") or out.get("irrelevant"))):
+    # Όρια δωρεάν μοντέλων (αυτόματη εναλλαγή/αναμονή) ΔΕΝ είναι βλάβη: ήπια ειδοποίηση `llm_limits`, όχι το κόκκινο
+    # «δεν δουλεύει» (αναφορά χρήστη 2026-11-10 — η ειδοποίηση για «στιγμιαία υπερφορτωμένο» μοντέλο ήταν λάθος).
+    if out.get("stopped_kind") == "limits":
+        settings_store.set_value(conn, "llm_limits", out["stopped"] if not (out.get("done") or out.get("irrelevant"))
+                                 else "")
+        settings_store.set_value(conn, "llm_last_error", "")
+    elif out.get("stopped") or (out.get("failed") and not (out.get("done") or out.get("irrelevant"))):
         settings_store.set_value(conn, "llm_last_error", out.get("stopped") or "Όλα τα άρθρα απέτυχαν στην ανάλυση (δείτε το Αρχείο καταγραφής).")
     elif out.get("done") or out.get("irrelevant"):
         settings_store.set_value(conn, "llm_last_error", "")
+        settings_store.set_value(conn, "llm_limits", "")
     return out
 
 

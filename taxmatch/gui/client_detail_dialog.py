@@ -995,7 +995,7 @@ class ClientDetailDialog(QDialog):
             month_label = (f"{obligations.MONTHS_NOM[int(month_parts[1]) - 1]} {month_parts[0]}"
                            if len(month_parts) == 2 and month_parts[1].isdigit()
                            and 1 <= int(month_parts[1]) <= 12 else ref_month or "—")
-            category = "Μισθοδοσία" if r["rule_id"] in {"apd", "ergani_e4", "fmy_wages"} else "ΑΑΔΕ"
+            category = "Μισθοδοσία" if r["rule_id"] in {"apd", "apd_teka", "ergani_e4", "fmy_wages"} else "ΑΑΔΕ"
             pdfs = obligation_pdfs(r)
             cells = [date.fromisoformat(r["date"]).strftime("%d/%m/%Y"), month_label, category, _base_title(r),
                      "Ναι" if r["status"] == "yes" else "Ίσως", label,
@@ -1066,9 +1066,6 @@ class ClientDetailDialog(QDialog):
         if not client_creds.get(self.conn, self.afm):
             toast(self, "Χρειάζονται οι κωδικοί TAXISnet του πελάτη.", "warn")
             return
-        from .. import efka
-        if efka.should_check_apd(self.conn, self.afm) and not efka.has_ika_credentials(self.conn, self.afm):
-            toast(self, "Ο πελάτης δεν έχει κωδικούς ΙΚΑ εργοδότη — ο έλεγχος ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ θα παραλειφθεί.", "info")
         year = self.check_year.currentData() or date.today().year
         want_pdf = self.main.ask_submission_pdf(self)
         if want_pdf is None:

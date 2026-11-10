@@ -940,11 +940,19 @@ def submissions_entry(key: str, ame: str, rows: list[dict[str, Any]], year: int,
 def _login_for_ame(conn: sqlite3.Connection, afm: str, ame: str,
                    http_factory: Callable[[], _HyperHttp]) -> dict[str, Any]:
     """Σύνδεση για ΕΝΑ ΑΜΕ στη νέα πύλη (services.e-efka.gov.gr, «Είσοδος Εργοδότη» → GSIS → ρόλος external-employer
-    με ΑΥΤΟ το ΑΜΕ): απαιτούνται οι κωδικοί ΙΚΑ του ΑΜΕ ή οι γενικοί κωδικοί ΙΚΑ του πελάτη."""
+    με ΑΥΤΟ το ΑΜΕ). Η σελίδα εισόδου εργοδότη έχει ΜΟΝΟ TAXISnet (ζωντανά 2026-10-27 και 2026-11-10): πρώτα οι κωδικοί
+    TAXISnet του πελάτη, μετά — ως έσχατη προσπάθεια — οι «κωδικοί ΙΚΑ» του ΑΜΕ (κάποια γραφεία αποθηκεύουν εκεί τους
+    GSIS κωδικούς του εργοδότη). ΠΡΟΣΟΧΗ: η v0.14.2 απαιτούσε ΜΟΝΟ κωδικούς ΙΚΑ και τους έστελνε στο GSIS — «Λάθος
+    κωδικοί» σε κάθε εργοδότη (αναφορά χρήστη 2026-11-10). {ok, http, portal: 'new', reason}."""
+    attempts: list[tuple[str, tuple[str, str]]] = []
+    taxis = taxis_credentials.get(conn, afm)
+    if taxis:
+        attempts.append(("new", taxis))
     own = ame_credentials(conn, afm, ame)
-    if not own:
-        return {"ok": False, "reason": "Λείπουν οι κωδικοί ΙΚΑ εργοδότη — απαιτούνται για τον έλεγχο ΑΠΔ e-ΕΦΚΑ & ΤΕΚΑ."}
-    attempts: list[tuple[str, tuple[str, str]]] = [("new", own)]
+    if own and ("new", own) not in attempts:
+        attempts.append(("new", own))
+    if not attempts:
+        return {"ok": False, "reason": REASONS_EL["NoCredentials"]}
     last = "Αποτυχία σύνδεσης στον e-ΕΦΚΑ."
     for portal, (user, password) in attempts:
         try:
@@ -974,9 +982,6 @@ def check_apd_entries(conn: sqlite3.Connection, afm: str, year: int, today: Opti
     today = today or date.today()
     ames = list_ames(conn, afm, active_only=True)
     if not ames and employer_credentials(conn, afm):
-        if not ika_credentials(conn, afm):
-            return [{"obligation": "ΑΠΔ", "label": "ΑΠΔ e-ΕΦΚΑ", "status": "error", "periods": [],
-                     "detail": "Απαιτούνται κωδικοί ΙΚΑ εργοδότη για τον έλεγχο ΑΠΔ e-ΕΦΚΑ / ΤΕΚΑ."}]
         found = retrieve_ame(conn, afm)
         ames = list_ames(conn, afm, active_only=True) if found.get("ok") else []
     if not ames:

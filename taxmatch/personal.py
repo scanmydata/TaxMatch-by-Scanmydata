@@ -264,3 +264,34 @@ def check_entries(conn: sqlite3.Connection, afm: str, year: int, want_pdf: bool 
     except Exception as exc:                            # noqa: BLE001
         log.warning("ETAK %s: %s", afm, exc)
     return out
+
+
+def fetch_traffic(conn: sqlite3.Connection, afm: str, fee_year: int,
+                  login_fn: Callable[[str, str], dict] = lookup_aade.aade_login) -> dict[str, Any]:
+    """Μόνο το ειδοποιητήριο τελών κυκλοφορίας `fee_year` (myCAR) — για «Λήψη & αποστολή» από την καρτέλα πελάτη
+    (ρητό αίτημα 2026-11-10, όπως στο Tax Center: «τέλη κυκλοφορίας 2027»). Αποθηκεύεται στη χρήση fee_year−1.
+    {ok, reason, status, pdf}."""
+    from .easycheck import store_results
+    creds = credentials.get(conn, afm)
+    if not creds:
+        return {"ok": False, "reason": "Δεν υπάρχουν κωδικοί TAXISnet του πελάτη."}
+    login = login_fn(*creds)
+    if not login.get("ok"):
+        return {"ok": False, "reason": lookup_aade.REASONS_EL.get(login.get("reason") or "", "Αποτυχία σύνδεσης TAXISnet.")}
+    folder = config.data_dir() / "submissions" / afm / str(fee_year - 1)
+    res = traffic_fees(login["http"], [fee_year], lambda _y: folder).get(fee_year, {})
+    entry = traffic_entry(fee_year, res)
+    if entry:
+        store_results(conn, afm, fee_year - 1, [entry])
+    reason = {"no_vehicles": "Κανένα όχημα στο myCAR.", "not_found": f"Δεν βρέθηκαν τέλη κυκλοφορίας {fee_year}.",
+              "not_available": f"Το myCAR δεν έχει ακόμη τα τέλη {fee_year}."}.get(res.get("status", ""), "")
+    return {"ok": res.get("status") == "notice", "reason": reason, "status": res.get("status", ""),
+            "pdf": res.get("pdf", "")}
+
+
+def traffic_pdf(conn: sqlite3.Connection, afm: str, fee_year: int) -> str:
+    """Το ειδοποιητήριο τελών `fee_year` που έχει ήδη κατέβει ('' αν δεν υπάρχει)."""
+    row = conn.execute("SELECT amounts_json FROM obligation_checks WHERE afm=? AND year=? AND obligation=?",
+                       (afm, fee_year - 1, TRAFFIC)).fetchone()
+    pdf = (json.loads(row["amounts_json"] or "{}").get("submission_pdf") if row else "") or ""
+    return pdf if pdf and Path(pdf).exists() else ""

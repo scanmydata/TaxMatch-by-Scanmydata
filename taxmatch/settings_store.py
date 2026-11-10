@@ -42,6 +42,8 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("aade_office_status", "Κατάσταση κωδικών γραφείου (ok|invalid|'')"),
     SettingDef("aade_office_message", "Μήνυμα σύνδεσης γραφείου"),
     SettingDef("llm_last_error", "Τελευταίο σφάλμα ανάλυσης LLM"),
+    SettingDef("llm_limits", "Όρια δωρεάν μοντέλων LLM (προσωρινά)"),
+    SettingDef("llm_cooldowns", "Μοντέλα/πάροχοι LLM σε αναμονή (JSON)"),
     SettingDef("lookback_days", "Ημέρες αναδρομής άρθρων", default="10"),
     SettingDef("max_extractions_per_run", "Μέγιστες εξαγωγές LLM ανά έλεγχο", default="60"),
     SettingDef("fetch_full_text", "Λήψη πλήρους κειμένου άρθρου", default="1"),

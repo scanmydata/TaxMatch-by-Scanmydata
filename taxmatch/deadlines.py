@@ -126,7 +126,8 @@ _BUSINESS_SQL = ("SELECT afm, name, legal_form, vat_subject, vat_period_type, va
                  "activity_state, cease_date, employer, intrastat, teka, internet_contribution, parepid, "
                  "(SELECT group_concat(k.code, ',') FROM business_kad k WHERE k.afm=businesses.afm) AS kad_codes, "
                  "(SELECT group_concat(d.title, ' | ') FROM aade_debts d WHERE d.afm=businesses.afm AND d.total>0) "
-                 "AS debt_titles "
+                 "AS debt_titles, "
+                 "(SELECT s.status FROM debt_sync s WHERE s.afm=businesses.afm) AS debt_sync_status "
                  "FROM businesses")
 #: Ίδια προθεσμία αν κανόνας και γεγονός του taxheaven απέχουν έως τόσες ημέρες (Σαββατοκύριακα, παρατάσεις λίγων ημερών).
 _SAME_DEADLINE_DAYS = 6
@@ -142,8 +143,12 @@ def _businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(b) for b in _BUSINESSES_CACHE.get(conn, _load_businesses)]
 
 
+_LIABLE_MEMO: dict[tuple, Any] = {}
+
+
 def _load_businesses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     from .mydata import analysis as mydata_analysis
+    _LIABLE_MEMO.clear()                                 # νέα δεδομένα πελατών → νέες απαντήσεις «υπόχρεος;»
     flags = mydata_analysis.month_flags(conn)          # ανά μήνα: VIES / Intrastat / παρακράτηση από το myDATA
     checks = _checks_for(conn)
     return [{**dict(r), "mydata": flags.get(r["afm"], {}), "mydata_ever": _ever(flags.get(r["afm"], {})),
@@ -306,16 +311,28 @@ def _liable(ev: dict[str, Any], businesses: list[dict[str, Any]]) -> Optional[li
     # Μήνας αναφοράς ανά κανόνα: το γεγονός κανόνα τον φέρει· για γεγονός του γενικού ημερολογίου βγαίνει από την ημερομηνία.
     due = date.fromisoformat(ev["date"])
     refs = {i: ev.get("ref_month") or (ev.get("ref_months") or {}).get(i) or nearest_ref(i, due) for i in ids}
+    # ίδιο γεγονός για τους ίδιους πελάτες (Αρχική, Ημερολόγιο, κουκκίδες μήνα) — μία φορά ανά έκδοση δεδομένων
+    memo_key = ("event", tuple(ids), tuple(sorted(refs.items())), ev["date"], date.today(),
+                tuple(b["afm"] for b in businesses))
+    if memo_key in _LIABLE_MEMO:
+        return [dict(c) for c in _LIABLE_MEMO[memo_key]]
     out = []
+
+    def liable(i: str, b: dict[str, Any]) -> tuple[str, str]:
+        # ίδια ερώτηση (κανόνας, πελάτης, μήνας) από Αρχική / Ημερολόγιο / κουκκίδες — μία φορά ανά έκδοση δεδομένων
+        key = (i, b["afm"], refs[i], date.today())
+        if key not in _LIABLE_MEMO:
+            _LIABLE_MEMO[key] = obligations.liability(i, b, refs[i])
+        return _LIABLE_MEMO[key]
     for b in businesses:
-        rid, (status, reason) = min(((i, obligations.liability(i, b, refs[i])) for i in ids),
-                                    key=lambda x: _RANK[x[1][0]])
+        rid, (status, reason) = min(((i, liable(i, b)) for i in ids), key=lambda x: _RANK[x[1][0]])
         if status != "no":
             out.append({"afm": b["afm"], "name": b["name"] or b["afm"], "status": status, "reason": reason,
                         "rule_id": rid, "ref_month": refs[rid],
                         "submission": obligations.submission(rid, b, refs[rid], due_date=due)})
     out.sort(key=lambda c: (_RANK[c["status"]], c["name"]))
-    return out
+    _LIABLE_MEMO[memo_key] = out
+    return [dict(c) for c in out]
 
 
 def clients_for_event(conn: sqlite3.Connection, ev: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
@@ -384,7 +401,7 @@ def client_year(conn: sqlite3.Connection, afm: str, year: int) -> list[dict[str,
 def work_items(conn: sqlite3.Connection, year: int, afm: Optional[str] = None) -> list[dict[str, Any]]:
     """Υποχρεώσεις της χρήσης για την καρτέλα «Ανά εργασία»: ένας πελάτης × κανόνας × μήνας."""
     start, end = date(year, 1, 1), date(year + 1, 8, 31)
-    payroll = {"apd", "ergani_e4", "fmy_wages"}
+    payroll = {"apd", "apd_teka", "ergani_e4", "fmy_wages"}
     out = []
     for business in _businesses(conn):
         if afm and business["afm"] != afm:

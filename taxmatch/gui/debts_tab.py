@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db as dbmod
-from .. import debts, mailer, office
+from .. import debts, mailer, office, payments
 from .email_dialog import EmailDialog
 from .icons import icon
 from .table_filter import cell_menu_actions
@@ -28,7 +28,7 @@ from .widgets import fit_to_screen
 from .workers import run_task
 
 _COLS = ["Πύλη", "Είδος", "Περιγραφή", "Ληξιπρόθεσμο", "Εμπρόθεσμο", "Σύνολο", "Οφειλόμενη δόση",
-         "Ταυτότητα πληρωμής", "PDF"]
+         "Ταυτότητα πληρωμής", "PDF", "Πληρωμές (12μ.)"]
 
 
 def _when(iso: str) -> str:
@@ -64,6 +64,11 @@ class DebtsTab(QWidget):
         open_pdf = QPushButton(icon("pdf", CURRENT.txt, 16), "  Άνοιγμα PDF")
         open_pdf.clicked.connect(self._open_pdf)
         bar.addWidget(open_pdf)
+        pays = QPushButton(icon("income", CURRENT.txt, 16), "  Πληρωμές…")
+        pays.setToolTip("Οι πληρωμές των τελευταίων 12 μηνών στην ΑΑΔΕ και σε ποια ανοιχτή οφειλή αντιστοιχούν "
+                        "(ενημερώνονται μαζί με τις οφειλές)")
+        pays.clicked.connect(self._show_payments)
+        bar.addWidget(pays)
         bar.addStretch()
         mail_debts = QPushButton(icon("send", CURRENT.txt, 16), "  Email οφειλών…")
         mail_debts.clicked.connect(lambda: self._email("debts"))
@@ -72,6 +77,15 @@ class DebtsTab(QWidget):
         mail_news.setToolTip("Τα νέα των τελευταίων 30 ημερών που αφορούν συγκεκριμένα τον πελάτη (όχι τα γενικά)")
         mail_news.clicked.connect(lambda: self._email("news"))
         bar.addWidget(mail_news)
+        from ..obligations import is_legal_entity
+        row = conn.execute("SELECT legal_form FROM businesses WHERE afm=?", (afm,)).fetchone()
+        if not is_legal_entity((row["legal_form"] if row else "") or ""):
+            fee_year = date.today().year + 1
+            traffic = QPushButton(icon("download", CURRENT.txt, 16), f"  Τέλη κυκλοφορίας {fee_year}…")
+            traffic.setToolTip(f"Λήψη του ειδοποιητηρίου τελών κυκλοφορίας {fee_year} από το myCAR (με τους κωδικούς "
+                               "TAXISnet του πελάτη) και αποστολή του με email")
+            traffic.clicked.connect(lambda: self._traffic(fee_year))
+            bar.addWidget(traffic)
         root.addLayout(bar)
         self.info = QLabel("")
         self.info.setWordWrap(True)
@@ -83,7 +97,7 @@ class DebtsTab(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
-        self.kit = TableKit(self.table, list(zip(_COLS, (62, 140, 0, 118, 110, 100, 175, 175, 50))), "client_debts",
+        self.kit = TableKit(self.table, list(zip(_COLS, (62, 140, 0, 118, 110, 100, 175, 175, 50, 190))), "client_debts2",
                             cell_menu=False, placeholder="Αναζήτηση οφειλής (περιγραφή, ταυτότητα, ποσό…)")
         root.addWidget(self.kit.bar)
         self.table.horizontalHeaderItem(4).setToolTip("Εμπρόθεσμο υπόλοιπο ΑΑΔΕ · στο ΚΕΑΟ: ό,τι είναι σε ενεργή ρύθμιση")
@@ -133,7 +147,18 @@ class DebtsTab(QWidget):
             parts.append(f"<span style='color:{CURRENT.warn}'>Ο πελάτης δεν έχει email (Προφίλ ή ανάκτηση στοιχείων)</span>")
         if not mailer.configured(self.conn):
             parts.append(f"<span style='color:{CURRENT.warn}'>SMTP: Ρυθμίσεις → Email προς πελάτες</span>")
-        self.info.setText(" · ".join(parts))
+        self._pay = payments.info(self.conn, self.afm)
+        text = " · ".join(parts)
+        if self._pay and self._pay["status"] == "ok":
+            s = self._pay["summary"]
+            text += (f"<br>Έλεγχος πληρωμών ({_when(self._pay['synced_at'])}): <b>{s.get('unpaid', 0)}</b> ανεξόφλητες "
+                     f"({office.money(s.get('unpaid_total', 0))}) · {s.get('with_payment', 0)} με πληρωμή σε εξέλιξη · "
+                     f"{s.get('payments', 0)} πληρωμές 12μήνου ({office.money(s.get('paid_total', 0))})")
+            for line in payments.anomaly_lines(self._pay):
+                text += f"<br><span style='color:{CURRENT.warn}'>⚠ {html.escape(line)}</span>"
+        elif self._pay:
+            text += f"<br><span style='color:{CURRENT.bad}'>{html.escape(self._pay['message'])}</span>"
+        self.info.setText(text)
         t = self.table
         self.kit.begin()
         t.setRowCount(len(self._rows))
@@ -146,7 +171,8 @@ class DebtsTab(QWidget):
                     nxt += f" ({d['unpaid']}/{d['instalments']})"
             cells = [debts.SOURCES.get(d.get("source", "aade"), ""), debts.KIND_LABEL.get(d["kind"], d["kind"]), d["title"],
                      office.money(d["overdue"]) if d["overdue"] else "", office.money(d["non_overdue"]) if d["non_overdue"] else "",
-                     office.money(d["total"]) if d["total"] else "", nxt, d["code"] or "—", "PDF" if has_pdf else "—"]
+                     office.money(d["total"]) if d["total"] else "", nxt, d["code"] or "—", "PDF" if has_pdf else "—",
+                     payments.status_text(payments.debt_status(self._pay, d))]
             for col, text in enumerate(cells):
                 item = SortItem(text)
                 if col in (3, 4, 5):
@@ -156,6 +182,12 @@ class DebtsTab(QWidget):
                 if col == 6 and d.get("next_due") and _late(d["next_due"]):
                     item.setForeground(QColor(CURRENT.bad))
                     item.setToolTip("Η δόση έχει λήξει χωρίς να πληρωθεί")
+                if col == 9 and text:
+                    st = payments.debt_status(self._pay, d) or {}
+                    item.setForeground(QColor(CURRENT.bad if st.get("status") == "unpaid" else CURRENT.ok))
+                    item.setToolTip("\n".join(f"{p['date']} · {payments.money(p['amount'])} · {p['type']}"
+                                               for p in st.get("payments") or []) or "Καμία πληρωμή με αυτή την "
+                                    "ταυτότητα τους τελευταίους 12 μήνες")
                 if col == 8:
                     item.setForeground(QColor(CURRENT.ok if has_pdf else CURRENT.muted))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -286,6 +318,70 @@ class DebtsTab(QWidget):
         menu.addSeparator()
         cell_menu_actions(menu, self.table, pos, self.kit.col_filter)   # αντιγραφή κελιού / φίλτρο με την τιμή
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _traffic(self, fee_year: int) -> None:
+        from .. import personal
+        existing = personal.traffic_pdf(self.conn, self.afm, fee_year)
+        if existing:
+            self._send_traffic(fee_year, existing)
+            return
+        toast(self.window_, f"Λήψη τελών κυκλοφορίας {fee_year} από το myCAR…", "info")
+
+        def work(_p):
+            conn = dbmod.connect()
+            try:
+                return personal.fetch_traffic(conn, self.afm, fee_year)
+            finally:
+                conn.close()
+
+        def done(res):
+            if not res.get("ok") or not res.get("pdf"):
+                toast(self.window_, res.get("reason") or "Το ειδοποιητήριο δεν κατέβηκε.", "warn")
+                return
+            toast(self.window_, f"Το ειδοποιητήριο τελών κυκλοφορίας {fee_year} κατέβηκε.", "ok")
+            self._send_traffic(fee_year, res["pdf"])
+        self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self.window_, m, "danger")))
+
+    def _send_traffic(self, fee_year: int, pdf: str) -> None:
+        if not mailer.configured(self.conn):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(pdf))
+            toast(self.window_, "Το PDF άνοιξε. Για αποστολή με email ορίστε το SMTP (Ρυθμίσεις → Email προς πελάτες).",
+                  "info")
+            return
+        EmailDialog(self.window_, self.afm, "traffic", mailer.compose_traffic(self.conn, self.afm, fee_year, pdf),
+                    on_sent=self.reload).exec()
+
+    def _show_payments(self) -> None:
+        rows = payments.client_payments(self.conn, self.afm)
+        if not rows:
+            toast(self.window_, "Δεν υπάρχουν πληρωμές — πατήστε «Ενημέρωση οφειλών» (ελέγχει και τις πληρωμές).", "info")
+            return
+        dlg = QDialog(self.window_)
+        dlg.setWindowTitle("Πληρωμές ΑΑΔΕ (12 μήνες)")
+        lay = QVBoxLayout(dlg)
+        t = QTableWidget(0, 5)
+        t.verticalHeader().setVisible(False)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        kit = TableKit(t, [("Ημερομηνία", 95), ("Ποσό", 95), ("Είδος ταυτότητας", 200), ("Ταυτότητα", 230),
+                           ("Αντιστοίχιση", 0)], "client_payments", placeholder="Αναζήτηση πληρωμής…")
+        lay.addWidget(kit.bar)
+        lay.addWidget(t, 1)
+        kit.begin()
+        t.setRowCount(len(rows))
+        for i, p in enumerate(rows):
+            match = (f"Ανοιχτή οφειλή: {p['debt_title']}" if p["matched"] else "Εξοφλημένη / δεν εκκρεμεί")
+            if p["repeated"]:
+                match += " · ίδια ταυτότητα σε πολλές πληρωμές"
+            day = "/".join(reversed(p["pay_date"].split("-"))) if p["pay_date"] else ""
+            for col, text in enumerate((day, payments.money(p["amount"]), p["type"], p["code"], match)):
+                item = SortItem(text, p["pay_date"] if col == 0 else p["amount"] if col == 1 else None)
+                if col == 4 and p["matched"]:
+                    item.setForeground(QColor(CURRENT.warn))
+                t.setItem(i, col, item)
+        kit.end()
+        dlg.resize(900, 520)
+        fit_to_screen(dlg)
+        dlg.exec()
 
     def _copy(self, text: str) -> None:
         QGuiApplication.clipboard().setText(text)

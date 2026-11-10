@@ -105,7 +105,18 @@ def test_payment_rules_liability_from_checks_and_debts(conn):
     assert obligations.liability("enfia", b, f"{y + 1}-02")[0] == "yes"          # 12η δόση του ίδιου εκκαθαριστικού
     assert obligations.liability("traffic_fees", b, f"{y}-12")[0] == "no"
     sub = obligations.submission("enfia", b, f"{y}-05")
-    assert sub["status"] == "pending" and "οφειλές" in sub["label"]
+    assert sub["status"] == "pending" and "Λήψη οφειλών" in sub["label"]      # χωρίς λήψη οφειλών: άγνωστη εξόφληση
+    # με πετυχημένη λήψη οφειλών και καμία ανοιχτή οφειλή ΕΝΦΙΑ → εξοφλήθηκε (ρητό αίτημα 2026-11-10)
+    conn.execute("INSERT INTO debt_sync(afm, synced_at, status) VALUES (?,?,?)", (AFM, "x", "ok"))
+    b = next(x for x in deadlines._businesses(conn) if x["afm"] == AFM)
+    assert obligations.submission("enfia", b, f"{y}-05")["status"] == "submitted"
+    conn.execute("INSERT INTO aade_debts(afm, kind, ref, title, total, fetched_at) VALUES (?,?,?,?,?,?)",
+                 (AFM, "debt", "e", "ΕΝΦΙΑ ΦΥΣΙΚΩΝ ΠΡΟΣΩΠΩΝ", 80.0, "x"))
+    b = next(x for x in deadlines._businesses(conn) if x["afm"] == AFM)
+    assert obligations.submission("enfia", b, f"{y}-05")["label"].startswith("Ανοιχτή οφειλή")
+    conn.execute("DELETE FROM aade_debts WHERE afm=?", (AFM,))
+    conn.execute("DELETE FROM debt_sync WHERE afm=?", (AFM,))
+    b = next(x for x in deadlines._businesses(conn) if x["afm"] == AFM)
     assert obligations.liability("income_tax_instalment", b, f"{y}-09")[0] == "maybe"
     conn.execute("INSERT INTO aade_debts(afm, kind, ref, title, total, fetched_at) VALUES (?,?,?,?,?,?)",
                  (AFM, "out", "1", "ΦΟΡΟΣ ΕΙΣΟΔΗΜΑΤΟΣ ΦΥΣΙΚΩΝ ΠΡΟΣΩΠΩΝ", 120.0, "x"))

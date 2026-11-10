@@ -193,6 +193,10 @@ class _ClientTableWidget(QTableWidget):
     και αναζητά case-insensitive χωρίς τόνους και με αυτόματη αντιστοίχιση ελληνικών/λατινικών
     ομόγραφων χαρακτήρων και διατάξεων πληκτρολογίου."""
 
+    @staticmethod
+    def _clean(text: str, col: int) -> str:
+        return re.sub(r"^[\s▼▾▶▸►↳\-\*•\(\)\[\]]+", "", text).strip() if col == _C_NAME else text
+
     def keyboardSearch(self, search: str) -> None:
         if not search or self.rowCount() == 0:
             return
@@ -203,9 +207,16 @@ class _ClientTableWidget(QTableWidget):
         else:
             col = _C_NAME
 
-        cur_row = self.currentRow()
-        start_row = (cur_row + 1) if len(search) == 1 and cur_row >= 0 else (cur_row if cur_row >= 0 else 0)
         norm_search = _norm_search_str(search)
+        # Αναφορά χρήστη 2026-11-10: το γράμμα πρέπει να πηγαίνει στον ΠΡΩΤΟ πελάτη με αυτό το γράμμα (με τη σειρά που
+        # φαίνεται)· μόνο αν είμαστε ήδη σε πελάτη με αυτό το γράμμα, το ίδιο πλήκτρο πάει στον επόμενο (κυκλικά).
+        # Πριν η αναζήτηση ξεκινούσε ΠΑΝΤΑ από την τρέχουσα γραμμή — ένα «Κ» από τη μέση της λίστας έπεφτε σε τυχαίο Κ.
+        cur_row = self.currentRow()
+        start_row = 0
+        if len(search) == 1 and cur_row >= 0 and self.item(cur_row, col) is not None:
+            cur_text = _norm_search_str(self._clean(self.item(cur_row, col).text(), col))
+            if cur_text.startswith(norm_search):
+                start_row = cur_row + 1
 
         for i in range(self.rowCount()):
             r = (start_row + i) % self.rowCount()
@@ -214,10 +225,7 @@ class _ClientTableWidget(QTableWidget):
             item = self.item(r, col)
             if not item:
                 continue
-            text = item.text()
-            if col == _C_NAME:
-                text = re.sub(r"^[\s▼▾▶▸►↳\-\*•\(\)\[\]]+", "", text).strip()
-            norm_text = _norm_search_str(text)
+            norm_text = _norm_search_str(self._clean(item.text(), col))
 
             matched = norm_text.startswith(norm_search)
             if not matched and col == _C_NAME:
@@ -489,8 +497,9 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMaximumHeight(480)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         holder = QWidget()
+        self.notices_holder = holder
         self.notices_box = QVBoxLayout(holder)
         self.notices_box.setContentsMargins(2, 2, 2, 2)
         self.notices_box.setSpacing(8)
@@ -502,10 +511,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self.stack, 1)
         self._pages = {
             "dashboard": self._dashboard_page(), "clients": self._clients_page(),
-            "calendar": self._calendar_page(), "news": self._news_page(), "aml": AmlPage(self),
+            "calendar": self._calendar_page(), "news": self._news_page(), "aml": QWidget(),
             "settings": self._settings_page(),
         }
-        self.aml_page: AmlPage = self._pages["aml"]
+        self._aml_page: Optional[AmlPage] = None          # χτίζεται όταν ανοίξει (0,7″ λιγότερα στην εκκίνηση)
         for page in self._pages.values():
             self.stack.addWidget(page)
 
@@ -532,8 +541,16 @@ class MainWindow(QMainWindow):
         x = btn_pos.x() + self.notice_btn.width() - panel_width
         x = max(16, min(x, parent_width - panel_width - 16))
         y = btn_pos.y() + 6
-        max_h = min(560, max(180, parent_height - y - 24))
-        target_h = min(max_h, max(140, self.notice_panel.sizeHint().height()))
+        max_h = min(640, max(180, parent_height - y - 24))
+        # Ύψος από το ΠΕΡΙΕΧΟΜΕΝΟ στο πραγματικό πλάτος (οι ετικέτες αναδιπλώνονται): το sizeHint της κύλισης είναι
+        # μικρό σταθερό, οπότε κάθε ειδοποίηση φαινόταν κομμένη σε 2-3 γραμμές (αναφορά χρήστη 2026-11-10).
+        content_w = panel_width - 36
+        content_h = 4
+        for i in range(self.notices_box.count()):
+            w = self.notices_box.itemAt(i).widget()
+            if w is not None:
+                content_h += (w.heightForWidth(content_w) if w.hasHeightForWidth() else w.sizeHint().height()) + 8
+        target_h = min(max_h, max(140, content_h + 70))
         self.notice_panel.setGeometry(x, y, panel_width, target_h)
         self.notice_panel.raise_()
 
@@ -570,13 +587,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ πλοήγηση
     def _show_page(self, name: str) -> None:
+        if name == "aml":
+            self.aml_page                                    # noqa: B018 — δημιουργία κατά την πρώτη επίσκεψη
         page = self._pages.get(name)
         if page is None:
             return
         self.stack.setCurrentWidget(page)
         self.menu.set_active(name)
         {"dashboard": self.reload_dashboard, "clients": self.reload_clients, "calendar": self.reload_calendar,
-         "news": self.reload_news, "aml": self.aml_page.reload, "settings": self.reload_settings}.get(name, lambda: None)()
+         "news": self.reload_news, "aml": lambda: self.aml_page.reload(),
+         "settings": self.reload_settings}.get(name, lambda: None)()
 
     def reload_all(self) -> None:
         self._reload_notices()
@@ -584,14 +604,28 @@ class MainWindow(QMainWindow):
         self.reload_clients()
         self.reload_calendar()
         self.reload_news()
-        self.aml_page.reload()
+        if self._aml_page is not None:
+            self._aml_page.reload()
         self.reload_settings()
         self._refresh_status_bar()
+
+    @property
+    def aml_page(self) -> AmlPage:
+        """Η σελίδα «Δέουσα επιμέλεια» φτιάχνεται την πρώτη φορά που χρειάζεται (ρητό αίτημα ταχύτητας 2026-11-10)."""
+        if self._aml_page is None:
+            placeholder = self._pages["aml"]
+            self._aml_page = AmlPage(self)
+            self.stack.insertWidget(self.stack.indexOf(placeholder), self._aml_page)
+            self.stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+            self._pages["aml"] = self._aml_page
+        return self._aml_page
 
     def after_aml_change(self) -> None:
         """Μετά από αποθήκευση αξιολόγησης δέουσας επιμέλειας: η επανεξέταση εμφανίζεται στο Ημερολόγιο/Αρχική και
         η ειδοποίηση για εκπρόθεσμες/ελλιπείς αξιολογήσεις ενημερώνεται αμέσως."""
-        self.aml_page.reload_clients()
+        if self._aml_page is not None:
+            self._aml_page.reload_clients()
         self._render_calendar_from_db()
         self.reload_dashboard()
         self._reload_notices()
@@ -1378,10 +1412,7 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("Έλεγχος υποβολών")
         box.setText("Να γίνει λήψη και των PDF των υποβληθεισών δηλώσεων (Φ2, Φ4/Φ5, ΦΜΥ, Intrastat…);")
         box.setInformativeText("• Αποθηκεύονται στον φάκελο δεδομένων (submissions) — μία φορά ανά δήλωση. Χωρίς PDF ο "
-                               "έλεγχος είναι πιο γρήγορος.\n\n"
-                               "• Για τον έλεγχο ΑΠΔ (e-ΕΦΚΑ & ΤΕΚΑ) πρέπει να υπάρχουν κωδικοί ΙΚΑ εργοδότη "
-                               "(στην καρτέλα e-ΕΦΚΑ του πελάτη). Χωρίς κωδικούς ΙΚΑ ο έλεγχος ΑΠΔ παραλείπεται "
-                               "για να μην περιμένετε χωρίς λόγο.")
+                               "έλεγχος είναι πιο γρήγορος.\n")
         with_pdf = box.addButton("Έλεγχος και PDF", QMessageBox.ButtonRole.YesRole)
         only = box.addButton("Μόνο έλεγχος", QMessageBox.ButtonRole.NoRole)
         box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
@@ -1460,16 +1491,32 @@ class MainWindow(QMainWindow):
         rows = requests_aade.waiting_on_client(self.conn, afms)
         if not rows:
             return 0
-        lines = [f"• {r['name'] or r['afm']} — {r['process'] or r['topic'] or 'αίτημα'}"
-                 + (f" (υπόθεση {r['case_no']})" if r["case_no"] else "") for r in rows[:5]]
+        lines = ["• " + requests_aade.chat_line(r, 110) + (f" (υπόθεση {r['case_no']})" if r["case_no"] else "")
+                 for r in rows[:5]]
         more = f"\n… και άλλα {len(rows) - 5}" if len(rows) > 5 else ""
-        actions = [(r["name"] or r["afm"], [("Άνοιγμα αιτημάτων",
-                    lambda _c=False, a=r["afm"]: self.open_client_detail(a, tab="requests_tab"))])
+        actions = [(r["name"] or r["afm"], [("Αίτημα στην εφαρμογή",
+                    lambda _c=False, a=r["afm"]: self.open_client_detail(a, tab="requests_tab")),
+                    ("Απάντηση στον browser", lambda _c=False, a=r["afm"], i=r["id"]: self.open_request_web(a, i))])
                    for r in list({r["afm"]: r for r in rows}.values())[:3]]
         toast(window or self, "\n".join(lines) + more, "warn", title=(
             f"{len(rows)} {'αίτημα' if len(rows) == 1 else 'αιτήματα'} ΑΑΔΕ σε εκκρεμότητα από τον πελάτη — "
             "χρειάζεται ενέργεια"), actions=actions)
         return len(rows)
+
+    def open_request_web(self, afm: str, request_id: str) -> None:
+        """Σύνδεση με τους κωδικούς του πελάτη και άνοιγμα του αιτήματος στο myAADE (browser) για απάντηση."""
+        from .. import requests_aade
+        toast(self, "Σύνδεση στο myAADE και άνοιγμα του αιτήματος στον browser…", "info")
+
+        def work(_p):
+            conn = dbmod.connect()
+            try:
+                return requests_aade.open_in_browser(conn, afm, request_id)
+            finally:
+                conn.close()
+        self._tasks.append(run_task(self, work, on_done=lambda res: toast(
+            self, "Το αίτημα άνοιξε στον browser." if res.get("ok") else res.get("reason", "Αποτυχία."),
+            "ok" if res.get("ok") else "danger"), on_error=lambda m: toast(self, m, "danger")))
 
     def open_handoff(self, entry: dict) -> None:
         toast(self, f"Άνοιγμα browser — {entry['label']}…", "info")
@@ -1789,15 +1836,17 @@ class MainWindow(QMainWindow):
         started = time.monotonic()
         bar = ProgressToast(self, f"Ξεκίνησε η ανάκτηση στοιχείων για {total} {'πελάτη' if total == 1 else 'πελάτες'}…",
                             on_cancel=stop.set, afm=afms[0] if total == 1 else "", total=total, done=0)
-        state = {"done": 0}
+        state: dict[str, Any] = {"done": 0, "by_status": {}}
 
         def work(progress):
             # Παράλληλα (clients.lookup_many: 6 πελάτες τη φορά, ο καθένας με ΔΙΚΗ του σύνδεση βάσης — ΠΟΤΕ self.conn,
             # που ανήκει στο UI thread). Το progress() είναι σήμα Qt, ασφαλές από οποιοδήποτε thread.
             progress(f"Ανάκτηση στοιχείων 0/{total}…")
 
-            def each(afm, n, _result):
+            def each(afm, n, result):
                 state["done"] = n
+                st = (result or {}).get("status") or "ok"
+                state["by_status"].setdefault(st, []).append(afm)
                 progress(f"Ανάκτηση στοιχείων {n}/{total} — {names.get(afm, afm)}")
 
             clients.lookup_many(afms, on_each=each, should_cancel=stop.is_set)
@@ -1818,10 +1867,23 @@ class MainWindow(QMainWindow):
         def done(_n):
             self._client_refresh_timer.stop()
             self.run_status.setText("Η ανάκτηση στοιχείων ολοκληρώθηκε.")
+            # ΕΝΑ τελικό μήνυμα με τη σύνοψη (ρητό αίτημα 2026-11-10: «ομογενοποίηση των flash messages, ειδικά στην
+            # ενημέρωση στοιχείων») — πλήρη / μερικά / αποτυχίες με ονόματα, αντί για σκέτο «ολοκληρώθηκε».
+            by = state["by_status"]
+            label = {"ok": "πλήρη", "partial": "μερικά", "failed": "αποτυχία", "manual": "χειροκίνητα",
+                     "pending": "χωρίς απάντηση", "missing": "διαγράφηκαν"}
+            parts = [f"{len(v)} {label.get(k, k)}" for k, v in sorted(by.items(), key=lambda kv: -len(kv[1]))]
+            failed_names = [names.get(a, a) for a in by.get("failed", [])][:4]
+            summary = " · ".join(parts)
+            if failed_names:
+                summary += "\nΑποτυχία: " + ", ".join(failed_names) + (
+                    f" και άλλοι {len(by['failed']) - 4}" if len(by.get("failed", [])) > 4 else "")
+            level = "warn" if by.get("failed") or stop.is_set() else "ok"
             if stop.is_set():
-                bar.finish(f"Η ανάκτηση στοιχείων διακόπηκε μετά από {state['done']}/{total} πελάτες.", "warn")
+                bar.finish(f"Η ανάκτηση στοιχείων διακόπηκε μετά από {state['done']}/{total} πελάτες.\n{summary}", level)
             else:
-                bar.finish(f"Η ανάκτηση στοιχείων ολοκληρώθηκε ({total} {'πελάτης' if total == 1 else 'πελάτες'}).", "ok")
+                bar.finish(f"Η ανάκτηση στοιχείων ολοκληρώθηκε ({total} "
+                           f"{'πελάτης' if total == 1 else 'πελάτες'}).\n{summary}", level)
             self.reload_clients()
             self.reload_dashboard()
             self._reload_notices()

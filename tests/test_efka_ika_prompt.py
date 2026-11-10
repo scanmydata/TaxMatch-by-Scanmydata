@@ -6,8 +6,8 @@ from taxmatch.gui.checks_dialog import ChecksDialog
 
 
 def test_has_ika_credentials(conn):
-    afm = "802499326"
-    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
+    afm = "800000002"
+    service.add(conn, afm, "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
 
     # Αρχικά χωρίς κωδικούς ΙΚΑ
     assert efka.has_ika_credentials(conn, afm) is False
@@ -26,33 +26,20 @@ def test_has_ika_credentials(conn):
     assert efka.has_ika_credentials(conn, afm2, "9876543210") is True
 
 
-def test_check_apd_entries_without_ika_credentials_fails_immediately_without_calling_login(conn):
-    afm = "802499326"
-    service.add(conn, afm, "CHARGELINE ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
-    conn.execute("UPDATE businesses SET employer=1 WHERE afm=?", (afm,))
+def test_apd_login_uses_taxisnet_first_ika_only_as_fallback(conn, monkeypatch):
+    """Η «Είσοδος Εργοδότη» του e-ΕΦΚΑ έχει ΜΟΝΟ TAXISnet (ζωντανά 2026-11-10): οι κωδικοί TAXISnet του πελάτη πρώτα —
+    η v0.14.2 δοκίμαζε ΜΟΝΟ «κωδικούς ΙΚΑ» και έβγαζε «Λάθος κωδικοί» σε κάθε εργοδότη."""
+    afm = "800000002"
+    service.add(conn, afm, "CHRONOTEST ΜΟΝΟΠΡΟΣΩΠΗ Ι Κ Ε")
     efka.upsert_ame(conn, afm, "1234567890", kind="koinon", name="Κεντρικό")
-
-    # TAXISnet credentials υπάρχουν
+    tried = []
+    monkeypatch.setattr(efka, "services_login", lambda u, p, a, **kw: tried.append(u) or {"ok": False,
+                                                                                        "reason": "InvalidCredentials"})
+    assert efka._login_for_ame(conn, afm, "1234567890", lambda: None)["reason"] == efka.REASONS_EL["NoCredentials"]
     credentials.set_(conn, afm, "taxis_user", "taxis_pass")
-
-    # Αλλά ΔΕΝ υπάρχουν κωδικοί ΙΚΑ
-    assert efka.has_ika_credentials(conn, afm) is False
-
-    calls = []
-    class FakeHttp:
-        def follow(self, *args, **kwargs):
-            calls.append(args)
-            return {"url": "http", "text": "<html></html>"}
-
-    entries = efka.check_apd_entries(conn, afm, 2026, http_factory=lambda: FakeHttp())
-
-    # Δεν έγινε καμία κλήση δικτύου (καμία καθυστέρηση / αναμονή)
-    assert len(calls) == 0
-
-    # Και επιστράφηκε άμεσα σαφές σφάλμα για έλλειψη κωδικών ΙΚΑ
-    assert len(entries) == 1
-    assert entries[0]["status"] == "error"
-    assert "κωδικοί ΙΚΑ" in entries[0]["detail"]
+    efka.set_(conn, afm, user="ika_user", password="ika_pass")
+    efka._login_for_ame(conn, afm, "1234567890", lambda: None)
+    assert tried == ["taxis_user", "ika_user"]
 
 
 def test_checks_dialog_shows_ika_prompt_and_missing_employers():
@@ -60,16 +47,16 @@ def test_checks_dialog_shows_ika_prompt_and_missing_employers():
     w = QWidget()
     scope = "2 επιλεγμένοι πελάτες"
     incomplete = {}
-    names = {"802499326": "CHARGELINE", "094259216": "ΑΛΦΑ"}
-    missing_ika = ["802499326"]
+    names = {"800000002": "CHRONOTEST", "094259216": "ΑΛΦΑ"}
+    missing_ika = ["800000002"]
 
     dlg = ChecksDialog(w, scope, incomplete, names, missing_ika=missing_ika)
     assert hasattr(dlg, "ika_note")
     assert "ΑΠΔ" in dlg.ika_note.text()
-    assert "κωδικοί ΙΚΑ" in dlg.ika_note.text()
+    assert "TAXISnet" in dlg.ika_note.text()
 
     # Ελέγχουμε ότι εμφανίζεται η προειδοποίηση για τους εργοδότες που δεν έχουν κωδικούς ΙΚΑ
     all_labels = [c.text() for c in dlg.findChildren(type(dlg.ika_note)) if hasattr(c, "text")]
-    assert any("CHARGELINE" in t and "κωδικούς ΙΚΑ" in t for t in all_labels)
+    assert any("CHRONOTEST" in t and "κωδικούς TAXISnet" in t for t in all_labels)
     dlg.deleteLater()
     w.deleteLater()
