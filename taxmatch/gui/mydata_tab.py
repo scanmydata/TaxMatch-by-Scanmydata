@@ -207,6 +207,16 @@ class InvoiceCard(QDialog):
         self._tasks.append(run_task(self, work, on_done=done, on_error=lambda m: toast(self, m, "danger")))
 
 
+#: Καταστάσεις PDF που κατεβαίνουν με διπλό κλικ στη στήλη PDF.
+_DOWNLOADABLE = ("pending", "failed")
+
+
+def _pdf_state(d: dict[str, Any]) -> str:
+    """Παραστατικό με σύνδεσμο παρόχου που δεν έχει κατέβει (ποτέ ζητήθηκε ή «μόνο αχαρακτήριστα») = «Σε αναμονή»."""
+    status = d.get("pdf_status") or ""
+    return "pending" if not status and d.get("url") else status
+
+
 def _months(n: int = 36) -> list[str]:
     today = date.today()
     return store.previous_months(f"{today.year}-{today.month:02d}", n)
@@ -224,6 +234,7 @@ class MydataTab(QWidget):
         super().__init__()
         self.conn, self.afm, self.window_, self.main = conn, afm, window, main
         self._tasks: list = []
+        self._downloading: set[str] = set()              # παραστατικά που κατεβαίνουν τώρα με διπλό κλικ
         self._docs: list[dict[str, Any]] = []
         root = QVBoxLayout(self)
 
@@ -316,7 +327,7 @@ class MydataTab(QWidget):
         self.kit.clear_btn.setStyleSheet(f"QPushButton {{ color: {CURRENT.bad}; border: 1.5px solid {CURRENT.bad}; font-weight: 600; border-radius: 8px; padding: 4px 10px; }} QPushButton:hover {{ background-color: {CURRENT.bad}; color: {CURRENT.on_accent}; }}")
         root.addWidget(self.kit.bar)
         self.table.itemSelectionChanged.connect(self._selection_note)
-        self.table.doubleClicked.connect(lambda *_: self._open_selected())
+        self.table.doubleClicked.connect(self._on_double_click)
         root.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
@@ -535,7 +546,7 @@ class MydataTab(QWidget):
         t.setRowCount(len(self._docs))
         non_vat = self._non_vat()
         pdf_colour = {"ok": CURRENT.ok, "viewer": CURRENT.accent, "failed": CURRENT.bad, "no_url": CURRENT.muted,
-                      "": CURRENT.muted}
+                      "pending": CURRENT.warn, "": CURRENT.muted}
         for i, d in enumerate(self._docs):
             incoming = d["direction"] == "incoming"
             income = analysis.is_income(d)
@@ -555,7 +566,7 @@ class MydataTab(QWidget):
                      cls_cell or "—",
                      other_name or "—", other_vat or "—", office.money(d["net"]), office.money(d["vat"]),
                      office.money(d["total"]), office.money(d["withheld"]) if d["withheld"] else "",
-                     pdfs.STATUS_LABEL.get(d["pdf_status"], "—")]
+                     pdfs.STATUS_LABEL.get(_pdf_state(d), "—")]
             keys = {0: d["issue_date"] + d["mark"], 3: cls_cell, 6: d["net"], 7: d["vat"], 8: d["total"], 9: d["withheld"] or 0.0}
             tip = (f"{'Λήψη από' if incoming else 'Έκδοση προς'} {other_name or '—'} · ΑΦΜ {other_vat or '—'}\n"
                    f"{d['series']} {d['aa']} · {d['issue_date']} · {labels.invoice_type(d['invoice_type'])} · MARK {d['mark']}\n"
@@ -575,8 +586,10 @@ class MydataTab(QWidget):
                 if col == 3 and not cls_cell:
                     item.setForeground(QColor(CURRENT.muted))
                 if col == 10:
-                    item.setForeground(QColor(pdf_colour.get(d["pdf_status"] or "", CURRENT.muted)))
+                    item.setForeground(QColor(pdf_colour.get(_pdf_state(d), CURRENT.muted)))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if _pdf_state(d) in _DOWNLOADABLE:
+                        item.setToolTip(tip + "\nΣτήλη PDF: διπλό κλικ = λήψη ΤΩΡΑ από τον πάροχο")
                 if col == 9 and d["withheld"] and incoming:
                     item.setForeground(QColor(CURRENT.warn))
                 if d.get("vat_class") and non_vat:
@@ -813,8 +826,56 @@ class MydataTab(QWidget):
         else:
             self.preview_note.setText({"viewer": "Ο πάροχος δίνει μόνο online προβολή — «Άνοιγμα στον πάροχο».",
                                        "no_url": "Χωρίς σύνδεσμο παρόχου στο myDATA.",
-                                       "failed": "Η λήψη του PDF απέτυχε — ξαναδοκιμάστε «Λήψη μήνα»."}.get(
-                d["pdf_status"], "Δεν έχει κατέβει PDF — «Λήψη μήνα»."))
+                                       "failed": "Η λήψη του PDF απέτυχε — διπλό κλικ στη στήλη PDF για νέα δοκιμή.",
+                                       "pending": "Σε αναμονή — διπλό κλικ στη στήλη PDF για λήψη τώρα."}.get(
+                _pdf_state(d), "Δεν έχει κατέβει PDF — «Λήψη μήνα»."))
+
+    def _on_double_click(self, index) -> None:
+        """Διπλό κλικ στη στήλη PDF παραστατικού «Σε αναμονή» (ή αποτυχίας): λήψη ΕΠΙΤΟΠΟΥ (ρητό αίτημα 2026-11-11)·
+        με PDF: άνοιγμα· αλλού: καρτέλα παραστατικού."""
+        docs = self._selected_docs()
+        if index.isValid() and index.column() == _COLS.index("PDF") and docs:
+            d = docs[0]
+            if d["pdf_status"] == "ok" and d["pdf_path"] and Path(d["pdf_path"]).exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(d["pdf_path"]))
+                return
+            if _pdf_state(d) in _DOWNLOADABLE:
+                self._download_now(d)
+                return
+        self._open_selected()
+
+    def _download_now(self, d: dict[str, Any]) -> None:
+        afm, mark, ym = self.afm, d["mark"], d["issue_date"][:7]
+        if mark in self._downloading:
+            return
+        self._downloading.add(mark)
+
+        def work(_p):
+            conn = dbmod.connect()                      # δικό του thread — ποτέ η σύνδεση του UI
+            try:
+                pdfs.download_month(conn, afm, ym, marks=[mark])
+                row = conn.execute("SELECT pdf_status, pdf_path FROM mydata_docs WHERE afm=? AND mark=?",
+                                   (afm, mark)).fetchone()
+                return dict(row) if row else {}
+            finally:
+                conn.close()
+
+        def done(res: dict[str, Any]) -> None:
+            self._downloading.discard(mark)
+            self.reload()
+            if res.get("pdf_status") == "ok":
+                toast(self.window_, "Το PDF κατέβηκε.", "ok")
+                QDesktopServices.openUrl(QUrl.fromLocalFile(res["pdf_path"]))
+            elif res.get("pdf_status") == "viewer":
+                toast(self.window_, "Ο πάροχος δείχνει το παραστατικό μόνο online — «Άνοιγμα στον πάροχο».", "warn")
+            else:
+                toast(self.window_, "Η λήψη του PDF απέτυχε.", "danger")
+
+        def failed(m: str) -> None:
+            self._downloading.discard(mark)
+            toast(self.window_, m, "danger")
+        toast(self.window_, "Λήψη PDF από τον πάροχο…", "info")
+        self._tasks.append(run_task(self, work, on_done=done, on_error=failed))
 
     def _open_selected(self) -> None:
         """Διπλό κλικ: καρτέλα παραστατικού (ανάλυση + PDF) — ρητό αίτημα 2026-10-29."""

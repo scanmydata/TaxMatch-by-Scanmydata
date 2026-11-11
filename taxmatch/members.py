@@ -4,7 +4,8 @@
 Πηγές:
 * **Μητρώο ΑΑΔΕ** (ίδιο login/εφαρμογή με την ανάκτηση στοιχείων — comregistry): `getMelh/{afm}` (μέλη: επωνυμία,
   ΑΦΜ, είδος συμμετοχής, ποσοστό) και `getSxeseisEpixeirhshs/{afm}` (εκπρόσωποι/διαχειριστές) — ΜΟΝΟ ενεργά (χωρίς
-  `hmdiakophs`), όπως το `registryDetails` του ScanMyData Tax Center. Χρειάζονται οι κωδικοί TAXISnet της εταιρείας.
+  `hmdiakophs`). Από 2026-11-11 ΠΡΩΤΑ η σελίδα `displayRegistryInfo.htm` με ΟΛΟ το ιστορικό (port του ScanMyData
+  `members_registry`) — τα JSON μένουν εφεδρικά. Χρειάζονται οι κωδικοί TAXISnet της εταιρείας.
 * **Excel**: στη γραμμή του μέλους «ΑΦΜ εταιρείας», ή στη γραμμή της εταιρείας «Μέλη» / «ΑΦΜ μελών» (λίστα).
 
 Οφειλές/έντυπα ενός μέλους αντλούνται με τους ΔΙΚΟΥΣ ΤΟΥ κωδικούς — γι' αυτό το μέλος γίνεται πελάτης («Προσθήκη ως
@@ -76,7 +77,9 @@ def snapshot(conn: sqlite3.Connection, company: str, tax_year: Optional[int] = N
             live = [s for s in spans if _span_in_year(s, y)]
             if not live:
                 continue
-            roles = " · ".join(dict.fromkeys(s["role"] for s in live if s.get("role")))
+            names = list(dict.fromkeys(s["role"] for s in live if s.get("role")))
+            names.sort(key=lambda x: 2 if "διαχειριστ" in _low(x) else 1 if "εκπροσωπ" in _low(x) else 0)
+            roles = " · ".join(names)
             since = min((s.get("since", "") for s in live), key=lambda v: _iso(v) or "9999")
             ends = [s.get("until", "") for s in live]
             until = "" if any(not e for e in ends) else max(ends, key=_iso)
@@ -128,18 +131,116 @@ def parse_members(melh: str, sxeseis: str) -> list[dict[str, Any]]:
                            "until": _s(r.get("hmdiakophs")), "share": share.replace(".", ",") + "%" if share else ""})
         m["name"] = m["name"] or _s(r.get("epwnymia"))
     for m in out.values():
-        spans = m["spans"]
-        live = [s for s in spans if not s["until"]]
-        use = live or spans
-        m["role"] = " · ".join(dict.fromkeys(s["role"] for s in use if s["role"]))
-        m["share"] = next((s["share"] for s in use if s["share"]), "")
-        m["since"] = min((s["since"] for s in spans if s["since"]), key=_iso, default="")
-        m["until"] = "" if live else max((s["until"] for s in spans), key=_iso, default="")
+        _summarise(m)
     return list(out.values())
 
 
+# ---------------------------------------------------------------- πλήρες ιστορικό: σελίδα Μητρώου (port ScanMyData)
+# `members_registry.parse_registry_html` του ScanMyData (ρητό αίτημα 2026-11-11 «τα μέλη σωστά ανά έτος βάσει του
+# module που έχουμε στο ScanMyData»): η σελίδα «Στοιχεία Νομικού Προσώπου» έχει ΟΛΟ το ιστορικό μελών και σχέσεων —
+# και όσους αποχώρησαν — ενώ το JSON `getMelh` δίνει μόνο τα τρέχοντα (γι' αυτό κανένας πελάτης δεν είχε αποχωρήσαντα).
+REGISTRY_PAGE = "/taxisnet/info/protected/displayRegistryInfo.htm"
+_PARTICIPATION_ROLE = {"ο.μ.": "Ομόρρυθμο Μέλος", "ε.μ.": "Ετερόρρυθμο Μέλος", "ομ": "Ομόρρυθμο Μέλος",
+                       "εμ": "Ετερόρρυθμο Μέλος"}
+
+
+def _low(s: Any) -> str:
+    return strip_accents(str(s or "")).lower()
+
+
+def _cell_text(raw: str) -> str:
+    import html as _html
+    return " ".join(_html.unescape(re.sub(r"<[^>]+>", " ", raw or "")).replace("\xa0", " ").split())
+
+
+def _row_cells(row_html: str) -> list[str]:
+    """ΟΛΑ τα κελιά, ΚΑΙ τα κενά (αλλιώς η κενή «Ημ/νία διακοπής» μετατοπίζει τις στήλες)."""
+    return [_cell_text(c) for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.S | re.I)]
+
+
+def _tables_by_header(page: str) -> list[tuple[list[str], list[list[str]]]]:
+    out = []
+    for m in re.finditer(r"<tr[^>]*class=\"[^\"]*tblHeader[^\"]*\"[^>]*>(.*?)</tr>", page or "", re.S | re.I):
+        end = page.find("</table>", m.end())
+        seg = page[m.end(): end if end >= 0 else len(page)]
+        rows = [_row_cells(r) for r in re.findall(r"<tr[^>]*>(.*?)</tr>", seg, re.S | re.I)]
+        out.append(([_low(c) for c in _row_cells(m.group(1))], [r for r in rows if any(r)]))
+    return out
+
+
+def _col(headers: list[str], *tokens: str) -> int:
+    return next((i for i, h in enumerate(headers) if all(t in h for t in tokens)), -1)
+
+
+def parse_registry_html(page: str, own_afm: str = "") -> list[dict[str, Any]]:
+    """Σελίδα Μητρώου → ένα ανά ΑΦΜ {afm, name, role, share, since, until, spans} (ίδια μορφή με `parse_members`).
+    Κάθε γραμμή της σελίδας = μία ΠΕΡΙΟΔΟΣ· μέλη από «Στοιχεία Μελών» (Ο.Μ./Ε.Μ./εταίροι) και από τις «Σχέσεις» ο
+    διαχειριστής και ο νόμιμος εκπρόσωπος. Κενή λίστα = η σελίδα δεν είχε τους πίνακες (π.χ. φυσικό πρόσωπο)."""
+    out: dict[str, dict[str, Any]] = {}
+    for headers, rows in _tables_by_header(page):
+        i_afm, i_name = _col(headers, "αφμ"), _col(headers, "επωνυμο")
+        i_from, i_to = _col(headers, "εναρξης"), _col(headers, "διακοπης")
+        if i_afm < 0 or i_from < 0 or i_to < 0:
+            continue
+        is_members = _col(headers, "αφμ", "μελους") >= 0 or _col(headers, "συμμετοχης") >= 0
+        is_rel = _col(headers, "σχετιζομενος") >= 0 or _col(headers, "ειδος", "σχεσης") >= 0
+        i_kind, i_pct = _col(headers, "ειδος"), _col(headers, "ποσοστο")
+        for r in rows:
+            def g(i: int) -> str:
+                return r[i] if 0 <= i < len(r) else ""
+            afm = normalize_afm(g(i_afm))
+            if not afm or afm == own_afm:
+                continue
+            kind = g(i_kind)
+            if is_members:
+                role = _PARTICIPATION_ROLE.get(_low(kind).replace(" ", ""), kind)
+            elif is_rel:
+                if not any(k in _low(kind) for k in ("διαχειριστ", "εκπροσωπ")):
+                    continue
+                role = kind
+            else:
+                continue
+            share = g(i_pct) if is_members else ""
+            if share and "%" not in share:
+                share = share.replace(".", ",") + "%"
+            m = out.setdefault(afm, {"afm": afm, "name": g(i_name), "spans": []})
+            span = {"role": role, "since": g(i_from), "until": g(i_to), "share": share}
+            if span not in m["spans"]:
+                m["spans"].append(span)
+            m["name"] = m["name"] or g(i_name)
+    for m in out.values():
+        _summarise(m)
+    return list(out.values())
+
+
+def _summarise(m: dict[str, Any]) -> None:
+    """Τρέχουσες ιδιότητες/ποσοστό και συνολικό διάστημα από τις περιόδους· ο διαχειριστής μετά τη συμμετοχή
+    («Ομόρρυθμο Μέλος · Διαχειριστής», όπως το `_join_roles` του ScanMyData)."""
+    spans = m["spans"]
+    live = [s for s in spans if not s["until"]]
+    use = live or spans
+    roles = list(dict.fromkeys(s["role"] for s in use if s["role"]))
+    roles.sort(key=lambda x: 2 if "διαχειριστ" in _low(x) else 1 if "εκπροσωπ" in _low(x) else 0)
+    m["role"] = " · ".join(roles)
+    m["share"] = next((s["share"] for s in use if s["share"]), "")
+    m["since"] = min((s["since"] for s in spans if s["since"]), key=_iso, default="")
+    m["until"] = "" if live else max((s["until"] for s in spans), key=_iso, default="")
+
+
 def fetch_from_registry(http, afm: str) -> list[dict[str, Any]]:
-    """Με ήδη συνδεδεμένο http (aade_login της εταιρείας)."""
+    """Με ήδη συνδεδεμένο http (aade_login της εταιρείας): πρώτα η σελίδα Μητρώου με ΟΛΟ το ιστορικό, εφεδρικά τα
+    JSON `getMelh`/`getSxeseisEpixeirhshs` (μόνο τρέχοντα)."""
+    try:
+        page = http.follow("GET", urljoin(lookup_aade.AADE, REGISTRY_PAGE)).get("text") or ""
+        if "tblHeader" not in page:                     # μερικές φορές το session «κολλά» μόνο μετά το home.htm
+            http.follow("GET", urljoin(lookup_aade.AADE, "/taxisnet/info/protected/home.htm"))
+            page = http.follow("GET", urljoin(lookup_aade.AADE, REGISTRY_PAGE)).get("text") or ""
+        found = parse_registry_html(page, afm)
+        if found:
+            return found
+    except Exception as exc:                           # noqa: BLE001 — εφεδρικά το JSON
+        import logging
+        logging.getLogger(__name__).info("Μητρώο (σελίδα ιστορικού) %s: %s", afm, exc)
     reg = urljoin(lookup_aade.AADE, "/saadeapps3/comregistry")
     w = reg + "/webresources/infomytaxisnet"
     http.follow("GET", reg + "/")
@@ -210,8 +311,21 @@ def company_members(conn: sqlite3.Connection, company: str, tax_year: Optional[i
         d = dict(r)
         d["is_client"] = bool(r["client_afm"])
         since_y, until_y = _year(d.get("since") or ""), _year(d.get("until") or "")
-        d["movement"] = ("Αποχώρησε " + d["until"] if until_y == year else
-                         "Εισήλθε " + d["since"] if since_y == year else "")
+        moves = []
+        if since_y == year:
+            moves.append("Εισήλθε " + d["since"])
+        if until_y == year:
+            moves.append("Αποχώρησε " + d["until"])
+        # αλλαγές ΙΔΙΟΤΗΤΑΣ μέσα στη χρήση (π.χ. μέλος από 2019, διαχειριστής από 05/07/2021) — όπως οι σημειώσεις
+        # «Έναρξη/Αποχώρηση» του ScanMyData, χωρίς να φαίνεται ως νέα είσοδος στην εταιρεία
+        spans_row = conn.execute("SELECT spans_json FROM company_members WHERE company_afm=? AND member_afm=?",
+                                 (company, r["member_afm"])).fetchone()
+        for s in _rows(spans_row["spans_json"] if spans_row else "[]"):
+            if _year(s.get("since", "")) == year and s.get("since") != d.get("since") and s.get("role"):
+                moves.append(f"{s['role']} από {s['since']}")
+            if _year(s.get("until", "")) == year and s.get("until") != d.get("until") and s.get("role"):
+                moves.append(f"{s['role']} έως {s['until']}")
+        d["movement"] = " · ".join(dict.fromkeys(moves))
         d["has_creds"] = credentials.get(conn, r["member_afm"]) is not None if d["is_client"] else False
         state, legal_form = r["activity_state"] or "", r["member_legal_form"] or ""
         if not d["is_client"]:

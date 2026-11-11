@@ -30,7 +30,10 @@ log = logging.getLogger(__name__)
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-STATUS_LABEL = {"ok": "PDF", "viewer": "Μόνο online", "no_url": "Χωρίς σύνδεσμο", "failed": "Αποτυχία", "": "—"}
+#: "pending" = έχει σύνδεσμο παρόχου αλλά ΔΕΝ κατέβηκε επειδή η λήψη ήταν «μόνο αχαρακτήριστα» (ρητό αίτημα
+#: 2026-11-11) — διπλό κλικ στη στήλη PDF το κατεβάζει επιτόπου.
+STATUS_LABEL = {"ok": "PDF", "viewer": "Μόνο online", "no_url": "Χωρίς σύνδεσμο", "failed": "Αποτυχία",
+                "pending": "Σε αναμονή", "": "—"}
 
 
 def _host(netloc: str, host: str) -> bool:
@@ -145,7 +148,7 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
     query += " ORDER BY issue_date, mark"
     rows = [dict(r) for r in conn.execute(query, params)
             if marks is None or r["mark"] in marks]
-    counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0}
+    counts = {"ok": 0, "viewer": 0, "no_url": 0, "failed": 0, "pending": 0}
     total_docs = len(rows)
     processed = 0
 
@@ -174,12 +177,14 @@ def download_month(conn: sqlite3.Connection, afm: str, ym: str, on_each: Optiona
                 if on_each:
                     on_each(processed, total_docs)
             else:
-                if unclassified_only:
+                if unclassified_only and marks is None:     # ρητή λήψη συγκεκριμένων (`marks`) = πάντα
                     det = _detail(doc)
                     has_cls = bool(det.get("summary_classifications") or [c for line in det.get("lines", []) for c in line.get("classifications", [])])
                     if has_cls:
-                        # Ήδη χαρακτηρισμένο: τίθεται σε αναμονή (γρήγορη έξυπνη λήψη)
-                        counts["viewer"] += 1
+                        # Ήδη χαρακτηρισμένο: «Σε αναμονή» στη στήλη PDF — κατεβαίνει με διπλό κλικ ή χωρίς το φίλτρο
+                        counts["pending"] += 1
+                        conn.execute("UPDATE mydata_docs SET pdf_status='pending', pdf_path='' WHERE afm=? AND mark=?",
+                                     (afm, doc["mark"]))
                         processed += 1
                         if on_each:
                             on_each(processed, total_docs)

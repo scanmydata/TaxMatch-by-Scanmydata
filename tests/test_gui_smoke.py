@@ -1662,3 +1662,55 @@ def test_online_only_dialog_files_pdf_from_download_folder(window, conn, tmp_pat
     assert row["pdf_status"] == "ok" and Path(row["pdf_path"]).read_bytes().startswith(b"%PDF")
     assert not (tmp_path / "invoice.pdf").exists() and dlg.changed           # το διπλότυπο σβήστηκε
     dlg.deleteLater()
+
+
+# ------------------------------------------------------------------ γύρος 2026-11-11
+def test_notice_center_hide_button_and_click_outside_closes(window, conn, qapp):
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QFrame, QPushButton
+    settings_store.set_value(conn, "llm_provider", "openrouter")
+    settings_store.set_value(conn, "openrouter_api_key", "x")
+    settings_store.set_value(conn, "llm_last_error", "Όλα τα άρθρα απέτυχαν στην ανάλυση (δείτε το Αρχείο καταγραφής).")
+    window.show()
+    window._reload_notices()                                               # νέο σφάλμα: ανοίγει μόνο του
+    assert window.notice_btn.isChecked()
+    hide = [b for b in window.notices_holder.findChildren(QPushButton) if b.objectName() == "noticeHide"]
+    assert hide
+    # κλικ ΕΞΩ από το πάνελ → κλείνει
+    pos = window.mapToGlobal(QPoint(5, window.height() - 5))
+    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(5, 5), QPointF(pos), Qt.MouseButton.LeftButton,
+                     Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    window._outside_closer.eventFilter(window, ev)
+    assert not window.notice_btn.isChecked() and not window.notice_panel.isVisible()
+    # ✕ στην ειδοποίηση LLM → σβήνει
+    window.notice_btn.setChecked(True)
+    llm = [f for f in window.notices_holder.findChildren(QFrame, "banner")
+           if any("LLM" in lbl.text() for lbl in f.findChildren(QLabel))]
+    llm[-1].findChild(QPushButton, "noticeHide").click()
+    assert settings_store.get(conn, "llm_last_error") == ""
+    window.notice_btn.setChecked(False)
+
+
+def test_client_lookup_locks_the_form_and_profile_has_start_and_cease_dates(window, conn, monkeypatch):
+    from taxmatch.gui import client_detail_dialog as dialog_module
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΑΣΤΙΚΗ ΟΕ")
+    conn.execute("UPDATE businesses SET start_date='02/01/2025', activity_state='active' WHERE afm=?", (AFM,))
+    started = []
+    monkeypatch.setattr(dialog_module, "run_task", lambda *a, **k: started.append(k) or None)
+    dlg = ClientDetailDialog(window, AFM)
+    assert dlg.f_start.text() == "02/01/2025" and dlg.f_cease.text() == ""
+    dlg._start_lookup()
+    assert started and dlg.lookup_running
+    assert not dlg._profile_page.isEnabled() and not dlg._credentials_page.isEnabled()
+    assert not dlg._lock_label.isHidden()
+    started[0]["on_progress"]("15% — Σύνδεση στο Μητρώο ΑΑΔΕ…")
+    started[0]["on_done"]({})
+    assert dlg._profile_page.isEnabled() and dlg._lock_label.isHidden()
+    window._active_client_lookups.clear()
+    dlg.f_cease.setText("30/06/2026")
+    dlg._save_profile()
+    row = conn.execute("SELECT cease_date, activity_state FROM businesses WHERE afm=?", (AFM,)).fetchone()
+    assert row["cease_date"] == "30/06/2026" and row["activity_state"] == "ceased"
+    dlg.deleteLater()

@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
@@ -350,6 +350,25 @@ def _clients_suffix(ev: dict) -> str:
     return f"  —  {n} πελάτες" + (f" (+{maybe} υπό προϋπ.)" if maybe else "") + checks
 
 
+class _OutsideClickCloser(QObject):
+    """Φίλτρο εφαρμογής, ενεργό ΜΟΝΟ όσο είναι ανοιχτό το κέντρο ειδοποιήσεων: κλικ έξω από το πάνελ (και έξω από το
+    κουμπί 🔔, που κάνει μόνο του toggle) το κλείνει — ρητό αίτημα 2026-11-11. Το κλικ ΔΕΝ καταναλώνεται."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event) -> bool:              # noqa: N802 — Qt API
+        if event.type() == QEvent.Type.MouseButtonPress:
+            win = self._window
+            pos = event.globalPosition().toPoint()
+            panel, btn = win.notice_panel, win.notice_btn
+            inside = panel.rect().contains(panel.mapFromGlobal(pos)) or btn.rect().contains(btn.mapFromGlobal(pos))
+            if panel.isVisible() and not inside:
+                btn.setChecked(False)
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, *, force_show: bool = False) -> None:
         super().__init__()
@@ -371,6 +390,11 @@ class MainWindow(QMainWindow):
             clients.reapply_cached_gemi(self.conn)
         except Exception as exc:                       # noqa: BLE001 — ποτέ εμπόδιο στο άνοιγμα της εφαρμογής
             log.warning("reapply_cached_gemi: %s", exc)
+        try:
+            from ..extraction import llm_extract
+            llm_extract.requeue_own_failures(self.conn)  # παλιό κόκκινο «Όλα τα άρθρα απέτυχαν» της v0.15
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("requeue_own_failures: %s", exc)
         # Προτιμήσεις οθόνης (θέμα, πλάτη/σειρά στηλών). Με `TAXMATCH_DATA_DIR` (tests, δοκιμές με προσωρινά δεδομένα)
         # γράφονται ΔΙΠΛΑ στη βάση — πριν πήγαιναν πάντα στο μητρώο του χρήστη και κάθε test «πατούσε» τα πλάτη
         # στηλών/το θέμα της πραγματικής εγκατάστασης.
@@ -506,6 +530,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(holder)
         panel.addWidget(scroll)
         self.notice_panel.hide()
+        self._outside_closer = _OutsideClickCloser(self)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -524,12 +549,20 @@ class MainWindow(QMainWindow):
         self.menu.set_active("dashboard")
 
     def _toggle_notice_panel(self, on: bool) -> None:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
         if on:
             self._reposition_notice_panel()
             self.notice_panel.raise_()
             self.notice_panel.show()
+            # μετά το layout του πρώτου frame τα heightForWidth είναι σωστά — αλλιώς στην εκκίνηση έβγαινε κομμένο
+            QTimer.singleShot(0, self._reposition_notice_panel)
+            if app is not None:
+                app.installEventFilter(self._outside_closer)
         else:
             self.notice_panel.hide()
+            if app is not None:
+                app.removeEventFilter(self._outside_closer)
 
     def _reposition_notice_panel(self) -> None:
         if not hasattr(self, "notice_btn") or not hasattr(self, "notice_panel"):
@@ -641,7 +674,7 @@ class MainWindow(QMainWindow):
             item = self.notices_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        found = notices_mod.collect(self.conn) + self._aml_notices()
+        found = notices_mod.visible(self.conn, notices_mod.collect(self.conn) + self._aml_notices())
         n_all = len(found)
         worst = next((lvl for lvl in ("danger", "warn", "info") if any(x["level"] == lvl for x in found)), "")
         colour_of = {"danger": CURRENT.bad, "warn": CURRENT.warn, "info": CURRENT.accent}
@@ -651,11 +684,9 @@ class MainWindow(QMainWindow):
                                    "Κέντρο ειδοποιήσεων — καμία ειδοποίηση")
         self.notice_title.setText(f"<b>Κέντρο ειδοποιήσεων</b> ({n_all})" if n_all else
                                   "<b>Κέντρο ειδοποιήσεων</b> — καμία ειδοποίηση")
-        # νέο σφάλμα (λάθος κωδικοί, LLM…): το πάνελ ανοίγει μόνο του μία φορά, για να μη χαθεί
-        fresh = {x["text"] for x in found if x["level"] == "danger"} - getattr(self, "_danger_seen", set())
-        self._danger_seen = getattr(self, "_danger_seen", set()) | fresh
-        if fresh:
-            self.notice_btn.setChecked(True)
+        # ΝΕΟ σφάλμα (λάθος κωδικοί, LLM…): το πάνελ ανοίγει μόνο του μία φορά — όχι σε κάθε εκκίνηση για το ίδιο
+        # παλιό σφάλμα (το αποτύπωμα κρατιέται στη βάση)
+        fresh = notices_mod.unseen_danger(self.conn, found)
         if not n_all:
             self.notice_btn.setChecked(False)
         for n in found:
@@ -680,16 +711,29 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, endpoint=n["endpoint"], afms=n.get("afms"):
                                 self._go_from_notice(endpoint, afms))
             row.addWidget(btn)
-            if n.get("dismiss"):
-                read = QPushButton("Αναγνώστηκε")
-                read.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-                read.setToolTip("Κρύβει την ειδοποίηση· οι πελάτες κρατούν έναν αστερίσκο «*» στη στήλη ΦΠΑ ώς την "
-                                "επόμενη εκκίνηση (ή μόνιμα: Ρυθμίσεις → «Μόνιμος αστερίσκος ΦΠΑ»)")
-                read.clicked.connect(lambda _=False, key=n["dismiss"]: self._dismiss_notice(key))
-                row.addWidget(read)
+            # ΚΑΘΕ ειδοποίηση κρύβεται (ρητό αίτημα 2026-11-11)· ξαναεμφανίζεται μόνο αν αλλάξει το περιεχόμενό της
+            hide = QPushButton("✕")
+            hide.setObjectName("noticeHide")
+            hide.setFixedSize(30, 30)
+            hide.setStyleSheet(f"QPushButton#noticeHide {{ padding:0; font-size:14px; font-weight:700; color:{CURRENT.muted}; }}"
+                               f"QPushButton#noticeHide:hover {{ color:{CURRENT.bad}; border-color:{CURRENT.bad}; }}")
+            hide.setToolTip("Απόκρυψη της ειδοποίησης (ξαναεμφανίζεται μόνο αν αλλάξει — π.χ. νέοι πελάτες ή νέο σφάλμα)")
+            hide.clicked.connect(lambda _=False, notice=n: self._hide_notice(notice))
+            row.addWidget(hide, 0, Qt.AlignmentFlag.AlignTop)
             self.notices_box.addWidget(frame)
-        if self.notice_panel.isVisible():
+        if fresh:
+            self.notice_btn.setChecked(True)
+        if self.notice_btn.isChecked():
             self._reposition_notice_panel()
+            QTimer.singleShot(0, self._reposition_notice_panel)
+
+    def _hide_notice(self, notice: dict) -> None:
+        key = notice.get("dismiss")
+        if key and key != "llm":
+            self._dismiss_notice(key)                  # ίδια συμπεριφορά με το παλιό «Αναγνώστηκε» (αστερίσκοι κ.λπ.)
+            return
+        notices_mod.hide(self.conn, notice)
+        self._reload_notices()
 
     def _aml_notices(self) -> list[dict]:
         """Ειδοποίηση μόνο για ΕΚΠΡΟΘΕΣΜΕΣ επανεξετάσεις δέουσας επιμέλειας (όχι για «χωρίς αξιολόγηση»: θα ήταν

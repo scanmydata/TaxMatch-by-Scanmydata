@@ -3,6 +3,7 @@
 όταν λυθεί το πρόβλημα (π.χ. διορθωθούν οι κωδικοί και η επόμενη σύνδεση πετύχει)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import date
@@ -166,10 +167,10 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         err = settings_store.get(conn, "llm_last_error")
         limits = settings_store.get(conn, "llm_limits")
         if err and not _transient_llm(err):
-            out.append({"level": "danger", "endpoint": "main.settings", "label": "Ρυθμίσεις",
+            out.append({"level": "danger", "endpoint": "main.settings", "label": "Ρυθμίσεις", "dismiss": "llm",
                         "text": f"Η ανάλυση άρθρων με LLM δεν δουλεύει: {err} Ώσπου να λυθεί δεν δημιουργούνται matches."})
         elif limits or err:
-            out.append({"level": "info", "endpoint": "main.settings", "label": "Ρυθμίσεις",
+            out.append({"level": "info", "endpoint": "main.settings", "label": "Ρυθμίσεις", "dismiss": "llm",
                         "text": "Ανάλυση νέων: τα δωρεάν όρια των μοντέλων LLM καλύφθηκαν προσωρινά — η εφαρμογή αλλάζει "
                                 "μόνη της μοντέλο/πάροχο και συνεχίζει στον επόμενο έλεγχο. (Με κλειδί και για δεύτερο "
                                 "πάροχο, Groq ή OpenRouter, η ανάλυση δεν σταματά.)"})
@@ -275,3 +276,47 @@ def _transient_llm(err: str) -> bool:
     t = (err or "").lower()
     return any(k in t for k in ("υπερφορτωμένο", "όριο", "quota", "δοκιμάζεται αυτόματα", "εκτός λειτουργίας",
                                 "429", "rate"))
+
+
+# ---- απόκρυψη ΟΠΟΙΑΣΔΗΠΟΤΕ ειδοποίησης από τον χρήστη (ρητό αίτημα 2026-11-11: «δεν μπορώ να τις κάνω dismiss»).
+# Κρατιέται το αποτύπωμα του ΚΕΙΜΕΝΟΥ: αν αλλάξει η κατάσταση (άλλοι πελάτες, άλλο πλήθος) ξαναεμφανίζεται.
+HIDDEN_KEY = "notice_hidden"
+SEEN_DANGER_KEY = "notice_danger_seen"
+_MAX_STAMPS = 300
+
+
+def stamp(notice: dict[str, Any]) -> str:
+    return hashlib.sha1(str(notice.get("text", "")).encode("utf-8")).hexdigest()[:16]
+
+
+def _stamps(conn: sqlite3.Connection, key: str) -> list[str]:
+    return [s for s in (settings_store.get(conn, key) or "").split(",") if s]
+
+
+def _add_stamp(conn: sqlite3.Connection, key: str, value: str) -> None:
+    current = [s for s in _stamps(conn, key) if s != value] + [value]
+    settings_store.set_value(conn, key, ",".join(current[-_MAX_STAMPS:]))
+
+
+def hide(conn: sqlite3.Connection, notice: dict[str, Any]) -> None:
+    """Κρύβει μία ειδοποίηση. Για το LLM σβήνει και το ίδιο το σφάλμα: νέα αποτυχία = νέα ειδοποίηση."""
+    if notice.get("dismiss") == "llm":
+        settings_store.set_value(conn, "llm_last_error", "")
+        settings_store.set_value(conn, "llm_limits", "")
+        return
+    _add_stamp(conn, HIDDEN_KEY, stamp(notice))
+
+
+def visible(conn: sqlite3.Connection, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hidden = set(_stamps(conn, HIDDEN_KEY))
+    return [n for n in found if stamp(n) not in hidden]
+
+
+def unseen_danger(conn: sqlite3.Connection, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Σφάλματα που δεν έχει ξαναδεί ο χρήστης (ούτε σε προηγούμενη εκκίνηση) — μόνο αυτά ανοίγουν το πάνελ μόνα
+    τους· πριν άνοιγε σε ΚΑΘΕ εκκίνηση για το ίδιο παλιό σφάλμα."""
+    seen = set(_stamps(conn, SEEN_DANGER_KEY))
+    fresh = [n for n in found if n["level"] == "danger" and stamp(n) not in seen]
+    for n in fresh:
+        _add_stamp(conn, SEEN_DANGER_KEY, stamp(n))
+    return fresh

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import re
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -33,7 +34,7 @@ from .requests_tab import RequestsTab
 from .mydata_tab import MydataTab
 from .office_widgets import ClientFeesWidget
 from .theme import CURRENT
-from .toast import toast
+from .toast import ProgressToast, toast
 from .table_kit import SortItem, TableKit, interactive
 from .widgets import due_badge, fit_to_screen, kind_colour
 from .workers import run_task
@@ -108,6 +109,7 @@ class ClientDetailDialog(QDialog):
         header.addStretch()
         refresh_btn = QPushButton(icon("refresh", CURRENT.txt, 16), "  Ανανέωση στοιχείων")
         refresh_btn.clicked.connect(self._refresh_lookup)
+        self.refresh_btn = refresh_btn
         header.addWidget(refresh_btn)
         del_btn = QPushButton(icon("delete", CURRENT.bad, 16), "  Διαγραφή")
         del_btn.setObjectName("danger")
@@ -123,8 +125,16 @@ class ClientDetailDialog(QDialog):
         self.detail_tabs = tabs
         tabs.setIconSize(QSize(16, 16))
         root.addWidget(tabs, 1)
-        tabs.addTab(_scrolled(self._profile_tab()), icon("edit", CURRENT.muted, 16), "Προφίλ")
-        tabs.addTab(_scrolled(self._credentials_tab()), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet && e-ΕΦΚΑ")
+        self._lock_label = QLabel("🔒 Ανάκτηση στοιχείων σε εξέλιξη — τα πεδία Προφίλ και Κωδικών είναι κλειδωμένα ώσπου "
+                                  "να ολοκληρωθεί (η πρόοδος φαίνεται στο μήνυμα πάνω δεξιά).")
+        self._lock_label.setWordWrap(True)
+        self._lock_label.setStyleSheet(f"color:{CURRENT.warn}; font-weight:600;")
+        self._lock_label.hide()
+        root.insertWidget(root.indexOf(tabs), self._lock_label)      # πάνω από τις καρτέλες
+        self._profile_page = self._profile_tab()
+        self._credentials_page = self._credentials_tab()
+        tabs.addTab(_scrolled(self._profile_page), icon("edit", CURRENT.muted, 16), "Προφίλ")
+        tabs.addTab(_scrolled(self._credentials_page), icon("key", CURRENT.muted, 16), "Κωδικοί TAXISnet && e-ΕΦΚΑ")
         tabs.addTab(self._deadlines_tab(), icon("calendar", CURRENT.muted, 16), "Προθεσμίες && υποβολές")
         news_index = tabs.addTab(self._matches_tab(), icon("bell", CURRENT.muted, 16), "Νέα που τον αφορούν")
         tabs.addTab(self._aml_tab(), icon("aml", CURRENT.muted, 16), "Δέουσα επιμέλεια")
@@ -159,7 +169,7 @@ class ClientDetailDialog(QDialog):
             lookup_info = self.main._active_client_lookups.get(self.afm)
             if lookup_info:
                 lookup_info.setdefault("dialogs", []).append(self)
-                self.busy.start(lookup_info.get("progress_text", "Ανάκτηση στοιχείων σε εξέλιξη…"))
+                self.set_lookup_lock(True)                   # η πρόοδος (ProgressToast) έρχεται εδώ με `claim_for`
 
     def _add_lazy_detail_tab(self, tabs: QTabWidget, name: str, label: str, tab_icon, factory) -> None:
         placeholder = QWidget()
@@ -337,6 +347,26 @@ class ClientDetailDialog(QDialog):
         form.addRow("", self.f_parepid_note)
         self.f_status = QLineEdit()
         form.addRow("Κατάσταση", self.f_status)
+        # Ημερομηνίες έναρξης / διακοπής (Μητρώο ΑΑΔΕ `hmenarxhs` / `hmdiakophs`, ή ΓΕΜΗ) — ρητό αίτημα 2026-11-11
+        dates = QHBoxLayout()
+        self.f_start = QLineEdit()
+        self.f_start.setPlaceholderText("ηη/μμ/εεεε")
+        self.f_start.setFixedWidth(120)
+        self.f_start.setToolTip("Ημερομηνία έναρξης εργασιών (Μητρώο ΑΑΔΕ / ΓΕΜΗ με την ανάκτηση στοιχείων)")
+        self.f_cease = QLineEdit()
+        self.f_cease.setPlaceholderText("— καμία —")
+        self.f_cease.setFixedWidth(120)
+        self.f_cease.setToolTip("Ημερομηνία διακοπής εργασιών — αν συμπληρωθεί, ο πελάτης θεωρείται σε διακοπή")
+        self.f_cease_reason = QLabel("")
+        self.f_cease_reason.setObjectName("muted")
+        self.f_cease_reason.setWordWrap(True)
+        dates.addWidget(QLabel("Έναρξη"))
+        dates.addWidget(self.f_start)
+        dates.addSpacing(16)
+        dates.addWidget(QLabel("Διακοπή"))
+        dates.addWidget(self.f_cease)
+        dates.addWidget(self.f_cease_reason, 1)
+        form.addRow("Εργασίες", dates)
         self.f_kads = QTextEdit()
         self.f_kads.setPlaceholderText("Ένας ΚΑΔ ανά γραμμή: «κωδικός περιγραφή» — ο πρώτος είναι ο κύριος")
         self.f_kads.setFixedHeight(90)
@@ -354,7 +384,7 @@ class ClientDetailDialog(QDialog):
         form.addRow("", save)
         # Το «Αποθήκευση» ενεργοποιείται ΜΟΝΟ όταν υπάρχει αλλαγή (ρητό αίτημα χρήστη 2026-10-23)
         for w in (self.f_name, self.f_trade_name, self.f_legal_form, self.f_doy, self.f_address, self.f_email,
-                  self.f_email_assistant, self.f_mobile, self.f_phone, self.f_status):
+                  self.f_email_assistant, self.f_mobile, self.f_phone, self.f_status, self.f_start, self.f_cease):
             w.textChanged.connect(self._profile_changed)
         for w in (self.f_books, self.f_vat, self.f_vat_period):
             w.currentIndexChanged.connect(self._profile_changed)
@@ -370,7 +400,8 @@ class ClientDetailDialog(QDialog):
                 self.f_phone.text(), self.f_status.text(), self.f_books.currentIndex(), self.f_vat.currentIndex(),
                 self.f_vat_period.currentIndex(), self.f_employer.isChecked(), self.f_intrastat.isChecked(),
                 self.f_kads.toPlainText(), self.f_notes.toPlainText(), self.f_email_auto.isChecked(),
-                self.f_teka.isChecked(), self.f_internet.isChecked(), self.f_parepid.isChecked())
+                self.f_teka.isChecked(), self.f_internet.isChecked(), self.f_parepid.isChecked(),
+                self.f_start.text(), self.f_cease.text())
 
     def _profile_changed(self, *_a) -> None:
         if hasattr(self, "save_profile_btn"):
@@ -436,6 +467,17 @@ class ClientDetailDialog(QDialog):
         elif "ΕΝΕΡΓ" in s_norm or "ACTIVE" in s_norm:
             self.conn.execute("UPDATE businesses SET activity_state='active' WHERE afm=?", (self.afm,))
         self.conn.execute("UPDATE businesses SET trade_name=? WHERE afm=?", (self.f_trade_name.text().strip(), self.afm))
+        dates_old = self.conn.execute("SELECT start_date, cease_date, activity_state FROM businesses WHERE afm=?",
+                                      (self.afm,)).fetchone()
+        start_val, cease_val = self.f_start.text().strip(), self.f_cease.text().strip()
+        if (start_val, cease_val) != (dates_old["start_date"] or "", dates_old["cease_date"] or ""):
+            state = dates_old["activity_state"]
+            if cease_val and not dates_old["cease_date"]:
+                state = "ceased"                       # νέα ημερομηνία διακοπής = διακοπή
+            elif not cease_val and dates_old["cease_date"] and state == "ceased":
+                state = "active"                       # σβήστηκε η διακοπή
+            self.conn.execute("UPDATE businesses SET start_date=?, cease_date=?, activity_state=? WHERE afm=?",
+                              (start_val, cease_val, state, self.afm))
         old = self.conn.execute("SELECT email, email_assistant, mobile, phone FROM businesses WHERE afm=?",
                                 (self.afm,)).fetchone()
         contact = (self.f_email.text().strip().lower(), self.f_email_assistant.text().strip().lower(),
@@ -1209,65 +1251,62 @@ class ClientDetailDialog(QDialog):
             finally:
                 conn.close()
 
+        # Flash message με πρόοδο (ρητό αίτημα 2026-11-11 — όχι πια overlay με «σπινάκι» πάνω στη φόρμα)· ακολουθεί
+        # τον πελάτη: κλείνει η καρτέλα → κύριο παράθυρο, ξανανοίγει → πίσω εδώ (`toast.claim_for`).
+        progress_toast = ProgressToast(self, "Ανάκτηση στοιχείων…", afm=afm, total=100, done=0)
+        info["toast"] = progress_toast
+
         def prog_update(msg: str):
-            info["progress_text"] = f"Ανάκτηση στοιχείων…\n{msg}"
+            info["progress_text"] = msg
+            m = re.match(r"\s*(\d{1,3})%\s*[—-]?\s*(.*)", msg or "")
+            pct, text = (int(m.group(1)), m.group(2) or msg) if m else (None, msg)
+            progress_toast.update(f"Ανάκτηση στοιχείων — {text}", done=pct)
+
+        def _dialogs():
             for d in list(info.get("dialogs", [])):
                 try:
-                    if d.isVisible():
-                        d.busy.start(info["progress_text"])
-                except Exception:
-                    pass
+                    d.objectName()                          # ζωντανό C++ αντικείμενο;
+                except RuntimeError:                       # ο διάλογος καταστράφηκε στο μεταξύ
+                    continue
+                yield d
 
         def done(_out):
             if main_win is not None and hasattr(main_win, "_active_client_lookups"):
                 main_win._active_client_lookups.pop(afm, None)
-            dlg_alive = False
-            for d in list(info.get("dialogs", [])):
-                try:
-                    if d.isVisible():
-                        dlg_alive = True
-                        d.busy.stop()
-                        toast(d, "Η ανάκτηση στοιχείων ολοκληρώθηκε.", "ok")
-                        d._reload()
-                except Exception:
-                    pass
-
+            for d in _dialogs():
+                d.set_lookup_lock(False)
+                d._reload()
+            progress_toast.finish(f"Η ανάκτηση στοιχείων για {client_name} ολοκληρώθηκε.", "ok")
             if main_win is not None:
-                if not dlg_alive:
-                    toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) ολοκληρώθηκε (100%).", "ok")
                 try:
                     main_win._apply_client_filter()
                     main_win._render_calendar_from_db()
                     main_win.reload_dashboard()
-                except Exception:
+                except Exception:                          # noqa: BLE001
                     pass
 
         def failed(m):
             if main_win is not None and hasattr(main_win, "_active_client_lookups"):
                 main_win._active_client_lookups.pop(afm, None)
-            dlg_alive = False
-            for d in list(info.get("dialogs", [])):
-                try:
-                    if d.isVisible():
-                        dlg_alive = True
-                        d.busy.stop()
-                        toast(d, m, "danger")
-                except Exception:
-                    pass
+            for d in _dialogs():
+                d.set_lookup_lock(False)
+            progress_toast.finish(f"Η ανάκτηση στοιχείων για {client_name} απέτυχε: {m}", "danger")
 
-            if main_win is not None and not dlg_alive:
-                toast(main_win, f"Η ανάκτηση στοιχείων για {client_name} ({afm}) απέτυχε: {m}", "danger")
-
-        toast(self, "Ξεκίνησε η ανάκτηση στοιχείων του πελάτη…", "info")
-        self.busy.start(info["progress_text"])
+        self.set_lookup_lock(True)
         runner = main_win if main_win is not None else self
         self._tasks.append(run_task(runner, work, on_progress=prog_update, on_done=done, on_error=failed))
 
-    def closeEvent(self, event) -> None:
-        if getattr(self, "busy", None) and getattr(self.busy, "running", False) and self.main is not None:
-            client_name = self.client_name_label.text() or self.afm
-            toast(self.main, f"Η ανάκτηση στοιχείων για {client_name} συνεχίζεται στο παρασκήνιο…", "info")
-        super().closeEvent(event)
+    def set_lookup_lock(self, on: bool) -> None:
+        """Όσο τρέχει η ανάκτηση, Προφίλ/Κωδικοί είναι κλειδωμένα (ρητό αίτημα): αλλιώς μια αποθήκευση του χρήστη και η
+        εγγραφή της ανάκτησης «πατούσαν» η μία την άλλη. Η κύλιση των φορμών μένει ενεργή."""
+        self._lookup_locked = on
+        for w in (self._profile_page, self._credentials_page, self.refresh_btn):
+            w.setEnabled(not on)
+        self._lock_label.setVisible(on)
+
+    @property
+    def lookup_running(self) -> bool:
+        return bool(getattr(self, "_lookup_locked", False))
 
     def _delete_client(self) -> None:
         if QMessageBox.question(self, "Διαγραφή", "Διαγραφή του πελάτη, των matches και των κωδικών του;\n\n"
@@ -1343,6 +1382,9 @@ class ClientDetailDialog(QDialog):
                                     "έλεγχος) — τσεκάρετε για να γίνει μόνιμη υποχρέωση." if auto else hint)
         self.f_parepid_note.setVisible(bool(auto or hint))
         self.f_status.setText(b["status"])
+        self.f_start.setText(b.get("start_date") or "")
+        self.f_cease.setText(b.get("cease_date") or "")
+        self.f_cease_reason.setText(b.get("cease_reason") or "")
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
         self._mark_profile_saved()
         self._apply_private_layout(full)

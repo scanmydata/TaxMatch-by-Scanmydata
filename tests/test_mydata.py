@@ -185,7 +185,7 @@ def test_download_month_pdfs_and_zip(client_with_creds):
         return b"%PDF-1.4 fake"
 
     counts = pdfs.download_month(conn, AFM, "2026-03", fetch=fetch)
-    assert counts == {"ok": 1, "viewer": 1, "no_url": 1, "failed": 0}
+    assert counts == {"ok": 1, "viewer": 1, "no_url": 1, "failed": 0, "pending": 0}
     z = zipfile.ZipFile(io.BytesIO(pdfs.zip_month(conn, AFM, "2026-03")))
     assert len(z.namelist()) == 1 and z.namelist()[0].startswith("Λήψεις/ΠΡΟΜΗΘΕΥΤΗΣ_111111111_2026-03-05")
 

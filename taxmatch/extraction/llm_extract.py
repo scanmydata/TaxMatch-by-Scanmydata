@@ -520,6 +520,17 @@ def reanalyze_for_prompt(conn: sqlite3.Connection) -> int:
     return n
 
 
+def requeue_own_failures(conn: sqlite3.Connection) -> int:
+    """v0.16: τα άρθρα που «απέτυχαν» μόνο λόγω του ορίου 3 εφεδρικών μοντέλων (ΔΙΚΟ μας σφάλμα) ξαναμπαίνουν στην
+    ουρά — και η κόκκινη ειδοποίηση «Όλα τα άρθρα απέτυχαν» που άφησε εκείνο το σφάλμα σβήνει ΑΜΕΣΩΣ (καλείται και
+    στην εκκίνηση του GUI, όχι μόνο στον επόμενο έλεγχο — αναφορά χρήστη 2026-11-11)."""
+    n = conn.execute("UPDATE articles SET extraction_status='pending', extraction_tries=0, extraction_error='' "
+                     "WHERE extraction_status='failed' AND extraction_error LIKE '%models%array must have%'").rowcount
+    if n and settings_store.get(conn, "llm_last_error").startswith("Όλα τα άρθρα απέτυχαν"):
+        settings_store.set_value(conn, "llm_last_error", "")
+    return n
+
+
 def priority(article: Any) -> int:
     """0 = πρωτογενής/εξειδικευμένη πηγή, 1 = γενικό portal, 2 = δικαστική απόφαση (σειρά ανάλυσης)."""
     if _COURT_RE.match(article["title"] or ""):
@@ -535,9 +546,7 @@ def extract_pending(conn: sqlite3.Connection, client: LLMClient, limit: int, loo
     (`time.monotonic()`), αν δοθεί: τα υπόλοιπα μένουν για την επόμενη φορά (ΔΕΝ μετρά ως σφάλμα)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     reanalyze_for_prompt(conn)
-    # v0.15: τα άρθρα που «απέτυχαν» μόνο λόγω του ορίου 3 εφεδρικών μοντέλων (δικό μας σφάλμα) ξαναμπαίνουν στην ουρά
-    conn.execute("UPDATE articles SET extraction_status='pending', extraction_tries=0, extraction_error='' "
-                 "WHERE extraction_status='failed' AND extraction_error LIKE '%models%array must have%'")
+    requeue_own_failures(conn)
     rows = conn.execute(
         "SELECT * FROM articles WHERE extraction_status IN ('pending','failed') AND extraction_tries < ? "
         # ml_score (matching/ml.py): πρώτα όσα είναι πιθανότερο να αφορούν πελάτες — τα matches φαίνονται νωρίτερα.
