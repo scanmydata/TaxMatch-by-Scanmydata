@@ -371,6 +371,14 @@ class ClientDetailDialog(QDialog):
         self.f_kads.setPlaceholderText("Ένας ΚΑΔ ανά γραμμή: «κωδικός περιγραφή» — ο πρώτος είναι ο κύριος")
         self.f_kads.setFixedHeight(90)
         form.addRow("ΚΑΔ", self.f_kads)
+        # πιθανή γνωστοποίηση / έγκριση OpenBusiness από τους ΚΑΔ (ρητό αίτημα 2026-11-13)
+        self.f_openbusiness_note = QLabel("")
+        self.f_openbusiness_note.setWordWrap(True)
+        self.f_openbusiness_note.setTextFormat(Qt.TextFormat.RichText)
+        self.f_openbusiness_note.setOpenExternalLinks(True)
+        self.f_openbusiness_note.setStyleSheet(f"color:{CURRENT.warn};")
+        self.f_openbusiness_note.hide()
+        form.addRow("", self.f_openbusiness_note)
         self.f_notes = QTextEdit()
         self.f_notes.setFixedHeight(60)
         form.addRow("Σημειώσεις", self.f_notes)
@@ -1385,6 +1393,13 @@ class ClientDetailDialog(QDialog):
         self.f_start.setText(b.get("start_date") or "")
         self.f_cease.setText(b.get("cease_date") or "")
         self.f_cease_reason.setText(b.get("cease_reason") or "")
+        from .. import openbusiness
+        ob = openbusiness.reasons(b["kads"]) if b.get("activity_state") not in ("ceased", "none") else []
+        self.f_openbusiness_note.setText(
+            ("Πιθανή υποχρέωση γνωστοποίησης / έγκρισης στο <a href='" + openbusiness.PORTAL + "'>OpenBusiness</a> "
+             "(ανάλογα με τη δραστηριότητα / εγκατάσταση): " + html.escape("; ".join(ob[:4]))
+             + (f" και άλλοι {len(ob) - 4}" if len(ob) > 4 else "")) if ob else "")
+        self.f_openbusiness_note.setVisible(bool(ob))
         self.f_kads.setPlainText("\n".join(f"{k['code']} {k['descr']}".strip() for k in b["kads"]))
         self._mark_profile_saved()
         self._apply_private_layout(full)

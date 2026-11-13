@@ -99,6 +99,30 @@ def mark_parepid_read(conn: sqlite3.Connection) -> None:
     _add_marks(conn, "parepid", afms)
 
 
+def openbusiness_candidates(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """ΑΦΜ → αιτίες, για ενεργούς πελάτες με ΚΑΔ που πιθανώς θέλουν αδειοδότηση/γνωστοποίηση στο OpenBusiness
+    (`openbusiness.py` — λίστα ΚΑΔ του χρήστη + δραστηριότητες της πύλης). Ρητό αίτημα 2026-11-13."""
+    from . import openbusiness
+    kads: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT k.afm, k.code FROM business_kad k JOIN businesses b ON b.afm=k.afm "
+                          "WHERE coalesce(b.activity_state,'') NOT IN ('ceased','none') ORDER BY k.is_main DESC"):
+        kads.setdefault(r["afm"], []).append(r["code"])
+    out = {}
+    for afm, codes in kads.items():
+        why = openbusiness.reasons(codes)
+        if why:
+            out[afm] = why
+    return out
+
+
+def _openbusiness_stamp(found: dict[str, list[str]]) -> str:
+    return ",".join(sorted(found))
+
+
+def mark_openbusiness_read(conn: sqlite3.Connection) -> None:
+    settings_store.set_value(conn, "notice_openbusiness_read", _openbusiness_stamp(openbusiness_candidates(conn)))
+
+
 def vat_mismatch_clients(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, int]:
     """ΑΦΜ → πλήθος παραστατικών της χρήσης με ΦΠΑ (ή χαρακτηρισμό ΦΠΑ) σε πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ — η ίδια
     προειδοποίηση με την καρτέλα myDATA, και στο κέντρο ειδοποιήσεων (ρητό αίτημα 2026-11-04)."""
@@ -261,6 +285,17 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με ΚΑΔ καταλυμάτων/εστίασης/διασκέδασης "
                             f"μπορεί να {'είναι υπόχρεος' if n == 1 else 'είναι υπόχρεοι'} τέλους παρεπιδημούντων / "
                             f"ακαθαρίστων εσόδων (αν το επιβάλλει ο δήμος — dae.govapp.gr): {_names(conn, parepid_afms)}."})
+    # ---- πιθανοί υπόχρεοι αδειοδότησης / γνωστοποίησης στο OpenBusiness (ΚΑΔ)
+    ob = openbusiness_candidates(conn)
+    if ob and settings_store.get(conn, "notice_openbusiness_read") != _openbusiness_stamp(ob):
+        afms = sorted(ob)
+        n = len(afms)
+        out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
+                    "afms": afms, "dismiss": "openbusiness",
+                    "text": f"{n} {'πελάτης' if n == 1 else 'πελάτες'} με ΚΑΔ που μπορεί να απαιτ"
+                            f"{'εί' if n == 1 else 'ούν'} γνωστοποίηση ή έγκριση στο OpenBusiness (ν. 4442/2016 — "
+                            f"ανάλογα με τη δραστηριότητα/εγκατάσταση): {_names(conn, afms)}. Η αιτία φαίνεται στο "
+                            "Προφίλ κάθε πελάτη."})
     if eligible:
         out.append({"level": "info", "endpoint": "main.clients_list", "label": "Δείτε τους πελάτες",
                     "afms": eligible, "dismiss": "vat_quarter",

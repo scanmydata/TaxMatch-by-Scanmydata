@@ -111,6 +111,7 @@ _CLIENT_SHOW = [("Όλοι οι πελάτες", ""), ("Με κωδικούς TA
                 ("Ιδιώτες", "private"), ("Με διακοπή εργασιών", "ceased"), ("Μέλη εταιρειών", "member"),
                 ("Πιθανοί υπόχρεοι τέλους παρεπιδημούντων", "parepid"),
                 ("Υπόχρεοι τέλους παρεπιδημούντων (Προφίλ)", "parepid_on"),
+                ("Πιθανοί υπόχρεοι OpenBusiness (ΚΑΔ)", "openbusiness"),
                 ("Πρόταση ειδικής εισφοράς διαδικτύου (Google / Meta)", "google"),
                 ("Με ειδική εισφορά διαδικτύου (ΑΚΕΕΔ)", "internet"),
                 ("Δυνατότητα επιστροφής σε τριμηνιαίο ΦΠΑ", "vat_quarter"),
@@ -764,6 +765,10 @@ class MainWindow(QMainWindow):
             notices_mod.mark_parepid_read(self.conn)
             toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη «Κύριος ΚΑΔ» ώσπου να ανοίξετε "
                         "την καρτέλα τους — και βρίσκονται με το φίλτρο «Πιθανοί υπόχρεοι τέλους παρεπιδημούντων».", "ok")
+        if key == "openbusiness":
+            notices_mod.mark_openbusiness_read(self.conn)
+            toast(self, "Η ειδοποίηση κρύφτηκε — οι πελάτες βρίσκονται με το φίλτρο «Πιθανοί υπόχρεοι OpenBusiness» και "
+                        "ξαναεμφανίζεται αν προστεθεί νέος τέτοιος πελάτης.", "ok")
         if key == "google":
             from .. import advertising
             settings_store.set_value(self.conn, "notice_google_read", ",".join(advertising.google_candidates(self.conn)))
@@ -1040,6 +1045,7 @@ class MainWindow(QMainWindow):
         parents = members_mod.parent_company(self.conn)             # μέλος → εταιρεία (εμφανίζεται κάτω της)
         roles = members_mod.member_roles(self.conn)
         parepid_afms = set(notices_mod.parepid_candidates(self.conn))
+        openbusiness_afms = set(notices_mod.openbusiness_candidates(self.conn))
         from .. import advertising
         google_afms = set(advertising.google_candidates(self.conn))
         mismatch_afms = set(notices_mod.vat_mismatch_clients(self.conn, self._fiscal_year))
@@ -1139,6 +1145,8 @@ class MainWindow(QMainWindow):
                 flags.add("missing")
             if r["afm"] in parepid_afms:
                 flags.add("parepid")
+            if r["afm"] in openbusiness_afms:
+                flags.add("openbusiness")
             ex = extra_flags.get(r["afm"])
             if ex is not None:
                 for key, col in (("parepid_on", "parepid"), ("internet", "internet_contribution"), ("teka", "teka")):
