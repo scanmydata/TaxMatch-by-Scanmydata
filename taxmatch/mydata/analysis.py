@@ -275,7 +275,8 @@ def vat_balance(conn: sqlite3.Connection, afm: str, months: list[str]) -> dict[s
     return out
 
 
-_FLAGS_CACHE = _db.StateCache()
+# μόνο τα παραστατικά/οι μήνες myDATA (και commits άλλων συνδέσεων) ακυρώνουν — όχι κάθε εγγραφή του UI
+_FLAGS_CACHE = _db.StateCache(lambda c: _db.table_key(c, "mydata_docs", "mydata_sync"))
 
 
 def month_flags(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:

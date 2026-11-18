@@ -116,6 +116,19 @@ def _taxis_afms(conn: sqlite3.Connection) -> list[str]:
         "WHERE c.taxis_user<>'' AND c.taxis_pass<>'' ORDER BY c.afm")]
 
 
+def _teka_need(conn: sqlite3.Connection, afm: str) -> None:
+    """Ανάγκη ΑΠΔ ΤΕΚΑ (ΕΡΓΑΝΗ ΙΙ, τρέχων + προηγούμενος μήνας) — μόνο με κωδικούς ΙΚΑ εργοδότη· ποτέ εμπόδιο στον έλεγχο."""
+    from . import teka_need
+    if not teka_need.has_credentials(conn, afm):
+        return
+    try:
+        r = teka_need.check_client(conn, afm)
+        if not r.get("ok"):
+            log.info("ΕΡΓΑΝΗ (ΤΕΚΑ) %s: %s", afm, r.get("reason"))
+    except Exception as exc:                          # noqa: BLE001
+        log.warning("ΕΡΓΑΝΗ (ΤΕΚΑ) %s: %s", afm, exc)
+
+
 def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int], want_pdf: bool = False,
                             ask_captcha: Optional[Callable[[bytes], str]] = None) -> dict[str, Any]:
     """Πλήρης έλεγχος υποβολών ενός πελάτη (ίδιος για GUI και χρονοπρογραμματισμό): ΑΑΔΕ, ΑΠΔ e-ΕΦΚΑ/ΤΕΚΑ ανά ΑΜΕ,
@@ -132,6 +145,8 @@ def submission_check_client(conn: sqlite3.Connection, afm: str, years: list[int]
         result["ok"] = result["ok"] and r.get("ok")
         result["entries"] += r.get("entries", [])
         result["entries"] += efka.check_apd_entries(conn, afm, y, want_pdf=want_pdf)
+        if y == max(years) and efka.should_check_apd(conn, afm):
+            _teka_need(conn, afm)
         fees = fee_portals.check_entries(conn, afm, y, want_pdf=want_pdf)
         fees += intrastat.check_entries(conn, afm, y, want_pdf=want_pdf)
         fees += advertising.check_akeed(conn, afm, y, ask_captcha=ask_captcha, want_pdf=want_pdf)

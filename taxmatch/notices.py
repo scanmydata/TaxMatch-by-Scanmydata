@@ -123,13 +123,34 @@ def mark_openbusiness_read(conn: sqlite3.Connection) -> None:
     settings_store.set_value(conn, "notice_openbusiness_read", _openbusiness_stamp(openbusiness_candidates(conn)))
 
 
+#: Αποτελέσματα που διαβάζουν ΟΛΑ τα παραστατικά myDATA (~0,2″ το καθένα): ξαναϋπολογίζονται μόνο όταν αλλάξουν τα
+#: παραστατικά / η υπαγωγή ΦΠΑ — όχι σε κάθε «✕» ή «Αναγνώστηκε» του κέντρου ειδοποιήσεων (αναφορά χρήστη 2026-11-18).
+_MYDATA_CACHE: dict[tuple, Any] = {}
+
+
+def _mydata_key(conn: sqlite3.Connection) -> tuple:
+    from .db import table_key
+    v = conn.execute("SELECT coalesce(SUM(CASE WHEN vat_subject=0 THEN 1 ELSE 0 END),0) FROM businesses").fetchone()
+    return table_key(conn, "mydata_docs", "businesses") + tuple(v)
+
+
+def _cached(conn: sqlite3.Connection, name: str, year: int, compute):
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    key = (db_file, name, year, _mydata_key(conn))
+    if key not in _MYDATA_CACHE:
+        for k in [k for k in _MYDATA_CACHE if k[:3] == key[:3]]:
+            _MYDATA_CACHE.pop(k)
+        _MYDATA_CACHE[key] = compute()
+    return _MYDATA_CACHE[key]
+
+
 def vat_mismatch_clients(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, int]:
     """ΑΦΜ → πλήθος παραστατικών της χρήσης με ΦΠΑ (ή χαρακτηρισμό ΦΠΑ) σε πελάτη που ΔΕΝ είναι υπόχρεος ΦΠΑ — η ίδια
     προειδοποίηση με την καρτέλα myDATA, και στο κέντρο ειδοποιήσεων (ρητό αίτημα 2026-11-04)."""
     year = year or date.today().year
-    return {r["afm"]: r["n"] for r in conn.execute(
+    return dict(_cached(conn, "vat_mismatch", year, lambda: {r["afm"]: r["n"] for r in conn.execute(
         "SELECT d.afm, COUNT(*) AS n FROM mydata_docs d JOIN businesses b ON b.afm=d.afm WHERE b.vat_subject=0 "
-        "AND d.vat_class=1 AND d.cancelled=0 AND substr(d.issue_date,1,4)=? GROUP BY d.afm", (str(year),))}
+        "AND d.vat_class=1 AND d.cancelled=0 AND substr(d.issue_date,1,4)=? GROUP BY d.afm", (str(year),))}))
 
 
 #: Εισφορές πλαστικών (ρητό αίτημα 2026-11-04 «και οι 2 που έχουμε»): ομάδα FEE_GROUPS → (έντυπο ελέγχου, ετικέτα)
@@ -140,8 +161,13 @@ PLASTIC_FEES = {"plastic_bag": ("ΠΕΡΙΒΑΛΛΟΝ", "τέλος πλαστι
 def plastic_clients(conn: sqlite3.Connection, year: Optional[int] = None) -> dict[str, dict[str, set[int]]]:
     """{'plastic_bag'|'plastics': {ΑΦΜ: τρίμηνα}} — πελάτες που εισπράττουν την εισφορά στα έσοδα της χρήσης (myDATA,
     κατηγορίες τελών 8 / 16). Η υποχρέωση προκύπτει ΜΟΝΟ από το myDATA (οι πύλες δείχνουν «ενεργός» για όλους)."""
-    from .mydata.analysis import FEE_GROUPS
     year = year or date.today().year
+    cached = _cached(conn, "plastic", year, lambda: _plastic_clients(conn, year))
+    return {k: {a: set(q) for a, q in v.items()} for k, v in cached.items()}
+
+
+def _plastic_clients(conn: sqlite3.Connection, year: int) -> dict[str, dict[str, set[int]]]:
+    from .mydata.analysis import FEE_GROUPS
     out: dict[str, dict[str, set[int]]] = {k: {} for k in PLASTIC_FEES}
     for r in conn.execute("SELECT afm, issue_date, taxes_json FROM mydata_docs WHERE direction='outgoing' AND cancelled=0 "
                           "AND substr(issue_date,1,4)=? AND taxes_json NOT IN ('', '{}')", (str(year),)):
@@ -183,7 +209,8 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
     # ---- LLM (η ανάλυση άρθρων είναι ό,τι παράγει τα matches)
     provider = settings_store.get(conn, "llm_provider")
-    key = "openrouter_api_key" if provider == "openrouter" else "groq_api_key"
+    from .extraction.llm_extract import PROVIDERS
+    key = (PROVIDERS.get(provider) or PROVIDERS["groq"])["key"]
     if not settings_store.is_set(conn, key):
         out.append({"level": "warn", "endpoint": "main.settings", "label": "Ρυθμίσεις",
                     "text": f"Δεν έχει οριστεί API key για {provider} — τα άρθρα δεν αναλύονται, άρα δεν υπάρχουν matches."})
@@ -197,7 +224,7 @@ def collect(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             out.append({"level": "info", "endpoint": "main.settings", "label": "Ρυθμίσεις", "dismiss": "llm",
                         "text": "Ανάλυση νέων: τα δωρεάν όρια των μοντέλων LLM καλύφθηκαν προσωρινά — η εφαρμογή αλλάζει "
                                 "μόνη της μοντέλο/πάροχο και συνεχίζει στον επόμενο έλεγχο. (Με κλειδί και για δεύτερο "
-                                "πάροχο, Groq ή OpenRouter, η ανάλυση δεν σταματά.)"})
+                                "πάροχο — Groq, OpenRouter ή Gemini — η ανάλυση δεν σταματά.)"})
 
     # ---- κωδικοί TAXISnet γραφείου
     if settings_store.get(conn, "aade_office_status") == "invalid":

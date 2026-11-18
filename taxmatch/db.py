@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import config
 
@@ -665,6 +665,17 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE aade_requests ADD COLUMN comm_json TEXT NOT NULL DEFAULT '[]';
     """,
+    # v28 — ανάγκη ΑΠΔ ΤΕΚΑ ανά μήνα από την ΕΡΓΑΝΗ ΙΙ (teka_need.py, port TaxSystem efka-teka-apd-need, 2026-11-18)
+    """
+    CREATE TABLE IF NOT EXISTS teka_need (
+        afm         TEXT NOT NULL,
+        ym          TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT '',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        checked_at  TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (afm, ym)
+    );
+    """,
 ]
 
 
@@ -679,15 +690,27 @@ class StateCache:
     (όχι `id()`): ζωντανό αντικείμενο = καμία νέα σύνδεση στην ίδια διεύθυνση μνήμης με λάθος τιμή (το
     `sqlite3.Connection` δεν δέχεται weak reference)."""
 
-    def __init__(self) -> None:
+    def __init__(self, key_fn=None) -> None:
+        # `key_fn(conn)`: δικό του κλειδί (π.χ. μόνο οι πίνακες από τους οποίους εξαρτάται ο υπολογισμός) — ώστε μια
+        # άσχετη εγγραφή του UI (κρύψιμο ειδοποίησης, ρύθμιση) να μην ξαναϋπολογίζει ~2″ ανάλυσης myDATA (2026-11-18)
+        self._key_fn = key_fn or state_key
         self._conn, self._key, self._value = None, None, None
 
     def get(self, conn: sqlite3.Connection, compute):
-        key = state_key(conn)
+        key = self._key_fn(conn)
         if self._conn is not conn or self._key != key:
             value = compute(conn)
-            self._conn, self._key, self._value = conn, state_key(conn), value
+            self._conn, self._key, self._value = conn, self._key_fn(conn), value
         return self._value
+
+
+def table_key(conn: sqlite3.Connection, *tables: str) -> tuple:
+    """Κλειδί που αλλάζει όταν αλλάξουν οι `tables`: commit από ΑΛΛΗ σύνδεση (`data_version` — λήψεις στο παρασκήνιο)
+    ή αλλαγή πλήθους / τελευταίου rowid στους πίνακες (εισαγωγές/διαγραφές από την ίδια σύνδεση). Γρήγορο (rowid)."""
+    out: list[Any] = [conn.execute("PRAGMA data_version").fetchone()[0]]
+    for t in tables:
+        out += list(conn.execute(f"SELECT COUNT(*), coalesce(MAX(rowid),0) FROM {t}").fetchone())
+    return tuple(out)
 
 
 def utcnow() -> str:

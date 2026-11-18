@@ -699,6 +699,15 @@ def liability(rule_id: str, business: Optional[dict[str, Any]], ref_month: str =
             return "no", "κανένας χαρακτηρισμός E3_585_015 στο myDATA της χρήσης"
         return "maybe", "μόνο αν είχε δαπάνες διαφήμισης (χαρακτηρισμός E3_585_015 στο myDATA)"
     if rule_id == "apd_teka":
+        # ΠΡΩΤΑ η ΕΡΓΑΝΗ ΙΙ ανά μήνα (teka_need.py — εργαζόμενοι του μήνα και υπαγωγή τους στο ΤΕΚΑ, 2026-11-18)
+        need = (business.get("teka_need") or {}).get(ref_month or "")
+        if need == "REQUIRED":
+            return "yes", "ΕΡΓΑΝΗ: απασχολεί τον μήνα εργαζόμενο ασφαλισμένο στο ΤΕΚΑ"
+        if need == "POSSIBLY_REQUIRED":
+            return "maybe", "ΕΡΓΑΝΗ: άγνωστη υπαγωγή εργαζομένου ή αποζημίωση απόλυσης εργαζομένου του ΤΕΚΑ"
+        if need in ("NOT_REQUIRED", "NO_EMPLOYEES"):
+            return "no", ("ΕΡΓΑΝΗ: κανείς εργαζόμενος του μήνα στο ΤΕΚΑ" if need == "NOT_REQUIRED"
+                          else "ΕΡΓΑΝΗ: κανείς ενεργός εργαζόμενος τον μήνα")
         if business.get("employer") == 0:
             return "no", "χωρίς μισθοδοσία"
         if not business.get("teka"):                  # μόνο με ρητή επιλογή στο Προφίλ του πελάτη

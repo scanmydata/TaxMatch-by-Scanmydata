@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 bp = Blueprint("main", __name__)
 
 DAY_CHOICES = (1, 3, 7, 14, 30)
-SECRET_KEYS = ["groq_api_key", "openrouter_api_key", "business_portal_key", "aade_user", "aade_pass"]
+SECRET_KEYS = ["groq_api_key", "openrouter_api_key", "gemini_api_key", "business_portal_key", "aade_user", "aade_pass"]
 
 
 def _jobs():
@@ -146,7 +146,7 @@ def dashboard():
 
 
 def settings_store_llm_key(conn) -> str:
-    return "openrouter_api_key" if settings_store.get(conn, "llm_provider") == "openrouter" else "groq_api_key"
+    return (llm_extract.PROVIDERS.get(settings_store.get(conn, "llm_provider")) or llm_extract.PROVIDERS["groq"])["key"]
 
 
 # ================================================================== Πελάτες
@@ -533,13 +533,13 @@ def settings():
                 if key in ("aade_user", "aade_pass") and (request.form.get(key, "").strip() or request.form.get(f"clear_{key}")):
                     settings_store.set_value(conn, "aade_office_status", "")          # νέοι κωδικοί: ξεκινά από την αρχή
                     settings_store.set_value(conn, "aade_office_message", "")
-                if key in ("groq_api_key", "openrouter_api_key") and request.form.get(key, "").strip():
+                if key in ("groq_api_key", "openrouter_api_key", "gemini_api_key") and request.form.get(key, "").strip():
                     settings_store.set_value(conn, "llm_last_error", "")
             flash("Τα credentials αποθηκεύτηκαν (κρυπτογραφημένα).", "ok")
         elif section == "llm":
             provider = request.form.get("llm_provider", "groq")
             settings_store.set_value(conn, "llm_provider", provider if provider in llm_extract.PROVIDERS else "groq")
-            for key in ("llm_model_groq", "llm_model_openrouter"):
+            for key in ("llm_model_groq", "llm_model_openrouter", "llm_model_gemini"):
                 if request.form.get(key, "").strip():
                     settings_store.set_value(conn, key, request.form[key].strip())
             for key, lo, hi in (("lookback_days", 1, 60), ("max_extractions_per_run", 1, 500)):

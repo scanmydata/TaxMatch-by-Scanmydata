@@ -187,6 +187,10 @@ def _checks_for(conn: sqlite3.Connection, afm: Optional[str] = None) -> dict[str
         entry = out.setdefault(r["afm"], {"checks": {"years": {}, "periods": {}}, "done": set()})
         entry["done"].add((r["rule_id"], r["ref_month"]))
         entry.setdefault("done_at", {})[(r["rule_id"], r["ref_month"])] = r["done_at"]
+    # ανάγκη ΑΠΔ ΤΕΚΑ ανά μήνα από την ΕΡΓΑΝΗ (teka_need.py) — {ΥΥΥΥ-ΜΜ: REQUIRED|POSSIBLY_REQUIRED|NOT_REQUIRED|NO_EMPLOYEES}
+    for r in conn.execute("SELECT afm, ym, status FROM teka_need" + where, args):
+        entry = out.setdefault(r["afm"], {"checks": {"years": {}, "periods": {}}, "done": set()})
+        entry.setdefault("teka_need", {})[r["ym"]] = r["status"]
     if afm:
         return out.get(afm, {"checks": {"years": {}, "periods": {}}, "done": set()})
     return out

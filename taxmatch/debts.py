@@ -193,6 +193,49 @@ def _title(fields: dict[str, str]) -> str:
     return next((v for v in fields.values() if v and not re.search(r"\d", v)), "")
 
 
+def _field(fields: dict[str, str], pattern: str) -> str:
+    return next((v for k, v in fields.items() if re.search(pattern, k)), "")
+
+
+def arrangement_summary(fields: dict[str, str], inst: dict[str, Any]) -> dict[str, Any]:
+    """Ρύθμιση / εξωδικαστικός μηχανισμός (port του TaxSystem `aade-payment-match.js`, 2026-11-10): τύπος ρύθμισης (νόμος),
+    βασική οφειλή, προσαυξήσεις/τόκοι/τέλη, συνολικό ρυθμιζόμενο, υπόλοιπο και δόσεις. ΠΛΗΡΩΜΕΝΕΣ = οι μηδενικές δόσεις
+    ΠΡΙΝ από την πρώτη εκκρεμή — μια ρύθμιση έχει και τελικές δόσεις 0€ που ΔΕΝ είναι πληρωμένες (ζωντανά: #237–240)."""
+    out = {"typos": _field(fields, r"Τύπος Ρύθμισης"), "arr_no": _field(fields, r"^Α/Α$"),
+           "date": _field(fields, r"Ημ/νία Ρύθμισης"), "protocol": _field(fields, r"Αρ\.? ?Πρωτ"),
+           "basic": _field(fields, r"Ρυθμιζόμενο Ποσό Βασικής"), "surcharges": _field(fields, r"Ρυθμιζόμενες Προσαυξήσεις"),
+           "arranged": _field(fields, r"Συνολικό Ρυθμιζόμενο"), "remaining": _field(fields, r"Συνολικό Υπόλοιπο")}
+    headers, rows = inst.get("headers") or [], inst.get("rows") or []
+    if headers and rows:
+        def col(p: str) -> int:
+            return next((i for i, h in enumerate(headers) if re.search(p, h)), -1)
+        i_rem, i_base, i_sur, i_date = (col(r"Συνολικό Υπόλοιπο Δόσης"), col(r"Υπόλοιπο Ποσό Δόσης"),
+                                       col(r"Επιβάρυνσης"), col(r"Ημ/νία"))
+        rem_col = i_rem if i_rem >= 0 else (i_base if i_base >= 0 else len(headers) - 1)
+        paid = pending = total = 0
+        surcharge = remaining = 0.0
+        nxt: Optional[dict[str, str]] = None
+        for r in rows:
+            if not re.fullmatch(r"\d+", (r[0] if r else "").strip()):
+                continue
+            total += 1
+            rem = amount(r[rem_col]) if rem_col < len(r) else 0.0
+            remaining += rem
+            if 0 <= i_sur < len(r):
+                surcharge += amount(r[i_sur])
+            if rem > 0.001:
+                pending += 1
+                if nxt is None:
+                    nxt = {"aa": r[0], "date": r[i_date] if 0 <= i_date < len(r) else "", "amount": r[rem_col]}
+            elif nxt is not None:
+                pending += 1                            # μηδενική ΜΕΤΑ την πρώτη εκκρεμή = μελλοντική, όχι πληρωμένη
+            else:
+                paid += 1
+        out.update({"doseis_total": total, "doseis_paid": paid, "doseis_pending": pending, "next": nxt,
+                    "doseis_remaining": round(remaining, 2), "surcharge_total": round(surcharge, 2)})
+    return out
+
+
 def _first_amount(fields: dict[str, str], *patterns: str) -> float:
     for p in patterns:
         for k, v in fields.items():
@@ -285,8 +328,10 @@ def fetch(http: Any, afm: str, want_pdf: bool = True, client: str = "", office: 
         to = a["to"]
         f = a["fields"]
         details = {"fields": f, **arr_inst.get(a["idx"], {})}
+        details["arrangement"] = summary = arrangement_summary(f, arr_inst.get(a["idx"], {}))
+        # τίτλος = Τύπος Ρύθμισης (π.χ. «ΕΞΩΔΙΚΑΣΤΙΚΟΣ ΜΗΧΑΝΙΣΜΟΣ Ν.4738/2020») — πριν έβγαινε το όνομα της ΔΟΥ
         item = {"kind": "arrangement", "ref": f"{to.get('arnYear', '')}|{to.get('arrAA', '')}",
-                "title": _title(f) or f"Ρύθμιση {to.get('arrAA', '')}",
+                "title": summary["typos"] or _title(f) or f"Ρύθμιση {to.get('arrAA', '')}",
                 "overdue": _first_amount(f, r"^Ληξιπρόθεσμ"), "non_overdue": 0.0,
                 "total": _first_amount(f, r"Συνολικό Υπόλοιπο", r"Υπόλοιπο", r"Συνολικ", r"Ποσό"), "code": "",
                 "pdf_path": "", "details": details, **_schedule_fields(details)}

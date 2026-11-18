@@ -25,7 +25,11 @@ PROVIDERS = {
              "model": "llm_model_groq"},
     "openrouter": {"url": "https://openrouter.ai/api/v1/chat/completions", "key": "openrouter_api_key",
                    "model": "llm_model_openrouter"},
+    # Google Gemini API (AI Studio) — OpenAI-compatible endpoint, Bearer με το API key (ρητό αίτημα 2026-11-18)
+    "gemini": {"url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "key": "gemini_api_key",
+               "model": "llm_model_gemini"},
 }
+PROVIDER_LABEL = {"groq": "Groq", "openrouter": "OpenRouter", "gemini": "Gemini"}
 # Προτιμώμενα μοντέλα ανά πάροχο, με σειρά. Αν το επιλεγμένο μοντέλο δεν υπάρχει/δεν επιτρέπεται για το κλειδί του
 # χρήστη (HTTP 404 model_not_found, 403 «blocked at the organization level»), η εφαρμογή ρωτά το /models του παρόχου
 # και διαλέγει το πρώτο διαθέσιμο από αυτή τη λίστα (Groq: το ίδιο το λογαριασμό μπορεί να περιορίζει τα μοντέλα).
@@ -44,13 +48,22 @@ PREFERRED_MODELS = {
     "openrouter": ["openrouter/free", "google/gemma-4-31b-it:free", "nvidia/nemotron-3.5-lightning:free",
                    "google/gemma-4-26b-a4b-it:free", "liquid/lfm-2.5-2.6b:free", "liquid/lfm-3-1.7b:free",
                    "nvidia/nemotron-3.5-super-vl:free", "meta-llama/llama-3.3-70b-instruct", "openai/gpt-oss-120b"],
+    # Δωρεάν βαθμίδα Gemini API (σελίδα τιμών Google, Νοέμβριος 2026): Flash / Flash-Lite / Gemma 4 — ΟΧΙ Pro/Argon,
+    # εικόνα, ομιλία. Τα όρια (RPM/RPD) ισχύουν ΑΝΑ ΜΟΝΤΕΛΟ και ανά project: όταν εξαντληθεί ένα, το επόμενο της λίστας
+    # έχει δικό του όριο. Πρώτα τα Flash-Lite (μεγαλύτερο ημερήσιο όριο), μετά Flash, μετά Gemma.
+    "gemini": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash",
+               "gemini-3-flash-preview", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-2.5-flash-lite"],
 }
+#: Δωρεάν βαθμίδα Gemini: Flash / Flash-Lite (όχι εικόνα/ομιλία/live) και Gemma «-it».
+_GEMINI_FREE = re.compile(r"^(?:models/)?(?:gemini-[\d.]+-flash(?:-lite)?(?:-preview)?(?:-\d{2}-\d{4})?|gemma-[\w.-]+-it)$")
 # Μοντέλα που δεν είναι για κείμενο→JSON (ομιλία, moderation, agentic)
 _NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "embed", "safeguard", "compound", "distil-whisper", "playai")
 
 
 def is_free_model(provider: str, model_id: str) -> bool:
     """Groq: όλος ο κατάλογος είναι δωρεάν βαθμίδα. OpenRouter: μόνο όσα λήγουν σε ':free' (πραγματικά χωρίς χρέωση)."""
+    if provider == "gemini":
+        return bool(_GEMINI_FREE.match(model_id or ""))
     return provider == "groq" or model_id.endswith(":free") or model_id == "openrouter/free"
 MAX_TRIES = 3
 # 2026-11-04: ίσο με το αποθηκευμένο κείμενο. Με 5000 σχεδόν ΚΑΘΕ άρθρο (το αποθηκευμένο είναι συνήθως 8000) περνούσε
@@ -135,7 +148,7 @@ def provider_cooled(conn: sqlite3.Connection, provider: str) -> bool:
 
 
 def other_provider_client(conn: sqlite3.Connection, current: "LLMClient") -> Optional["LLMClient"]:
-    """Ο ΑΛΛΟΣ πάροχος (OpenRouter ↔ Groq), αν έχει κλειδί και δεν είναι κι αυτός σε ψυγείο — με δωρεάν μοντέλο."""
+    """Άλλος πάροχος (OpenRouter / Groq / Gemini), αν έχει κλειδί και δεν είναι κι αυτός σε ψυγείο — με δωρεάν μοντέλο."""
     for provider, cfg in PROVIDERS.items():
         if provider == current.provider or provider_cooled(conn, provider):
             continue
@@ -199,6 +212,13 @@ class LLMClient:
                 resp = self.session.post(self.url, headers=self._headers(), json=body, timeout=timeout)
         except requests.RequestException as exc:
             raise LLMError("network", str(exc)) from exc
+        if self.provider == "gemini" and resp.status_code == 400 and "api key not valid" in resp.text.lower():
+            raise LLMError("auth", "HTTP 400: άκυρο Gemini API key — ελέγξτε το κλειδί στο Google AI Studio και πατήστε "
+                                   "«Αποθήκευση κλειδιών».")
+        if self.provider == "gemini" and resp.status_code == 429 and _gemini_per_minute(resp.text):
+            # όριο ΑΝΑ ΛΕΠΤΟ (RPM/TPM) της δωρεάν βαθμίδας — προσωρινό, όχι ημερήσιο: αναμονή όσο λέει το retryDelay
+            raise LLMError("rate_limit", "Gemini: όριο αιτημάτων ανά λεπτό της δωρεάν βαθμίδας — προσωρινό.",
+                           _gemini_retry_delay(resp.text) or _retry_after(resp))
         if _is_model_error(resp.status_code, resp.text):
             raise LLMError("model", f"Το μοντέλο «{self.model}» δεν είναι διαθέσιμο για αυτό το API key "
                                     f"(HTTP {resp.status_code}).")
@@ -235,6 +255,16 @@ class LLMClient:
             return resp.json()["choices"][0]["message"]["content"] or ""
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError("bad_response", "Μη αναμενόμενη μορφή απάντησης") from exc
+
+
+def _gemini_per_minute(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k in t for k in ("perminute", "per_minute", "per minute", "requests_per_minute", "tokens_per_minute"))
+
+
+def _gemini_retry_delay(text: str) -> float:
+    m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', text or "")
+    return float(m.group(1)) if m else 0.0
 
 
 def _is_model_error(status: int, text: str) -> bool:
@@ -290,7 +320,7 @@ def pick_model(provider: str, available: list[str], avoid: str | set[str] | list
         for want in PREFERRED_MODELS.get(provider, []):
             if want not in avoid_set and (not free_only or is_free_model(provider, want)):
                 return want
-    if provider == "groq" or (provider == "openrouter" and free_only):
+    if provider in ("groq", "gemini") or (provider == "openrouter" and free_only):
         # Groq: δεν μαντεύουμε ανάμεσα σε εκατοντάδες πληρωμένα OpenRouter μοντέλα — μόνο ανάμεσα στα δωρεάν.
         chat = [m for m in ids if not any(x in m.lower() for x in _NOT_CHAT)]
         return sorted(chat)[0] if chat else ""
@@ -311,7 +341,8 @@ def list_models(client: "LLMClient", timeout: int = 30) -> list[str]:
         data = resp.json().get("data", [])
     except (ValueError, AttributeError) as exc:
         raise LLMError("bad_response", "Μη αναμενόμενη μορφή λίστας μοντέλων") from exc
-    return [str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id") and m.get("active", True) is not False]
+    ids = [str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id") and m.get("active", True) is not False]
+    return [i.split("/", 1)[1] if i.startswith("models/") else i for i in ids]   # Gemini: «models/gemini-…»
 
 
 def recover_model(conn: sqlite3.Connection, client: "LLMClient", avoid: str | set[str] | list[str] = "") -> str:

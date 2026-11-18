@@ -9,6 +9,7 @@ https://openbusiness-portal.mindev.gov.gr/nomothesia/adeiodotisi-drastiriotiton/
 (ο κωδικός της λίστας είναι ίδιος ή γονικός)."""
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Iterable, Optional
 
 from .identifiers import format_kad, kad_digits
@@ -61,19 +62,24 @@ ACTIVITIES: list[tuple[str, tuple[str, ...], tuple[str, ...], str]] = [
 ]
 
 
+#: (ψηφία προθέματος, δραστηριότητα, καθεστώς, ψηφία εξαιρέσεων) — υπολογισμένα μία φορά (το κέντρο ειδοποιήσεων καλεί
+#: τον έλεγχο για κάθε ΚΑΔ κάθε πελάτη σε κάθε ανανέωση· πριν ~0,9″ ανά κλικ «✕»)
+_PREFIXES = [(kad_digits(p), name, regime, tuple(kad_digits(x) for x in excluded))
+             for name, prefixes, excluded, regime in ACTIVITIES for p in prefixes]
+
+
 def _starts(code: str, prefix: str) -> bool:
     return kad_digits(code).startswith(kad_digits(prefix))
 
 
+@lru_cache(maxsize=4096)
 def activity_of(code: str) -> Optional[tuple[str, str]]:
     """(δραστηριότητα, καθεστώς) του νέου πίνακα για έναν ΚΑΔ — η πιο συγκεκριμένη αντιστοίχιση."""
+    digits = kad_digits(code)
     best: Optional[tuple[int, str, str]] = None
-    for name, prefixes, excluded, regime in ACTIVITIES:
-        if any(_starts(code, x) for x in excluded):
-            continue
-        for p in prefixes:
-            if _starts(code, p) and (best is None or len(kad_digits(p)) > best[0]):
-                best = (len(kad_digits(p)), name, regime)
+    for prefix, name, regime, excluded in _PREFIXES:
+        if digits.startswith(prefix) and not any(digits.startswith(x) for x in excluded)                 and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), name, regime)
     return (best[1], best[2]) if best else None
 
 

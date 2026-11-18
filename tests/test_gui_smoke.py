@@ -1714,3 +1714,26 @@ def test_client_lookup_locks_the_form_and_profile_has_start_and_cease_dates(wind
     row = conn.execute("SELECT cease_date, activity_state FROM businesses WHERE afm=?", (AFM,)).fetchone()
     assert row["cease_date"] == "30/06/2026" and row["activity_state"] == "ceased"
     dlg.deleteLater()
+
+
+def test_teka_obligation_details_list_the_employees(window, conn, monkeypatch):
+    import json as _json
+    from taxmatch.gui import client_detail_dialog as dialog_module
+    from taxmatch.gui.client_detail_dialog import ClientDetailDialog
+    service.add(conn, AFM, "ΔΟΚΙΜΑΣΤΙΚΗ ΙΚΕ")
+    rep = {"status": "REQUIRED", "teka_count": 1, "unknown_count": 0, "severance": [],
+           "movements": [{"type": "ΠΡΟΣΛΗΨΗ", "afm": "111111114", "surname": "ΠΑΠΑΔΟΠΟΥΛΟΣ", "date": "2026-10-09"}],
+           "employees": [{"afm": "111111114", "surname": "ΠΑΠΑΔΟΠΟΥΛΟΣ", "name": "ΓΙΩΡΓΟΣ", "teka": "SUBJECT",
+                          "teka_source": "ΕΡΓΑΝΗ (επικουρικός: ΤΕΚΑ)", "periods": [{"from": "2026-10-09", "to": None}]},
+                         {"afm": "121212129", "surname": "ΓΕΩΡΓΙΟΥ", "name": "ΜΑΡΙΑ", "teka": "NOT_SUBJECT",
+                          "teka_source": "ΕΡΓΑΝΗ (επικουρικός: e-ΕΦΚΑ)", "periods": [{"from": "2025-01-01", "to": None}]}]}
+    conn.execute("INSERT INTO teka_need(afm, ym, status, result_json, checked_at) VALUES (?,?,?,?,?)",
+                 (AFM, "2026-10", "REQUIRED", _json.dumps(rep, ensure_ascii=False), "2026-11-18T08:00:00Z"))
+    for attr in ("MydataTab", "DebtsTab", "RequestsTab", "MembersTab"):
+        monkeypatch.setattr(dialog_module, attr, lambda *a, **k: __import__("PySide6.QtWidgets").QtWidgets.QWidget())
+    dlg = ClientDetailDialog(window, AFM)
+    text = dlg._teka_employees_html("2026-10")
+    assert "ΠΑΠΑΔΟΠΟΥΛΟΣ ΓΙΩΡΓΟΣ" in text and "υποχρέωση ΑΠΔ ΤΕΚΑ" in text and "ΓΕΩΡΓΙΟΥ" in text
+    assert "ΠΑΠΑΔΟΠΟΥΛΟΣ" in dlg.f_teka_note.text()
+    assert "δεν έχει ελεγχθεί" in dlg._teka_employees_html("2026-09")
+    dlg.deleteLater()

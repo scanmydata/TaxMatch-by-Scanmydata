@@ -32,6 +32,9 @@ DEFINITIONS: dict[str, SettingDef] = {d.key: d for d in [
     SettingDef("llm_model_openrouter", "Μοντέλο OpenRouter", default="openrouter/free"),
     SettingDef("groq_api_key", "Groq API key", secret=True, env="GROQ_API_KEY"),
     SettingDef("openrouter_api_key", "OpenRouter API key", secret=True, env="OPENROUTER_API_KEY"),
+    # Google Gemini API (AI Studio) — δωρεάν βαθμίδα Flash / Flash-Lite / Gemma (2026-11-18)
+    SettingDef("llm_model_gemini", "Μοντέλο Gemini", default="gemini-3.5-flash-lite"),
+    SettingDef("gemini_api_key", "Gemini API key", secret=True, env="GEMINI_API_KEY"),
     SettingDef("business_portal_key", "Business Portal (ΓΕΜΗ) API key", secret=True, env="BUSINESS_PORTAL_KEY"),
     SettingDef("aade_user", "TAXISnet χρήστης (γραφείου)", secret=True, env="AADE_USER"),
     SettingDef("aade_pass", "TAXISnet κωδικός (γραφείου)", secret=True, env="AADE_PASS"),

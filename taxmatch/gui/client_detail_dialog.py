@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,11 @@ def obligation_pdfs(r: dict[str, Any]) -> list[str]:
 if TYPE_CHECKING:
     from .main_window import MainWindow
 
+
+
+def _dmy(iso: str) -> str:
+    """'2026-10-09…' → '09/10/2026' (αλλιώς όπως είναι)."""
+    return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}" if len(iso or "") >= 10 and iso[4] == "-" else (iso or "")
 
 
 def _scrolled(page: QWidget) -> QScrollArea:
@@ -313,6 +319,12 @@ class ClientDetailDialog(QDialog):
         self.f_teka = QCheckBox("Υποβάλλει ΑΠΔ ΤΕΚΑ (επικουρική ασφάλιση εργαζομένων) — υποχρέωση και έλεγχος υποβολής")
         self.f_teka.setToolTip("Ενεργό μόνο για εργοδότες με εργαζόμενους ασφαλισμένους στο ΤΕΚΑ. Δημιουργεί υποχρέωση ΑΠΔ ΤΕΚΑ και έλεγχο στο e-ΕΦΚΑ.")
         form.addRow("", self.f_teka)
+        # ΕΡΓΑΝΗ ΙΙ: ανάγκη ΑΠΔ ΤΕΚΑ ανά μήνα (teka_need.py, ο έλεγχος υποβολών με κωδικούς ΙΚΑ εργοδότη)
+        self.f_teka_note = QLabel("")
+        self.f_teka_note.setWordWrap(True)
+        self.f_teka_note.setObjectName("muted")
+        self.f_teka_note.hide()
+        form.addRow("", self.f_teka_note)
 
         def _on_emp_toggled(chk: bool):
             self.f_teka.setEnabled(chk)
@@ -1020,12 +1032,57 @@ class ClientDetailDialog(QDialog):
             if c.get("checked_at"):
                 line += f" <span style='color:{CURRENT.muted}'>(έλεγχος {esc(c['checked_at'][:10])})</span>"
             lines.append(line)
+        if r["rule_id"] == "apd_teka":
+            lines.append(self._teka_employees_html(r["ref_month"]))
         if not sub["status"]:
             lines.append(f"<span style='color:{CURRENT.muted}'>"
                          + ("Δεν υπάρχει ακόμη αυτόματος έλεγχος υποβολής — σημειώστε το χειροκίνητα ως ολοκληρωμένο."
                             if sub["manual"] else "Δεν έχει ελεγχθεί — «Έλεγχος υποβολών» για τη χρήση.") + "</span>")
         lines.append(f"<span style='color:{CURRENT.muted}'>{esc(r['description'])}</span>")
         return "<br>".join(lines)
+
+    def _teka_employees_html(self, ym: str) -> str:
+        """Ποιοι εργαζόμενοι δημιουργούν (ή όχι) την υποχρέωση ΑΠΔ ΤΕΚΑ του μήνα — από την ΕΡΓΑΝΗ (teka_need.py)."""
+        from .. import teka_need
+        esc = html.escape
+        row = self.conn.execute("SELECT status, result_json, checked_at FROM teka_need WHERE afm=? AND ym=?",
+                                (self.afm, ym)).fetchone()
+        if not row:
+            return (f"<span style='color:{CURRENT.muted}'>ΕΡΓΑΝΗ: ο μήνας δεν έχει ελεγχθεί — «Έλεγχος υποβολών» με "
+                    "κωδικούς ΟΠΣ e-ΕΦΚΑ (ΙΚΑ) εργοδότη δείχνει ποιοι εργαζόμενοι υπάγονται στο ΤΕΚΑ.</span>")
+        try:
+            rep = json.loads(row["result_json"] or "{}")
+        except ValueError:
+            rep = {}
+        colour = {"REQUIRED": CURRENT.bad, "POSSIBLY_REQUIRED": CURRENT.warn}.get(row["status"], CURRENT.ok)
+        out = [f"<b>ΕΡΓΑΝΗ ΙΙ:</b> <b style='color:{colour}'>{esc(teka_need.STATUS_LABEL.get(row['status'], row['status']))}"
+               f"</b> <span style='color:{CURRENT.muted}'>(έλεγχος {esc(_dmy(row['checked_at']))})</span>"]
+        label = {"SUBJECT": ("στο ΤΕΚΑ — υποχρέωση ΑΠΔ ΤΕΚΑ", CURRENT.bad), "NOT_SUBJECT": ("όχι ΤΕΚΑ", CURRENT.muted),
+                 "UNKNOWN": ("άγνωστη υπαγωγή", CURRENT.warn)}
+        emps = sorted(rep.get("employees") or [], key=lambda e: {"SUBJECT": 0, "UNKNOWN": 1}.get(e.get("teka"), 2))
+        if emps:
+            cells = ["<tr><th align='left'>Εργαζόμενος</th><th align='left'>ΑΦΜ</th><th align='left'>Απασχόληση</th>"
+                     "<th align='left'>Υπαγωγή</th><th align='left'>Πηγή</th></tr>"]
+            for e in emps:
+                text, col = label.get(e.get("teka"), (e.get("teka", ""), CURRENT.muted))
+                periods = ", ".join(f"{p['from'][8:10]}/{p['from'][5:7]}/{p['from'][:4]}–"
+                                    + (f"{p['to'][8:10]}/{p['to'][5:7]}/{p['to'][:4]}" if p.get("to") else "σήμερα")
+                                    for p in e.get("periods") or [] if p.get("from"))
+                note = e.get("hint") or e.get("conflict") or ""
+                cells.append(f"<tr><td>{esc((e.get('surname', '') + ' ' + e.get('name', '')).strip())}</td>"
+                             f"<td>{esc(e.get('afm', ''))}</td><td>{esc(periods)}</td>"
+                             f"<td><b style='color:{col}'>{esc(text)}</b></td>"
+                             f"<td>{esc(e.get('teka_source') or '—')}{(' · ' + esc(note)) if note else ''}</td></tr>")
+            out.append("<table cellspacing='0' cellpadding='3'>" + "".join(cells) + "</table>")
+        for s in rep.get("severance") or []:
+            out.append(f"<b style='color:{CURRENT.warn}'>Αποζημίωση απόλυσης:</b> {esc(s.get('surname', ''))} "
+                       f"({esc(s.get('afm', ''))}) — λήξη {esc(_dmy(s.get('date', '')))}, εργαζόμενος του ΤΕΚΑ· η αποζημίωση "
+                       "δηλώνεται συνήθως στην ΑΠΔ του επόμενου μήνα.")
+        moves = rep.get("movements") or []
+        if moves:
+            out.append("Κινήσεις μήνα: " + "; ".join(f"{esc(m['type'])} {esc(m.get('surname', ''))} "
+                                                    f"{esc(_dmy(m.get('date', '')))}" for m in moves))
+        return "<br>".join(out)
 
     def _reload_checks(self) -> None:
         self._sync_handoff()
@@ -1304,6 +1361,34 @@ class ClientDetailDialog(QDialog):
         runner = main_win if main_win is not None else self
         self._tasks.append(run_task(runner, work, on_progress=prog_update, on_done=done, on_error=failed))
 
+    def _fill_teka_note(self) -> None:
+        from .. import teka_need
+        from .i18n import month_year
+        rows = self.conn.execute("SELECT ym, status, result_json, checked_at FROM teka_need WHERE afm=? ORDER BY ym DESC "
+                                 "LIMIT 2", (self.afm,)).fetchall()
+        parts = []
+        for r in rows:
+            try:
+                rep = json.loads(r["result_json"] or "{}")
+            except ValueError:
+                rep = {}
+            y, m = int(r["ym"][:4]), int(r["ym"][5:7])
+            extra = []
+            if rep.get("teka_count"):
+                who = [(e.get("surname", "") + " " + e.get("name", "")).strip() for e in rep.get("employees") or []
+                       if e.get("teka") == "SUBJECT"]
+                extra.append("στο ΤΕΚΑ: " + ", ".join(who))
+            if rep.get("unknown_count"):
+                extra.append(f"{rep['unknown_count']} άγνωστης υπαγωγής")
+            if rep.get("severance"):
+                extra.append("αποζημίωση απόλυσης")
+            moves = [f"{mv['type'].lower()} {mv['date'][8:10]}/{mv['date'][5:7]}" for mv in rep.get("movements") or []]
+            parts.append(f"{month_year(date(y, m, 1))}: {teka_need.STATUS_LABEL.get(r['status'], r['status'])}"
+                         + (f" ({', '.join(extra)})" if extra else "") + (f" · {'; '.join(moves)}" if moves else ""))
+        self.f_teka_note.setText(("ΕΡΓΑΝΗ — " + " · ".join(parts) + f" (έλεγχος {rows[0]['checked_at'][8:10]}/"
+                                  f"{rows[0]['checked_at'][5:7]})") if rows else "")
+        self.f_teka_note.setVisible(bool(rows))
+
     def set_lookup_lock(self, on: bool) -> None:
         """Όσο τρέχει η ανάκτηση, Προφίλ/Κωδικοί είναι κλειδωμένα (ρητό αίτημα): αλλιώς μια αποθήκευση του χρήστη και η
         εγγραφή της ανάκτησης «πατούσαν» η μία την άλλη. Η κύλιση των φορμών μένει ενεργή."""
@@ -1375,6 +1460,7 @@ class ClientDetailDialog(QDialog):
         self.f_employer.setChecked(employer_val == 1)
         self.f_teka.setEnabled(employer_val == 1)
         self.f_teka.setChecked(bool(flags["teka"]) and employer_val == 1)
+        self._fill_teka_note()
         self.f_intrastat.setChecked(bool(flags["intrastat"]))
         self.f_internet.setChecked(bool(flags["internet_contribution"]))
         from .. import advertising

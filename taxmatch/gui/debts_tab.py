@@ -459,6 +459,23 @@ class DebtCard(QDialog):
                      ("Μένουν συνολικά", money(d["total"]) if d["kind"] == "keao_arrangement" else "— (μη ενεργή)"),
                      ("Επόμενη δόση", nxt or "—"),
                      ("Ταυτότητα οφειλέτη", d["code"] or "—")]
+        elif d["kind"] == "arrangement" and info.get("arrangement"):
+            # ρύθμιση / εξωδικαστικός ΑΑΔΕ (TaxSystem aade-payment-match, 2026-11-10)
+            a = info["arrangement"]
+            doseis = (f"{a['doseis_paid']} πληρωμένες από {a['doseis_total']}"
+                      + (f" · εκκρεμούν {a['doseis_pending']}" if a.get("doseis_pending") else "")
+                      if a.get("doseis_total") else "—")
+            nx = a.get("next") or {}
+            facts = [("Τύπος ρύθμισης", a.get("typos") or "—"),
+                     ("Α/Α · ημ/νία · πρωτόκολλο", " · ".join(x for x in (a.get("arr_no"), a.get("date"),
+                                                                       a.get("protocol")) if x) or "—"),
+                     ("Βασική οφειλή", a.get("basic") or "—"),
+                     ("Προσαυξήσεις, τόκοι, τέλη", a.get("surcharges") or "—"),
+                     ("Συνολικό ρυθμιζόμενο", a.get("arranged") or "—"),
+                     ("Υπόλοιπο", a.get("remaining") or money(d["total"])),
+                     ("Δόσεις", doseis),
+                     ("Επόμενη δόση", " · ".join(x for x in (nx.get("date"), nx.get("amount")) if x) or nxt or "—"),
+                     ("Ταυτότητα πληρωμής (ΤΡΟ)", d["code"] or "—")]
         else:
             facts = [("Ληξιπρόθεσμο", money(d["overdue"])),
                      ("Εμπρόθεσμο", money(d["non_overdue"])),

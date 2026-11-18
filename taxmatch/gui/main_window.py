@@ -719,7 +719,7 @@ class MainWindow(QMainWindow):
             hide.setStyleSheet(f"QPushButton#noticeHide {{ padding:0; font-size:14px; font-weight:700; color:{CURRENT.muted}; }}"
                                f"QPushButton#noticeHide:hover {{ color:{CURRENT.bad}; border-color:{CURRENT.bad}; }}")
             hide.setToolTip("Απόκρυψη της ειδοποίησης (ξαναεμφανίζεται μόνο αν αλλάξει — π.χ. νέοι πελάτες ή νέο σφάλμα)")
-            hide.clicked.connect(lambda _=False, notice=n: self._hide_notice(notice))
+            hide.clicked.connect(lambda _=False, notice=n, f=frame: self._hide_notice(notice, f))
             row.addWidget(hide, 0, Qt.AlignmentFlag.AlignTop)
             self.notices_box.addWidget(frame)
         if fresh:
@@ -728,13 +728,20 @@ class MainWindow(QMainWindow):
             self._reposition_notice_panel()
             QTimer.singleShot(0, self._reposition_notice_panel)
 
-    def _hide_notice(self, notice: dict) -> None:
+    def _hide_notice(self, notice: dict, frame: Optional[QFrame] = None) -> None:
+        # ΑΜΕΣΑ στην οθόνη (αναφορά χρήστη 2026-11-18: «αργεί πολύ το κλείσιμο») — ο επανυπολογισμός μετά
+        if frame is not None:
+            frame.hide()
+            remaining = sum(1 for i in range(self.notices_box.count())
+                            if self.notices_box.itemAt(i).widget() and not self.notices_box.itemAt(i).widget().isHidden())
+            self.notice_btn.setText(f"🔔 {remaining}" if remaining else "🔔")
+            self._reposition_notice_panel()
         key = notice.get("dismiss")
         if key and key != "llm":
-            self._dismiss_notice(key)                  # ίδια συμπεριφορά με το παλιό «Αναγνώστηκε» (αστερίσκοι κ.λπ.)
+            QTimer.singleShot(0, lambda: self._dismiss_notice(key))   # ίδια συμπεριφορά με το παλιό «Αναγνώστηκε»
             return
         notices_mod.hide(self.conn, notice)
-        self._reload_notices()
+        QTimer.singleShot(0, self._reload_notices)
 
     def _aml_notices(self) -> list[dict]:
         """Ειδοποίηση μόνο για ΕΚΠΡΟΘΕΣΜΕΣ επανεξετάσεις δέουσας επιμέλειας (όχι για «χωρίς αξιολόγηση»: θα ήταν
@@ -787,7 +794,8 @@ class MainWindow(QMainWindow):
             toast(self, "Η ειδοποίηση κρύφτηκε. Οι πελάτες έχουν αστερίσκο «*» στη στήλη ΦΠΑ ώσπου να ανοίξετε την "
                         "καρτέλα τους.", "ok")
         self._reload_notices()
-        self.reload_clients()
+        if key in ("parepid", "vat_quarter"):          # μόνο αυτές αλλάζουν τη λίστα πελατών (αστερίσκοι «*»)
+            self.reload_clients()
 
     # ------------------------------------------------------------------ Αρχική
     def _dashboard_page(self) -> QWidget:
@@ -2869,6 +2877,7 @@ class MainWindow(QMainWindow):
         self._settings_fields: dict[str, QLineEdit] = {}
         self._settings_status: dict[str, QLabel] = {}
         for key, label, echo in (("groq_api_key", "Groq API key", True), ("openrouter_api_key", "OpenRouter API key", True),
+                                 ("gemini_api_key", "Gemini API key (Google AI Studio)", True),
                                  ("business_portal_key", "Business Portal (ΓΕΜΗ) API key", True),
                                  ("aade_user", "TAXISnet χρήστης γραφείου", False), ("aade_pass", "TAXISnet κωδικός γραφείου", True),
                                  # ΕΛ.ΣΤΑΤ Intrastat: ένας λογαριασμός του γραφείου — έλεγχος υποβολής ανά πελάτη
@@ -2910,6 +2919,7 @@ class MainWindow(QMainWindow):
         self.llm_provider = QComboBox()
         self.llm_provider.addItem("Groq", "groq")
         self.llm_provider.addItem("OpenRouter", "openrouter")
+        self.llm_provider.addItem("Gemini (Google AI Studio)", "gemini")
         lf.addRow("Πάροχος", self.llm_provider)
         self.llm_model_groq = QComboBox()
         self.llm_model_groq.setEditable(True)
@@ -2917,6 +2927,11 @@ class MainWindow(QMainWindow):
         self.llm_model_openrouter = QComboBox()
         self.llm_model_openrouter.setEditable(True)
         lf.addRow("Μοντέλο OpenRouter", self.llm_model_openrouter)
+        self.llm_model_gemini = QComboBox()
+        self.llm_model_gemini.setEditable(True)
+        self.llm_model_gemini.setToolTip("Δωρεάν βαθμίδα: Gemini Flash / Flash-Lite και Gemma — τα όρια ισχύουν ανά μοντέλο· "
+                                         "όταν εξαντληθεί ένα, η ανάλυση περνά μόνη της στο επόμενο δωρεάν.")
+        lf.addRow("Μοντέλο Gemini", self.llm_model_gemini)
         refresh_models = QPushButton("⟳  Ανανέωση λίστας μοντέλων (τρέχων πάροχος, χρειάζεται αποθηκευμένο κλειδί)")
         refresh_models.clicked.connect(self._refresh_llm_models)
         lf.addRow("", refresh_models)
@@ -3072,6 +3087,11 @@ class MainWindow(QMainWindow):
         self.llm_provider.setCurrentIndex(self.llm_provider.findData(settings_store.get(self.conn, "llm_provider")))
         self._sync_model_combo(self.llm_model_groq, "groq", settings_store.get(self.conn, "llm_model_groq"))
         self._sync_model_combo(self.llm_model_openrouter, "openrouter", settings_store.get(self.conn, "llm_model_openrouter"))
+        if self.llm_model_gemini.count() == 0:
+            self._sync_model_combo(self.llm_model_gemini, "gemini", settings_store.get(self.conn, "llm_model_gemini"),
+                                   models=llm_extract.PREFERRED_MODELS["gemini"])
+        else:
+            self._sync_model_combo(self.llm_model_gemini, "gemini", settings_store.get(self.conn, "llm_model_gemini"))
         for sid, chk in self._source_checks.items():
             src = sources.BY_ID[sid]
             chk.setChecked(settings_store.source_enabled(self.conn, sid, src.default_enabled) and src.available)
@@ -3096,7 +3116,7 @@ class MainWindow(QMainWindow):
                 continue
             settings_store.set_value(self.conn, key, value)
             field.clear()
-            if key in ("groq_api_key", "openrouter_api_key"):
+            if key in ("groq_api_key", "openrouter_api_key", "gemini_api_key"):
                 settings_store.set_value(self.conn, "llm_last_error", "")  # νέο κλειδί: σβήνει το παλιό μόνιμο banner
             if key in ("aade_user", "aade_pass"):
                 settings_store.set_value(self.conn, "aade_office_status", "")  # νέοι κωδικοί: ξεκινά από την αρχή
@@ -3142,11 +3162,15 @@ class MainWindow(QMainWindow):
         or_model = self._combo_model_value(self.llm_model_openrouter)
         if or_model:
             settings_store.set_value(self.conn, "llm_model_openrouter", or_model)
+        gm_model = self._combo_model_value(self.llm_model_gemini)
+        if gm_model:
+            settings_store.set_value(self.conn, "llm_model_gemini", gm_model)
         toast(self, "Οι ρυθμίσεις ανάλυσης αποθηκεύτηκαν.", "ok")
 
     def _refresh_llm_models(self) -> None:
         provider = self.llm_provider.currentData() or "groq"
-        combo = self.llm_model_groq if provider == "groq" else self.llm_model_openrouter
+        combo = {"groq": self.llm_model_groq, "openrouter": self.llm_model_openrouter,
+                 "gemini": self.llm_model_gemini}.get(provider, self.llm_model_openrouter)
         cfg = llm_extract.PROVIDERS[provider]
         key = settings_store.get(self.conn, cfg["key"])
         if not key:
