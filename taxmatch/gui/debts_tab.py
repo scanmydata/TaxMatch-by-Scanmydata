@@ -234,10 +234,21 @@ class DebtsTab(QWidget):
             owed = info.get("owed") or {}
             lines.append(" · ".join(x for x in (info.get("category"), f"ΑΜΟ {info['amo']}" if info.get("amo") else "",
                                                 info.get("branch")) if x))
+            if info.get("no_access"):
+                lines.append("Η πύλη ΚΕΑΟ δεν δίνει κινήσεις/πληρωμές για αυτόν τον φορέα (απενεργοποιημένα — συνήθως "
+                             "χωρίς ενεργές οφειλές).")
             if not owed.get("fallback"):
                 lines.append(f"Εκτός ρύθμισης {office.money(owed.get('outside', 0))} (πρόσθετα τέλη "
                              f"{office.money(owed.get('additional', 0))}) · σε ενεργές ρυθμίσεις "
                              f"{office.money(owed.get('regulated', 0))}")
+            for req in info.get("required") or []:
+                lines.append(f"<b>Απαιτητή δόση ρύθμισης:</b> {html.escape(req.get('amount', ''))} € · "
+                             + html.escape(" · ".join(x for x in (req.get("type"), req.get("resolution"), req.get("branch"))
+                                                      if x)))
+                if req.get("instalments") and include_schedules:
+                    lines.append(cls._table_html(["Α/Α", "Λήξη", "Ποσό", "Καταβλήθηκε", "Υπόλοιπο", "Προσαυξήσεις"],
+                                                  [[i["no"], i["due"], i["amount"], i["paid"], i["balance"],
+                                                    i["increments"]] for i in req["instalments"]]))
             if info.get("outstanding"):
                 lines.append(cls._table_html(["Ημερομηνία", "Παραστατικό", "Κύρια", "Πρόσθετα", "Σύνολο"],
                                               [[o["date"], o["document"], o["primary"], o["additional"], o["total"]]
@@ -248,6 +259,13 @@ class DebtsTab(QWidget):
                                                 f"τόκοι {r['interest']}" if r.get("interest") else "") if x))
             if r.get("instalments") and include_schedules:
                 lines.append(cls.installment_html(d))
+        elif d["kind"] == "efka" and info.get("unpaid_month"):
+            lines.append(f"Απλήρωτη εισφορά μήνα {html.escape(info.get('month', ''))} — εκδόθηκε ειδοποιητήριο"
+                         + (f" (προθεσμία {html.escape(info['due'])})" if info.get("due") else "")
+                         + ", δεν έχει βεβαιωθεί ακόμη στο ΚΕΑΟ (περνά εκεί σε ~2 μήνες).")
+            if d.get("code"):
+                lines.append("Πληρώνεται με την τρέχουσα ταυτότητα οφειλής (RF) του ΕΦΚΑ — κοινή για όλους τους "
+                             "απλήρωτους μήνες.")
         elif d["kind"] == "efka":
             lines.append(f"Μήνας {html.escape(info.get('month', ''))} · εμπρόθεσμη πληρωμή έως "
                          f"{html.escape(info.get('due', ''))}")

@@ -41,7 +41,7 @@ ARR_ARGS = ("returnView", "arnDoy", "arnDept", "arnYear", "arrAA")
 MCH = ("mchDoy", "mchDept", "mchMctCode", "mchSctCode", "mchYear", "mchSourceCode", "mchMcNo", "mcLineNo")
 KIND_LABEL = {"debt": "Οφειλή ΑΑΔΕ", "arrangement": "Ρύθμιση ΑΑΔΕ", "declaration": "Χρεωστική δήλωση",
               "carrier": "ΚΕΑΟ — φορέας", "keao_arrangement": "ΚΕΑΟ — ρύθμιση", "keao_inactive": "ΚΕΑΟ — ανενεργή ρύθμιση",
-              "efka": "ΕΦΚΑ — τρέχουσα εισφορά"}
+              "efka": "ΕΦΚΑ — τρέχουσα οφειλή"}
 
 
 def strip_tags(s: str) -> str:

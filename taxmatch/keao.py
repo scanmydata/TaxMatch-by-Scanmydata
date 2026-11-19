@@ -12,7 +12,11 @@
 * `configs/efka-notices.js`: «Υποχρεώσεις Ασφάλισης» → tab «Τρέχουσες Οφειλές» (είδος, μήνας, πληρωτέο, εμπρόθεσμη
   πληρωμή, RF) και PDF του τελευταίου μηνιαίου ειδοποιητηρίου (tab «Μηνιαία Ειδοποιητήρια»).
 
-**ΜΟΝΟ ανάγνωση. Δεν έχει δοκιμαστεί ζωντανά από το TaxMatch** (tests σε ψεύτικες σελίδες της δομής του Tax Center).
+* TaxSystem 26.11 (runner `efka-current-debts.js`, `keao-debts.js` RequiredRegulatedInstallments): απλήρωτοι
+  προηγούμενοι μήνες που δεν πέρασαν ακόμη στο ΚΕΑΟ και «Απαιτητές Δόσεις Ρύθμισης».
+
+**ΜΟΝΟ ανάγνωση.** Ζωντανά (2026-11-18, αντίγραφο βάσης): ΚΕΑΟ φορείς/ρυθμίσεις/απαιτητές δόσεις και τρέχουσες οφειλές
+ΕΦΚΑ μη μισθωτών.
 """
 from __future__ import annotations
 
@@ -53,6 +57,19 @@ def _ri_rows(fragment: str) -> list[tuple[int, str]]:
 
 def _tds(row: str) -> list[str]:
     return [strip_tags(c) for c in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S | re.I)]
+
+
+_COL_TITLE = re.compile(r'<span\b[^>]*class="[^"]*ui-column-title[^"]*"[^>]*>.*?</span>', re.S | re.I)
+
+
+def _tds_clean(row: str) -> list[str]:
+    """Σαν `_tds` χωρίς τα κρυφά `ui-column-title` (responsive επικεφαλίδες μέσα στο κελί) — όπως το
+    `ParseRequiredRegulatedInstallmentRows` του TaxSystem 26.11· οι γραμμές μέσα στο κελί ενώνονται με « - »."""
+    out = []
+    for c in re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S | re.I):
+        parts = [strip_tags(p) for p in re.split(r"<br\s*/?>|</div>|</p>", _COL_TITLE.sub("", c), flags=re.I)]
+        out.append(" - ".join(p for p in parts if p))
+    return out
 
 
 def _panel_cells(fragment: str) -> list[str]:
@@ -107,6 +124,12 @@ def _carrier_page(http, land_url: str, page_no: int, per_page: int = 20) -> dict
     xml = http.follow("POST", post_url, _page_form("amoForm:dt-table", (page_no - 1) * per_page, per_page, "amoForm", vs),
                       AJAX)["text"]
     return {"rows": [r for _, r in _ri_rows(_update(xml))], "vs": vs, "post": post_url, "total": total}
+
+
+def _menu_enabled(menu: str, text: str) -> bool:
+    """Υπάρχει το στοιχείο μενού και ΔΕΝ είναι `ui-state-disabled` (χωρίς `PrimeFaces.ab`, μόνο `return false`)."""
+    return any(strip_tags(a.group(2)) == text and "ui-state-disabled" not in a.group(1)
+               for a in re.finditer(r'<a\b([^>]*role="menuitem"[^>]*)>(.*?)</a>', menu, re.S | re.I))
 
 
 def _click_menu(http, vs: str, post: str, menu: str, text: str) -> str:
@@ -174,7 +197,8 @@ def _instalments(http, vs: str, post: str, source: str) -> list[dict[str, str]]:
 def _carrier(http, vs: str, post: str, row: str) -> dict[str, Any]:
     raw = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S | re.I) + [""] * 5
     c = {"amo": strip_tags(raw[0]), "description": strip_tags(raw[1]), "carrier_am": strip_tags(raw[2]),
-         "company": strip_tags(raw[3]), "debtor_id": "", "branch": "", "totals": {}, "regulated": [], "outstanding": []}
+         "company": strip_tags(raw[3]), "debtor_id": "", "branch": "", "totals": {}, "regulated": [], "outstanding": [],
+         "required": []}
     btn = (re.search(r'<button\b[^>]*id="([^"]*)"', raw[4]) or [None, ""])[1]
     enable = http.follow("POST", post, {"jakarta.faces.partial.ajax": "true", "jakarta.faces.source": btn,
                                         "jakarta.faces.partial.execute": "@all",
@@ -183,7 +207,13 @@ def _carrier(http, vs: str, post: str, row: str) -> dict[str, Any]:
     menu = _update(enable, "MenuForm")
     if not menu:
         raise RuntimeError("MenuForm not found (EnableForea)")
-    panel = _update(_click_menu(http, vs, post, menu, "Κινήσεις Οφειλέτη"), "mainContentPanel")
+    if not _menu_enabled(menu, "Κινήσεις Οφειλέτη"):
+        # ΖΩΝΤΑΝΑ 18/11/2026 (φορέας ΟΑΕΕ μη μισθωτού): Κινήσεις, Πληρωμή/IRIS, Ενεργές Οφειλές, Ταυτότητα Οφειλέτη…
+        # ΑΠΕΝΕΡΓΟΠΟΙΗΜΕΝΑ (`ui-state-disabled`) — ο φορέας δεν έχει τίποτα να δείξει. Πριν: «menu item not found» και
+        # χανόταν ΟΛΗ η λήψη ΚΕΑΟ του πελάτη (το ίδιο κάνει και ο runner keao-debts.js).
+        c["no_access"] = True
+        return c
+    panel =_update(_click_menu(http, vs, post, menu, "Κινήσεις Οφειλέτη"), "mainContentPanel")
 
     def grid(label: str) -> str:
         m = re.search(re.escape(label) + r"</span>\s*</div>\s*<div[^>]*>(.*?)</div>", panel, re.S | re.I)
@@ -217,8 +247,11 @@ def _carrier(http, vs: str, post: str, row: str) -> dict[str, Any]:
                         reg["instalments"] = _instalments(http, vs, post, a.group(1))
                         break
             c["regulated"].append(reg)
+    if not _menu_enabled(menu, "Πληρωμή/IRIS"):
+        return c
     pay = _update(_click_menu(http, vs, post, menu, "Πληρωμή/IRIS"), "mainContentPanel")
-    rc = _row_count(pay, "paymentsForm:currentDebtsTable_s")
+    c["required"] = _required_instalments(http, vs, post, pay)
+    rc =_row_count(pay, "paymentsForm:currentDebtsTable_s")
     for page in range(1, (-(-rc // 10) if rc else 0) + 1):
         xml = http.follow("POST", post, _page_form("paymentsForm:currentDebtsTable", (page - 1) * 10, 10, "paymentsForm",
                                                    vs, {"debtorTransForm:mainTabView_activeIndex": "2"}), AJAX)["text"]
@@ -226,6 +259,51 @@ def _carrier(http, vs: str, post: str, row: str) -> dict[str, Any]:
             t = _tds(r) + [""] * 5
             c["outstanding"].append({"date": t[0], "document": t[1], "primary": t[2], "additional": t[3], "total": t[4]})
     return c
+
+
+def _required_instalments(http, vs: str, post: str, pay: str) -> list[dict[str, Any]]:
+    """«Απαιτητές Δόσεις Ρύθμισης» του «Πληρωμή/IRIS» — νέο στο TaxSystem 26.11
+    (`KeaoRetrieveService.GetDeptorRequiredRegulatedInstallments`, runner keao-debts.js): ό,τι πρέπει να πληρωθεί
+    ΤΩΡΑ για να μη χαθεί η ρύθμιση. Πίνακας `paymentsForm:installmentsTable` (λείπει = καμία)· ανά γραμμή «Ανάλυση
+    Δόσεων» → dialog με τις απλήρωτες δόσεις. Μόνο η πρώτη σελίδα (ούτε το TaxSystem διαβάζει περισσότερες)."""
+    body = re.search(r'id="paymentsForm:installmentsTable_data"[^>]*>(.*?)</tbody>', pay, re.S | re.I)
+    if not body:
+        return []
+    if _row_count(pay, "paymentsForm:installmentsTable_s") > 10:
+        log.warning("ΚΕΑΟ: απαιτητές δόσεις ρύθμισης σε >1 σελίδα — διαβάζεται μόνο η πρώτη")
+    out = []
+    for _, row in _ri_rows(body.group(1)):
+        t = _tds_clean(row)
+        if len(t) < 4:
+            continue
+        line = {"branch": t[0], "resolution": t[1], "type": t[2], "amount": t[3], "instalments": []}
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.S | re.I)
+        for a in re.finditer(r'<a\b[^>]*id="([^"]*)"[^>]*>(.*?)</a>', cells[4] if len(cells) > 4 else "", re.S | re.I):
+            if strip_tags(a.group(2)) == "Ανάλυση Δόσεων":
+                line["instalments"] = _required_analysis(http, vs, post, a.group(1))
+                break
+        out.append(line)
+    return out
+
+
+def _required_analysis(http, vs: str, post: str, source: str) -> list[dict[str, str]]:
+    dlg = _update(http.follow("POST", post, {
+        "jakarta.faces.partial.ajax": "true", "jakarta.faces.source": source, "jakarta.faces.partial.execute": source,
+        "jakarta.faces.partial.render": "paymentsForm:latestUnpaidInstallmentDialog", source: source,
+        "paymentsForm": "paymentsForm", "jakarta.faces.ViewState": vs}, AJAX)["text"],
+        "paymentsForm:latestUnpaidInstallmentDialog")
+    body = re.search(r'id="paymentsForm:dt-latest-unpaid-installment_data"[^>]*>(.*?)</tbody>', dlg, re.S | re.I)
+    out = []
+    for _, r in _ri_rows(body.group(1) if body else ""):
+        c = _tds_clean(r)
+        if len(c) >= 6:
+            out.append({"no": c[0], "due": c[1], "amount": c[2], "paid": c[3], "balance": c[4], "increments": c[5]})
+    return out
+
+
+def required_total(c: dict[str, Any]) -> float:
+    """Σύνολο απαιτητών δόσεων του φορέα. Είναι ΗΔΗ μέσα στην οφειλή των ενεργών ρυθμίσεων — μόνο ένδειξη, δεν προστίθεται."""
+    return round(sum(reports.amount(r.get("amount") or "") for r in c.get("required") or []), 2)
 
 
 def fetch_keao(http, landing: str, only: Optional[list[str]] = None) -> list[dict[str, Any]]:
@@ -320,7 +398,10 @@ def keao_lines(carriers: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "code": c["debtor_id"], "pdf_path": "", "next_due": "", "next_amount": 0.0, "instalments": 0,
                     "unpaid": 0, "details": {"category": category, "amo": c["amo"], "am": c["carrier_am"],
                                              "branch": c["branch"], "company": c["company"], "totals": c["totals"],
-                                             "owed": owed, "outstanding": c["outstanding"], "tag": tag}})
+                                             "owed": owed, "outstanding": c["outstanding"], "tag": tag,
+                                             "required": c.get("required") or [],
+                                             "required_total": required_total(c),
+                                             "no_access": bool(c.get("no_access"))}})
         for n, r in enumerate(c["regulated"]):
             active = is_active(r["status"])
             owed_r, increments, pending = regulation_owed(r) if active else (reports.amount(r["total"]), 0.0, [])
@@ -458,54 +539,199 @@ def month_key(text: str) -> str:
     return f"{n.group(2)}-{int(n.group(1)):02d}" if n else ""
 
 
+def _tables(fragment: str) -> list[dict[str, Any]]:
+    """Οι πίνακες ενός tab, ο καθένας με τις δικές του επικεφαλίδες (το «Τρέχουσες Οφειλές» έχει ΔΥΟ με άλλες στήλες —
+    ενωμένοι έδιναν λάθος στήλες, Tax Center 28/10/2026). Γραμμή = κελιά κειμένου + ωμά κελιά (για τα κουμπιά)."""
+    out = []
+    for t in re.finditer(r"<table\b.*?</table>", fragment or "", re.S | re.I):
+        body_id = (re.search(r'<tbody\b[^>]*id="([^"]*)"', t.group(0)) or [None, ""])[1]
+        if "popup" in body_id.lower():
+            continue
+        headers = [h for h in (strip_tags(x) for x in re.findall(r"<th\b[^>]*>(.*?)</th>", t.group(0), re.S | re.I)) if h]
+        rows = []
+        for tr in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", t.group(0), re.S | re.I):
+            raw = re.findall(r"<td\b[^>]*>(.*?)</td>", tr.group(1), re.S | re.I)
+            text = [_cell(c) for c in raw]
+            if any(text):
+                rows.append({"text": text, "raw": raw})
+        out.append({"headers": headers, "rows": rows})
+    return out
+
+
+def _col(headers: list[str], word: str, fallback: int) -> int:
+    return next((i for i, h in enumerate(headers) if word.lower() in h.lower()), fallback)
+
+
+_RF = re.compile(r"^RF\d{12,27}$", re.I)
+_DATE = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
+
+
+def _contributions(tables: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """«Ασφαλιστικές Εισφορές» → μήνας → {ποσό που μένει, εξοφλήθηκε, φορέας}. Δύο πίνακες (ΖΩΝΤΑΝΑ 18/11/2026):
+    e-ΕΦΚΑ από το 2020 (ημ/νία αναφοράς, φορέας, ιδιότητα, μηνιαία εισφορά, ποσό απαίτησης, εξοφλημένο ποσό, ημ/νία
+    απαίτησης, ημ/νία εξόφλησης, παρατηρήσεις, «Εξόφληση» Ναι/Όχι, εκκαθάριση) και ο παλιός ΕΦΚΑ/ΕΤΕΑΕΠ (εισφορά,
+    «Εξόφληση» Ναι/Όχι). Κρίνεται η στήλη «Εξόφληση» — ΟΧΙ η ημ/νία εξόφλησης όπως στον runner: μερική πληρωμή (8,02 από
+    338,39) έχει ημερομηνία αλλά «Όχι», και μένει ποσό απαίτησης − εξοφλημένο. Ίδιος μήνας και στους δύο → ο e-ΕΦΚΑ."""
+    out: dict[str, dict[str, Any]] = {}
+    for t in tables:
+        h = t["headers"]
+        pay = next((i for i, x in enumerate(h) if x.strip().startswith("Εξόφληση")), -1)
+        claim, settled, contr = _col(h, "Ποσό Απαίτησης", -1), _col(h, "Εξοφλημένο", -1), _col(h, "Εισφορά", -1)
+        for r in t["rows"]:
+            c = r["text"] + [""] * 12
+            mk = month_key(c[0])
+            if not mk:
+                continue
+            if pay >= 0:
+                paid = c[pay].strip().startswith("Ναι")
+                new = claim >= 0
+                left = reports.amount(c[claim]) - reports.amount(c[settled]) if new and settled >= 0 else \
+                    reports.amount(c[claim if new else contr] if (claim if new else contr) >= 0 else "")
+            elif len(r["text"]) >= 8:                     # διάταξη του runner (χωρίς επικεφαλίδες)
+                paid, new, left = bool(_DATE.search(c[7])), True, reports.amount(c[3])
+            elif len(r["text"]) >= 5:
+                paid, new, left = bool(_DATE.search(c[4])), False, reports.amount(c[2])
+            else:
+                continue
+            if mk not in out or new:
+                out[mk] = {"left": round(max(left, 0.0), 2), "paid": paid, "foreas": c[1]}
+    return out
+
+
+def _certified_months(tables: list[dict[str, Any]]) -> set[str]:
+    """«Βεβαιωμένες Οφειλές Μη Μισθωτού στο ΚΕΑΟ»: μόνο γραμμές ΜΕ αριθμό πράξης βεβαίωσης (1η στήλη, αριθμός)· ο
+    πίνακας έχει και γραμμές χωρίς πράξη (προσαυξήσεις/εκκρεμείς) που ΔΕΝ βγάζουν τον μήνα από τον ΕΦΚΑ (TaxSystem)."""
+    out = set()
+    for t in tables:
+        ref = _col(t["headers"], "Αναφοράς", -1)
+        for r in t["rows"]:
+            c = r["text"]
+            if not c or not re.fullmatch(r"\d{4,}", c[0].strip()):
+                continue
+            if 0 <= ref < len(c) and month_key(c[ref]):
+                out.add(month_key(c[ref]))
+                continue
+            dates = [x for x in c if re.fullmatch(r"\d{2}/\d{2}/\d{4}", x)]
+            if dates:                                  # 1η = ημ. έκδοσης, 2η = ημ. αναφοράς οφειλής
+                out.add(month_key(dates[1] if len(dates) > 1 else dates[0]))
+    return out
+
+
+def _notices(tables: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """«Μηνιαία Ειδοποιητήρια» → μήνας → [{ποσό, προθεσμία, ΤΕΚΑ;, κουμπί εκτύπωσης}] (εκδομένα ειδοποιητήρια)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for t in tables:
+        due_col = next((i for i, h in enumerate(t["headers"]) if re.search(r"Εμπρόθεσμ|Προθεσμ|Λήξ", h)), -1)
+        for r in t["rows"]:
+            c = r["text"]
+            mk = next((month_key(x) for x in c if month_key(x)), "")
+            if not mk:
+                continue
+            due = c[due_col] if 0 <= due_col < len(c) else ""
+            out.setdefault(mk, []).append({
+                "amount": next((x for x in c if re.search(r"\d,\d{2}\s*€?$", x)), ""),
+                "due": (_DATE.search(due) or [""])[0] if due else "",
+                "teka": any(re.search(r"ΤΕΚΑ|TEKA|ΕΤΕΑΕΠ", x) for x in c),
+                "btn": next((m.group(1) for x in r["raw"] for m in [re.search(r'<button\b[^>]*id="([^"]*)"', x)] if m), "")})
+    return out
+
+
+def owed_months(contrib: dict[str, dict[str, Any]], issued: dict[str, Any], certified: set[str]) -> list[str]:
+    """Απλήρωτοι μήνες που είναι ακόμη στον ΕΦΚΑ (TaxSystem 26.11 «Ανάλυση Οφειλών Ε.Φ.Κ.Α.», ζωντανά επαληθευμένο στο
+    runner): «Εξόφληση» = Όχι ΚΑΙ εκδόθηκε ειδοποιητήριο ΚΑΙ ΔΕΝ βεβαιώθηκε στο ΚΕΑΟ — νεότερος πρώτος. Και (κανόνας
+    του Tax Center `owedMonths`) ΝΕΟΤΕΡΟΣ από τον τελευταίο βεβαιωμένο: οι «Βεβαιωμένες» έχουν 10 γραμμές ανά σελίδα,
+    οπότε παλιότεροι απλήρωτοι μήνες φαίνονταν «εκτός ΚΕΑΟ» ενώ ήταν σε επόμενη σελίδα (ζωντανά: 1, 2, 4/2026 με
+    τελευταίο βεβαιωμένο τον 8/2026)· το ΚΕΑΟ βεβαιώνει με τη σειρά."""
+    latest = max(certified, default="")
+    return sorted((m for m, v in contrib.items()
+                   if not v["paid"] and m in issued and m not in certified and m > latest), reverse=True)
+
+
 def efka_current(http, links: dict[str, str], afm: str, folder: Optional[Path] = None) -> dict[str, Any]:
-    """«Τρέχουσες Οφειλές» (είδος, μήνας, πληρωτέο, εμπρόθεσμη πληρωμή, RF) + PDF του πιο πρόσφατου ειδοποιητηρίου."""
+    """Τρέχουσες οφειλές e-ΕΦΚΑ μη μισθωτού: ο τρέχων μήνας («Τρέχουσες Οφειλές»: είδος, μήνας, πληρωτέο, εμπρόθεσμη
+    πληρωμή, RF) ΚΑΙ οι απλήρωτοι προηγούμενοι μήνες που δεν πέρασαν ακόμη στο ΚΕΑΟ (`owed_months` — νέα καρτέλα του
+    TaxSystem 26.11 / runner efka-current-debts.js). Ταυτότητα οφειλής των απλήρωτων = το τρέχον RF (κοινό για όλους,
+    μία πληρωμή — επαληθεύτηκε στο runner). Με `folder`: PDF του τελευταίου ειδοποιητηρίου και κάθε απλήρωτου μήνα."""
     label = next((k for k in links if re.sub(r"\s+", " ", k).strip().endswith("Υποχρεώσεις Ασφάλισης")), "")
     url = links.get(label) or urljoin(SVC, OBLIGATIONS_PATH)
     lines: list[dict[str, Any]] = []
+    current_rf = ""
     cur = _open_tab(http, url, "Τρέχουσες Οφειλές")
     if cur:
-        headers = [strip_tags(h) for h in re.findall(r"<th\b[^>]*>(.*?)</th>", cur["html"], re.S | re.I)]
-        headers = [h for h in headers if h]
-
-        def col(word: str, fallback: int) -> int:
-            return next((i for i, h in enumerate(headers) if word.lower() in h.lower()), fallback)
-        k, mo, am, du, co = col("Είδος", 0), col("Αναφοράς", 1), col("Πληρωτέο", 2), col("Εμπρόθεσμη", 3), col("Κωδικός", 4)
-        for i, cells in enumerate(_dt_rows(cur["html"])):
-            t = [_cell(c) for c in cells] + [""] * 6
+        tables = _tables(cur["html"])
+        for t in tables:
+            for r in t["rows"]:
+                for x in r["text"]:
+                    if not current_rf and _RF.match(x.replace(" ", "")):
+                        current_rf = x.replace(" ", "").upper()
+        detail = next((t for t in tables if any("Είδος" in h for h in t["headers"])), None)
+        if detail is None:                                  # άγνωστη διάταξη: όπως πριν, όλες οι γραμμές μαζί
+            headers = [h for h in (strip_tags(x) for x in re.findall(r"<th\b[^>]*>(.*?)</th>", cur["html"], re.S | re.I))
+                       if h]
+            detail = {"headers": headers, "rows": [{"text": [_cell(c) for c in cells], "raw": cells}
+                                                   for cells in _dt_rows(cur["html"])]}
+        h = detail["headers"]
+        k, mo, am = _col(h, "Είδος", 0), _col(h, "Αναφοράς", 1), _col(h, "Πληρωτέο", 2)
+        du, co = _col(h, "Εμπρόθεσμη", 3), _col(h, "Κωδικός", 4)
+        for i, r in enumerate(detail["rows"]):
+            t = r["text"] + [""] * 6
             total = reports.amount(t[am])
             code = t[co].replace(" ", "") if t[co].replace(" ", "").upper().startswith("RF") else ""
             if not total and not code:
                 continue
-            due = (re.search(r"\d{1,2}/\d{1,2}/\d{4}", t[du]) or [None])[0] or ""
-            lines.append({"kind": "efka", "ref": f"efka|{month_key(t[mo]) or i}|{i}", "title": t[k] or "Εισφορά e-ΕΦΚΑ",
-                          "overdue": 0.0, "non_overdue": total, "total": total, "code": code, "pdf_path": "",
-                          "next_due": due, "next_amount": total, "instalments": 0, "unpaid": 1 if due else 0,
-                          "details": {"month": t[mo], "due": due}})
+            due = (_DATE.search(t[du]) or [""])[0]
+            mk = month_key(t[mo])
+            late = _is_due(due)                             # η προθεσμία πέρασε και η πύλη τον δείχνει ακόμη απλήρωτο
+            lines.append({"kind": "efka", "ref": f"efka|{mk or i}|{i}", "title": t[k] or "Εισφορά e-ΕΦΚΑ",
+                          "overdue": total if late else 0.0, "non_overdue": 0.0 if late else total, "total": total,
+                          "code": code or current_rf,
+                          "pdf_path": "", "next_due": due, "next_amount": total, "instalments": 0,
+                          "unpaid": 1 if due else 0, "details": {"month": t[mo], "due": due, "mk": mk}})
+    # Απλήρωτοι προηγούμενοι μήνες — μόνο αν η πύλη δίνει και τα τρία tabs (αλλιώς δεν ξέρουμε: τίποτα, όπως πριν).
+    # Τα «Μηνιαία Ειδοποιητήρια» ανοίγουν τελευταία: η εκτύπωση PDF πάει με το ViewState εκείνου του tab.
+    contrib_tab = _open_tab(http, url, "Ασφαλιστικές Εισφορές")
+    cert_tab = _open_tab(http, url, "Βεβαιωμένες Οφειλές Μη Μισθωτού στο ΚΕΑΟ")
+    mon = _open_tab(http, url, "Μηνιαία Ειδοποιητήρια")
+    issued = _notices(_tables(mon["html"])) if mon else {}
+    owed: list[str] = []
+    if contrib_tab and mon and cert_tab:
+        contrib = _contributions(_tables(contrib_tab["html"]))
+        owed = owed_months(contrib, issued, _certified_months(_tables(cert_tab["html"])))
+        have = {ln["details"]["mk"] for ln in lines}
+        for mk in owed:
+            if mk in have:
+                continue
+            notice = (issued.get(mk) or [{}])[0]
+            v = contrib[mk]
+            teka = bool(re.search(r"ΤΕΚΑ|ΕΤΕΑΕΠ", v["foreas"])) and "ΕΦΚΑ" not in v["foreas"]
+            total = v["left"] or reports.amount(notice.get("amount") or "")
+            month = f"{int(mk[5:])}/{mk[:4]}"
+            due = notice.get("due") or ""
+            late = not due or _is_due(due)
+            lines.append({"kind": "efka", "ref": f"efka|{mk}|unpaid",
+                          "title": f"Μηνιαία Εισφορά {'ΤΕΚΑ' if teka else 'e-ΕΦΚΑ'} {month}",
+                          "overdue": total if late else 0.0, "non_overdue": 0.0 if late else total, "total": total,
+                          "code": current_rf, "pdf_path": "", "next_due": due, "next_amount": total, "instalments": 0,
+                          "unpaid": 1, "details": {"month": month, "due": due, "mk": mk, "unpaid_month": True,
+                                                   "foreas": v["foreas"]}})
     pdfs: list[str] = []
-    if folder is not None:
-        mon = _open_tab(http, url, "Μηνιαία Ειδοποιητήρια")
-        if mon:
-            printable = []
-            for cells in _dt_rows(mon["html"]):
-                text = [_cell(c) for c in cells]
-                btn = next((m.group(1) for c in cells for m in [re.search(r'<button\b[^>]*id="([^"]*)"', c)] if m), "")
-                month = next((month_key(x) for x in text if month_key(x)), "")
-                if btn and month:
-                    printable.append((month, btn, text))
-            if printable:
-                latest = max(p[0] for p in printable)
-                for n, (month, btn, text) in enumerate(p for p in printable if p[0] == latest):
-                    kind = "TEKA" if any(re.search(r"ΤΕΚΑ|TEKA", x) for x in text) else "EFKA"
-                    res = http.follow("POST", url, {mon["form"]: mon["form"], btn: btn,
+    if folder is not None and mon:
+        printable = {mk for mk, rows in issued.items() if any(r["btn"] for r in rows)}
+        if printable:
+            latest = max(printable)
+            for mk in sorted({latest, *(m for m in owed if m in printable)}, reverse=True):
+                for n, row in enumerate(r for r in issued[mk] if r["btn"]):
+                    res = http.follow("POST", url, {mon["form"]: mon["form"], row["btn"]: row["btn"],
                                                     mon["view"] + "_activeIndex": mon["tab"]["index"],
                                                     "jakarta.faces.ViewState": mon["vs"]})
-                    if res.get("is_pdf"):
-                        folder.mkdir(parents=True, exist_ok=True)
-                        path = folder / f"EFKA_{kind}_{afm}_{latest}{'' if n == 0 else f'_{n + 1}'}.pdf"
-                        path.write_bytes(res["content"])
-                        pdfs.append(str(path))
-                for line in lines:
-                    if line["ref"].split("|")[1] == latest and pdfs:
-                        line["pdf_path"] = pdfs[0]
-    return {"lines": lines, "pdfs": pdfs}
+                    if not res.get("is_pdf"):
+                        continue
+                    folder.mkdir(parents=True, exist_ok=True)
+                    kind = "TEKA" if row["teka"] else "EFKA"
+                    path = folder / f"EFKA_{kind}_{afm}_{mk}{'' if n == 0 else f'_{n + 1}'}.pdf"
+                    path.write_bytes(res["content"])
+                    pdfs.append(str(path))
+                    for line in lines:
+                        if line["details"].get("mk") == mk and not line["pdf_path"]:
+                            line["pdf_path"] = str(path)
+    return {"lines": lines, "pdfs": pdfs, "owed_months": owed, "current_rf": current_rf}

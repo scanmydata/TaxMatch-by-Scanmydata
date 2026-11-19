@@ -177,7 +177,7 @@ def _debt_parts(d: dict[str, Any]) -> list[str]:
         if a.get("pay_by"):
             parts.append(f"Πληρωμή έως: {a['pay_by']}")
     else:
-        if d["overdue"]:
+        if d["overdue"] and d["kind"] != "efka":            # ΕΦΚΑ: «Πληρωτέο» + προθεσμία λένε ήδη το ίδιο
             parts.append(f"Ληξιπρόθεσμο: {office.money(d['overdue'])}")
         if d["non_overdue"] and d["kind"] not in ("efka",):
             parts.append(f"{'Σε ρύθμιση' if d['kind'] == 'carrier' else 'Εμπρόθεσμο'}: {office.money(d['non_overdue'])}")
@@ -186,7 +186,10 @@ def _debt_parts(d: dict[str, Any]) -> list[str]:
         if d.get("next_due"):
             late = _is_late(d["next_due"])
             amount = f" · {office.money(d['next_amount'])}" if d.get("next_amount") else ""
-            label = "Εμπρόθεσμη πληρωμή έως" if d["kind"] == "efka" else ("Δόση που έληξε" if late else "Επόμενη δόση")
+            if d["kind"] == "efka":
+                label = "Προθεσμία ειδοποιητηρίου (έληξε)" if late else "Εμπρόθεσμη πληρωμή έως"
+            else:
+                label = "Δόση που έληξε" if late else "Επόμενη δόση"
             parts.append(f"{label}: {d['next_due']}{amount}"
                          + (f" ({d['unpaid']} από {d['instalments']} δόσεις απλήρωτες)" if d.get("instalments") else ""))
     if d["code"]:
@@ -211,7 +214,7 @@ def compose_debts(conn: sqlite3.Connection, afm: str) -> Optional[Message]:
     if not rows:
         return None
     groups = (("aade", "ΑΑΔΕ"), ("keao", "ΚΕΑΟ (ανά φορέα — κάθε φορέας με τη δική του Ταυτότητα Οφειλέτη)"),
-              ("efka", "e-ΕΦΚΑ — τρέχουσες εισφορές"))
+              ("efka", "e-ΕΦΚΑ — τρέχουσες οφειλές (απλήρωτες εισφορές που δεν έχουν περάσει ακόμη στο ΚΕΑΟ)"))
     blocks_t, blocks_h, files = [], [], []
     for source, heading in groups:
         mine = [d for d in rows if d.get("source", "aade") == source]
